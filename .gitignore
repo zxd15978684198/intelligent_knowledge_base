@@ -15,3 +15,29 @@ references/**
 
 # 对标源码切片（只读参考，不入库；不忽略的话 ruff 全仓扫描会报 47 个历史错误）
 .tmp_ref/
+
+# 本地环境变量：core/settings.py 里 SettingsConfigDict(env_prefix="PYKNORA_", env_file=".env")，
+# 该文件含库密码与 JWT secret，绝不入库；只放行示例文件。
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# 测试与静态检查缓存（pytest/ruff 会自建 .gitignore，这里兜底防 --no-ignore 场景）
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# VS Code（.idea/ 已在上方单独列出；若要共享 settings.json、launch.json，用 ! 规则放行）
+.vscode/
+
+# 操作系统杂项
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 本地日志
+*.log
