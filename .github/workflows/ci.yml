@@ -1,0 +1,168 @@
+# PyKnora CI —— GitHub Actions
+#
+# 设计取舍（与本地门禁 `scripts/ci.py` 对齐，但不照搬）：
+#   1. lint / unit 两个 job 并行，先给最快反馈；integration 依赖 unit 通过后才起 PG，
+#      否则白烧 3 分钟装库；
+#   2. integration 用 service container 起 pgvector，**真跑 SQL 与外键断言**——
+#      这是本地 pre-commit 故意不跑的部分（见 AGENTS.md §6.1）；
+#   3. security 独立 job：pip-audit 要联网、结果随 OSV 变化，不该卡提交，
+#      也不该让它的网络抖动把 PR 判红——
+#   4. 不跑 pre-commit 钩子套件（prek 会 stash 未暂存改动，在 CI 里没有意义）。
+#
+# 与本地门禁的对应关系：
+#   本地 `uv run python scripts/ci.py --stage all`      ≈ lint + unit
+#   本地 `uv run python scripts/ci.py --stage security` ≈ security
+#   本地 `uv run pytest -q tests/integration tests/api` ≈ integration（需真 PG）
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # 全仓扫描是安全的：`.tmp_ref/`（对标源码切片）已在 .gitignore 里，
+      # ruff 默认 respect-gitignore，不会扫到那 47 个历史错误。
+      - name: ruff check
+        run: uv run ruff check --output-format=github .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+  unit:
+    name: Unit tests (no database)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # 27 个用例，不需要数据库；覆盖率门槛暂不设（见 AGENTS.md §6）。
+      - name: pytest
+        run: uv run pytest -q tests/unit
+
+  integration:
+    name: Integration tests (pgvector)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: unit
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: pyknora
+        # 宿主 5433：与 settings.py 的默认 database_url 一致，
+        # 所以 conftest 不用改一行（不存在 --psql-url 参数）。
+        ports:
+          - "5433:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres -d pyknora"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # 测试从 settings 读，前缀 PYKNORA_；显式写出来，避免依赖默认值。
+      PYKNORA_DATABASE_URL: postgresql+asyncpg://postgres:dev@127.0.0.1:5433/pyknora
+      # psql 走同一个库，但用原生的 postgresql:// scheme（asyncpg 驱动不认）。
+      PYKNORA_PSQL_URL: postgresql://postgres:dev@127.0.0.1:5433/pyknora
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # migrations/*.sql 是 psql 脚本（`\set` 与 `:dim`），不是纯 SQL：
+      # 必须用 psql 客户端 + `-v dim=512` 喂，不能用 asyncpg 直接执行。
+      # ubuntu-latest 自带 psql，不额外装。
+      - name: Apply schema
+        run: |
+          psql "$PYKNORA_PSQL_URL" -v dim=512 -v ON_ERROR_STOP=1 -f migrations/0001_init.sql
+
+      # 防"文档说有关联、库里没有"：复合外键必须真的在。
+      - name: Assert composite foreign keys
+        run: |
+          count=$(psql "$PYKNORA_PSQL_URL" -tAc "SELECT count(*) FROM pg_constraint WHERE contype = 'f'")
+          echo "foreign keys in schema: $count"
+          if [ "$count" -ne 7 ]; then
+            echo "::error::期望 7 条外键（见 docs/plans/全员模块实现路径.md §4.3），实际 $count 条"
+            psql "$PYKNORA_PSQL_URL" -c "\d documents"
+            exit 1
+          fi
+
+      # tests/api 与 tests/integration 都连真库：前者 34 个 HTTP 层用例，后者 24 个。
+      # tests/contract 尚未建（空目录），等 C1–C3 落地后加进来。
+      - name: pytest (integration + api)
+        run: uv run pytest -q tests/integration tests/api
+
+  security:
+    name: Security audit (pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # pip-audit 不在项目依赖里，必须用 --with 临时装；
+      # 审计的是 uv 解析出来的环境（等价于 uv.lock 的锁定集），不是当前 pip 缓存。
+      - name: pip-audit
+        run: uv run --with pip-audit pip-audit --progress-spinner off
+
+      # 硬编码密钥：报告式（有命中也 exit 0），失败与否由人看输出判断。
+      # 要变成门禁，得先提交 .secrets.baseline 再上 detect-secrets-hook——团队策略，别偷偷加。
+      - name: detect-secrets (report only)
+        run: |
+          uv run --with detect-secrets detect-secrets scan --no-verify \
+            src scripts migrations tests > /tmp/secrets.json
+          uv run python -c "import json,sys; r=json.load(open('/tmp/secrets.json'))['results']; n=sum(len(v) for v in r.values()); print(f'detect-secrets hits: {n}'); [print(f'  {p}:{i.get(\"line_number\")} {i.get(\"type\")}') for p,v in r.items() for i in v]; sys.exit(0)"

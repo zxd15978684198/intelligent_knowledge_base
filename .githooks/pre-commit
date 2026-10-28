@@ -1,0 +1,52 @@
+#!/bin/sh
+# PyKnora 本地门禁 · git pre-commit
+#
+# 机制：git 在 `git commit` 前执行本脚本，未通过则中止提交。
+# 门禁本体只有一处定义 —— scripts/ci.py；本文件只负责"什么时候跑它"，
+# 不重复写命令，改门禁请改 scripts/ci.py。
+#
+# 为什么不用 prek / pre-commit 的 hook 管理器：
+# 它们会先把"未暂存改动" stash 起来再跑，于是 pyproject.toml 被还原成 HEAD 版本
+# （deps=[]、没有 [tool.ruff] 表），门禁就跑在一份不存在的项目元数据上，结果是
+# 假失败（ruff 用默认规则报一堆无关错误）或假通过。这里直接对工作树跑。
+#
+# 激活（克隆后执行一次）：git config core.hooksPath .githooks
+# 手动跑：uv run python scripts/ci.py --stage all
+# 跳过：git commit --no-verify（仅限文档/紧急提交，且要在提交说明写明原因）
+
+set -u
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "pre-commit: 不在 git 仓库里，跳过" >&2
+    exit 0
+}
+cd "$repo_root" || exit 1
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "pre-commit: 找不到 uv，门禁无法执行。" >&2
+    echo "           安装 uv（https://docs.astral.sh/uv/）后重试；" >&2
+    echo "           或用 git commit --no-verify 跳过并在提交说明写明原因。" >&2
+    exit 1
+fi
+
+echo "==> PyKnora 本地门禁：scripts/ci.py --stage all"
+if uv run python scripts/ci.py --stage all; then
+    echo "==> 门禁通过"
+    exit 0
+fi
+
+cat >&2 <<'EOF'
+
+==> 门禁未通过，提交已阻止。
+
+怎么修：
+  uv run ruff check src tests scripts        # 静态问题（不改文件）
+  uv run ruff format src tests scripts       # 格式问题（会改文件，改完 git add）
+  uv run pytest -q tests/unit                # 单元测试，不需要数据库
+
+注意：ruff 只查 src tests scripts —— 全仓 `ruff check .` 会把未入库的对标源码
+.tmp_ref/ 一起扫进来，报 47 个与本次提交无关的历史错误。
+
+确需跳过（仅限文档/紧急）：git commit --no-verify，并在提交说明里写明原因。
+EOF
+exit 1
