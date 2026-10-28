@@ -1,8 +1,17 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-27（Asia/Shanghai）。当前为 **Phase 0 / P0-T01 契约闭合文档已完成，其余31任务及全部九项 PoC 为 NOT_STARTED**。本轮只分析/评审/规划与静态文档检查，不实现代码、不安装或修改依赖、不启动容器/PoC、不改参考源码，不代表 ADR 已接受或 Phase 0 工程验证完成。
+更新日期：2026-10-28（Asia/Shanghai）。**2026-10-28 追加：数据契约外键落地，见下方「当前轮」**；其后的 Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
 
-## 当前轮：P0-T01 契约闭合（仅文档）
+## 当前轮：数据契约补外键（2026-10-28，lead）
+
+- 触发：用户问"`docs/plans/全员模块实现路径.md` 里有些字段没有关联，是错的吗"。结论：该建的就那几处、实建 7 条；其余"不建"是刻意的，写清理由比补全更重要。
+- 事实（改动前）：`migrations/0001_init.sql` 的 9 张表每张都建了 `UNIQUE (workspace_id, <主键>)`，但整份文件 `REFERENCES` 为 **0**——复合唯一键的唯一用途（给复合 FK 当引用目标）从未兑现；`knowledge_bases` 表不在 0001（属成员1 的 0002），所以跨模块那条 FK 当时无处可加。
+- 改动文件：`migrations/0001_init.sql`（+7 条复合 FK、顶部外键策略三条、`documents.kb_id` 处留指向 0002 的注释）、`docs/plans/全员模块实现路径.md`（§4.3 标"提议 v2"、四表补 `REFERENCES`、新增"引用列判定表"建/不建两张 + 复核 SQL）、`docs/tdd/07_Data_API_Security.md`（§3 通则下加"落地状态"与两处与原文不同之处）、`docs/plans/成员任务进度表.md`（§9 v0.4，记录成员1 任务1 需在 0002 后 `ALTER TABLE` 补 FK）、`tests/integration/test_schema_constraints.py`（新增 3 条 DDL 级断言）。
+- 已执行（真实输出）：临时容器 `pyknora-fkcheck`（pgvector/pgvector:pg16，宿主 5434）→ `psql -v dim=512 -f migrations/0001_init.sql` 退出 0；`SELECT conname FROM pg_constraint WHERE contype='f'` 得 7 行且定义含 `ON DELETE RESTRICT`；两条负数用例被库拒绝（孤儿 chunk、跨区 version，均 `violates foreign key constraint`，psql 退出 3）；`PYKNORA_DATABASE_URL=…:5434/pyknora_fk uv run pytest -q` → 88 passed；`uv run ruff check src tests scripts` → All checks passed；`ruff format --check` → 58 files already formatted；`git hook run pre-commit` → 三阶段 PASS，总 2.4s。
+- 未验证 / 未做：① 本机 5433 的 `pyknora-pg` 仍是**旧 schema（无 FK）**，新断言在其上 3 skipped，需重建容器并重跑 `scripts/migrate.py` 才生效；② 未改 4 份 xlsx（进度表声明以 xlsx 为准，本次只改汇总视图与其 §9 记录）；③ `knowledge_bases` 的复合 FK 仍待成员1 的 0002，本轮只写约定；④ 五份 ADR 状态未动，§4.3 仍标"提议（v2）"待全员评审；⑤ 未 `git add`、未提交。
+- 下一步：用户确认后重建 5433 容器；成员1 建 0002 时按 §4.3 判定表补 `doc_kb_fk`。
+
+## 历史轮：P0-T01 契约闭合（仅文档，2026-10-27）
 
 - 起始分支 `master`，HEAD `5e7e3998ff553edb7a75123f4bea8539b9453f6a`，`git status --short` 为空；没有既有未提交改动。原 PRD Wiki P1 调整已在当前基线，保留其内容。
 - 已读取 AGENTS、PRD、实施状态、Phase 0 评审/风险/计划/Backlog/DAG/验收/指南、相关八份 TDD 与全部五份 ADR；未重新审计参考源码或核实远端最新协议。
