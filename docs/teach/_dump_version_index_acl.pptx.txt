@@ -1,0 +1,261 @@
+
+===== SLIDE 1 =====
+[TEXT_BOX (17)] 八维大学生短训 · AI 大模型课程 · WEEK 18 DAY 2
+[TEXT_BOX (17)] 企业智能知识库
+版本记录 · 增量索引 · 权限隔离
+[TEXT_BOX (17)] 从 Demo 到生产：为什么不能"上传文件 → 全量向量化 → 完事"，以及
+如何用 file_hash、软删除、JWT 可信身份守住 RAG 的数据边界。
+[TEXT_BOX (17)] 前置：Chroma / pgvector · LangGraph · SQLAlchemy · JWT · RBAC
+--NOTES-- 开场：今天我们把 Day1 搭起来的 RAG 检索链路，往生产环境推一步。
+学生做 Demo 时只要上传文件、切分、向量化就能跑；但企业环境里文档会更新、会删除、部门之间互相不能看。
+今天三件事：版本与来源、增量索引与迁移、可信身份与权限。
+
+===== SLIDE 2 =====
+[TEXT_BOX (17)] AGENDA · 今日核心结论
+[TEXT_BOX (17)] 今天要带走的 5 条判断
+[TEXT_BOX (17)] 01
+[TEXT_BOX (17)] 元数据不能只放在向量库里——业务 PostgreSQL 必须保存 document / chunk 镜像，否则向量库损坏就丢了溯源和权限。
+[TEXT_BOX (17)] 02
+[TEXT_BOX (17)] 用 file_hash 检测变更，同名文件 hash 一致直接跳过；不一致才版本 +1、归档旧向量。
+[TEXT_BOX (17)] 03
+[TEXT_BOX (17)] 增量索引，不要全量重建——新增 / 修改 / 删除三条分支；大文件走异步任务，不要堵 HTTP。
+[TEXT_BOX (17)] 04
+[TEXT_BOX (17)] 换 Embedding / 换分块策略要做索引迁移，双写不停机；只迁向量不迁元数据等于白做。
+[TEXT_BOX (17)] 05
+[TEXT_BOX (17)] 身份从 JWT 解析，权限过滤下推到向量检索阶段——不信任前端 user_id，不要召回后再过滤。
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 02
+--NOTES-- 这页是今天的路线图。每条结论后面都会对应一个具体机制和一段代码。
+重点强调第 5 条：权限不是业务层 if-else，是要下推到向量查询的 filter 里。
+
+===== SLIDE 3 =====
+[TEXT_BOX (17)] 01 · 业务背景
+[TEXT_BOX (17)] Demo 能跑 ≠ 企业能用：5 个立刻会踩的坑
+[TEXT_BOX (17)] 学生 Demo 的做法
+[TEXT_BOX (17)] 上传文件 → 切分 → Embedding → 入向量库
+同名文件直接覆盖，不保留历史
+删除文档只是前端隐藏，向量还在
+所有用户共享同一个知识库
+元数据只存文件名，不存版本 / 上传人
+每次文档更新，全库重新向量化
+[TEXT_BOX (17)] 企业环境的真实诉求
+[TEXT_BOX (17)] 制度 v1 → v2 发布，旧答案不能再被召回
+作废文档 / 离职资料要彻底下线但保留审计
+销售不能读研发内部文档，实习生不能读高管文档
+回答出错要能溯源：来自哪个文件、哪一版、谁传的
+换 Embedding 模型 / 换分块策略要能平滑迁移
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 03
+--NOTES-- 先让学生意识到：Demo 的每一个"省事"，在企业都会变成事故。
+举一个真实例子：员工手册里把"年假 5 天"改成"10 天"，如果 v1 向量没删，RAG 会混合回答，HR 被投诉。
+
+===== SLIDE 4 =====
+[TEXT_BOX (17)] 02 · 数据模型
+[TEXT_BOX (17)] 三张核心表：向量库之外必须有业务镜像
+[TEXT_BOX (17)] knowledge_base
+字段 | 说明
+kb_id | 知识库唯一 ID
+name | 员工手册 / 研发规范
+owner_user_id | 创建者
+is_public | 是否公开
+[TEXT_BOX (17)] document
+字段 | 说明
+doc_id | UUID，全局唯一
+file_hash | SHA256，变更检测
+version | v1 / v2 / v3
+status | active / archived / deleted
+[TEXT_BOX (17)] document_chunk
+字段 | 说明
+chunk_id | 分片唯一 ID
+doc_id | 归属文档
+vector_id | pgvector 行 ID
+meta_json | 页码 / 权限标签
+[TEXT_BOX (17)] 三条铁律
+[TEXT_BOX (17)] 1. pgvector 只存向量；document / chunk 的业务字段必须落在 PostgreSQL，向量库损坏也能重建。
+2. 删除用软删除 status=deleted，业务记录留着审计；向量库那边硬删。
+3. chunk 表里冗余 kb_id，检索时一条 WHERE 就能完成权限过滤，不用多表 JOIN。
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 04
+--NOTES-- 强调一个反直觉点：不要把元数据塞进向量库就完事。
+Chroma / Milvus 的元数据能力弱、查询慢、还经常丢字段。业务真相放在 PostgreSQL，向量库只是一个"向量索引"。
+
+===== SLIDE 5 =====
+[TEXT_BOX (17)] 03 · 来源记录与版本管理
+[TEXT_BOX (17)] file_hash：让系统知道"这份文件到底改没改"
+[TEXT_BOX (17)] 上传时的判断分支
+[TEXT_BOX (17)] Step 1 对文件二进制做 SHA-256，得到 file_hash。
+Step 2 查 document 表：同 kb_id + 同 file_name + status=active 的旧记录。
+分支 A 没有旧记录 → 新建 version=1。
+分支 B 旧 file_hash 与新 hash 一致 → 文件没变，直接返回，不切分、不调 Embedding。
+分支 C hash 不一致 → 旧文档归档，版本 +1，新文档切分入库，旧向量批量删除。
+[TEXT_BOX (17)] # 上传入口伪代码
+new_hash = sha256(file_bytes)
+old = db.query(Document).filter_by(
+kb_id=kb_id, file_name=name,
+status="active").first()
+
+# 分支 B：文件没变
+if old and old.file_hash == new_hash:
+return skip_index(old.doc_id)
+
+# 分支 C：内容变更
+if old:
+archive_old_document(old)
+new_ver = old.version + 1
+else:
+new_ver = 1
+create_new_document(new_hash, new_ver)
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 05
+--NOTES-- 强调幂等：同一个文件上传 100 次，向量库里只有一份。这就是 file_hash 的价值。
+企业里 Embedding 是按 token 收费的，hash 一致就直接跳过，是真金白银省钱。
+
+===== SLIDE 6 =====
+[TEXT_BOX (17)] 03 · 版本流转
+[TEXT_BOX (17)] 同一份文件 v1 → v2：旧向量必须先下线
+[TEXT_BOX (17)] 用户上传同名文件
+计算新 file_hash
+[TEXT_BOX (17)] hash 一致？
+[TEXT_BOX (17)] 一致
+[TEXT_BOX (17)] 跳过索引，直接返回
+[TEXT_BOX (17)] 不一致
+[TEXT_BOX (17)] 旧文档 → archived
+批量删除旧 chunk 向量
+[TEXT_BOX (17)] 新文档 version+1
+切分 → Embedding → 入 pgvector
+[TEXT_BOX (17)] 关键：不要"先写新向量再删旧向量"，也不要"新旧并存"。
+正确顺序：旧向量删除完成 → 新文档入库；RAG 永远只检索 status=active 的分片。
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 06
+--NOTES-- 强调顺序：为什么要先删旧再写新？因为如果反过来，新老向量会同时被召回几秒到几分钟，用户看到混合答案。
+生产环境这个操作要放在事务里，或者至少有一个"切换开关"。
+
+===== SLIDE 7 =====
+[TEXT_BOX (17)] 04 · 增量索引
+[TEXT_BOX (17)] 三种场景，三种动作：绝不做全量重建
+[TEXT_BOX (17)] 新增文档
+[TEXT_BOX (17)] 创建 document 记录，version=1
+文本切分，生成 chunk 列表
+调用 Embedding 生成向量
+pgvector 写入向量 + vector_id 回写 chunk 表
+[TEXT_BOX (17)] 修改文档（新版本）
+[TEXT_BOX (17)] 旧 document → status=archived
+按 doc_id 批量删除旧 chunk 向量
+新建 version+1 的 document
+新切分、新 Embedding、新向量入库
+[TEXT_BOX (17)] 删除文档
+[TEXT_BOX (17)] document.status = deleted（软删，留审计）
+后台任务按 doc_id 硬删向量
+RAG 检索过滤 status != active
+业务记录保留，可追溯谁、何时删的
+[TEXT_BOX (17)] 工程要点：大文件走异步任务队列，HTTP 接口只返回 task_id；分块成功但 Embedding 失败要回滚，不能留半完成数据。
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 07
+--NOTES-- 强调软删除 vs 硬删除的区别：业务库软删，向量库硬删。这是审计的基础。
+提一下异步任务：一个 100MB PDF 同步切分+向量化要几十秒，HTTP 早就超时了。
+
+===== SLIDE 8 =====
+[TEXT_BOX (17)] 05 · 索引迁移
+[TEXT_BOX (17)] 换 Embedding 模型或分块策略：双写不停机
+[TEXT_BOX (17)] 触发迁移的三种情况
+[TEXT_BOX (17)] bge-small → bge-large，向量维度改变，旧向量全部失效
+chunk_size 512 → 800，召回效果更好
+Chroma → pgvector，存储层迁移
+[TEXT_BOX (17)] Manifest：知识库的"配置快照"
+[TEXT_BOX (17)] // kb_001_manifest.json
+{
+"embedding_model": "bge-small-zh-v1.5",
+"chunk_config": {
+"chunk_size": 512,
+"chunk_overlap": 100
+},
+"active_doc_ids": ["doc_a", "doc_b"],
+"update_at": "2026-10-28T..."
+}
+[TEXT_BOX (17)] 双写迁移四步
+[TEXT_BOX (17)] 1. 旧向量库继续服务线上检索　2. 后台读 document_chunk 原文本，用新参数生成新向量
+3. 新库校验通过后，检索入口切流　4. 必须连元数据一起迁，只迁向量 = 权限 / 溯源全丢
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 08
+--NOTES-- 强调：迁移不是"把向量复制过去"，是用新模型重新 Embedding 整个知识库。
+几十万分片要跑很久，所以必须后台双写，不能停机。
+
+===== SLIDE 9 =====
+[TEXT_BOX (17)] 06 · 可信身份与权限
+[TEXT_BOX (17)] 身份从 JWT 来，不信任前端传的 user_id
+[TEXT_BOX (17)] 三级权限模型
+[TEXT_BOX (17)] 知识库层
+用户能不能访问整个 KB？
+员工手册 / 薪酬库 / 研发内部库
+[TEXT_BOX (17)] 文档层
+同库内，哪些文档某角色可见？
+高管文档仅 admin / hr 可读
+[TEXT_BOX (17)] Chunk 层
+同文档内部分片权限不同
+极少用，按需开启
+[TEXT_BOX (17)] 权限标签写在 chunk.meta_json
+[TEXT_BOX (17)] {
+"allow_roles": ["admin","hr"],
+"allow_depts": ["human_resource"],
+"deny_user_ids": ["u_00123"]
+}
+[TEXT_BOX (17)] 安全铁律
+[TEXT_BOX (17)] ✗ 从 request.query 拿 user_id / role
+✓ 从 JWT 令牌解析当前用户
+✓ 角色 / 部门 / user_id 全部来自令牌
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 09
+--NOTES-- 举一个真实攻击：前端把 user_id 改成 admin，服务端如果信了，立刻越权。
+JWT 是签名过的，改了就验签失败；这是唯一可信的身份来源。
+
+===== SLIDE 10 =====
+[TEXT_BOX (17)] 06 · 权限过滤的位置
+[TEXT_BOX (17)] 过滤必须下推到向量检索，不要召回后再筛
+[TEXT_BOX (17)] 错误：先 top-k 召回，业务层再过滤
+[TEXT_BOX (17)] 问题：
+1. top_k=5 已经取了最相关 5 条，其中 3 条无权限被丢弃，实际只喂给 LLM 2 条，召回质量崩。
+2. 高相关但无权限的分片已经被服务端读出来过，存在日志 / 缓存泄露风险。
+[TEXT_BOX (17)] 正确：filter 写进向量查询条件
+[TEXT_BOX (17)] 做法：
+vector_db.query(
+　query_vector=emb,
+　filter={allow_roles: user.role, ...},
+　top_k=5)
+无权限分片根本不进入相似度计算。
+[TEXT_BOX (17)] build_permission_filter(user) → 直接作为 pgvector / Chroma 的 metadata filter
+[TEXT_BOX (17)] 条件 = (chunk.allow_roles 包含 user.role OR chunk.allow_depts 包含 user.dept)
+AND chunk.doc_id 对应 document.status = active AND user_id 不在 deny_user_ids。
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 10
+--NOTES-- 这页是今天最重要的安全点。很多学生写 RAG 都是先查 top-k 再 if 判断角色，这是错的。
+强调两个后果：召回质量下降 + 数据已经被读出。
+
+===== SLIDE 11 =====
+[TEXT_BOX (17)] 07 · 越权测试
+[TEXT_BOX (17)] 4 条用例全部返回空，才算权限真的做对了
+编号 | 测试场景 | 操作 | 预期结果
+UT-01 | 普通销售用户访问薪酬知识库 | 销售账号调用问答接口，指定 kb_02 | 检索结果为空，不能拿到薪酬文档
+UT-02 | 篡改参数传入他人 doc_id | 手动改请求参数，传不属于自己的 doc_id | 403，不返回文档内容
+UT-03 | 已软删除文档 | 删除后再问该文档主题相关问题 | RAG 不召回任何该文档分片
+UT-04 | 前端伪造 user_id | 请求体里加 user_id=admin 字段 | 忽略该字段，权限按 JWT 真实身份判定
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 11
+--NOTES-- 要求学生在 notebook 里把这 4 条用例写成 pytest 测试，全部断言为空。
+特别强调 UT-04：这是最常见的越权漏洞——开发图省事从请求里拿 user_id。
+
+===== SLIDE 12 =====
+[TEXT_BOX (17)] 08 · 复盘与作业
+[TEXT_BOX (17)] 5 个常见坑 + 2 道课后思考题
+[TEXT_BOX (17)] 常见坑（避免）
+[TEXT_BOX (17)] ✗ 元数据只存向量库，业务库没镜像
+✗ 文档更新直接覆盖，新旧分片共存
+✗ 每次上传全量重建整个知识库
+✗ 权限过滤放在召回之后的业务层
+✗ 信任前端 user_id，不从 JWT 解析
+[TEXT_BOX (17)] 课后思考题
+[TEXT_BOX (17)] Q1. 增量索引中途程序崩溃，一部分 chunk 已写向量库，一部分没写。怎么保证最终一致？
+Q2. 知识库有几十万分片，换 Embedding 模型要做索引迁移。怎么把对线上业务的影响降到最低？
+[TEXT_BOX (17)] Week18 · Day2 企业智能知识库
+[TEXT_BOX (17)] 12
+--NOTES-- Q1 提示：本地事务 + 任务表状态机（pending / done / failed），启动时扫描 pending 任务重跑。
+Q2 提示：双写 + 灰度切流 + 回滚开关；不要停机迁移。
