@@ -84,7 +84,7 @@ class SqlChunkRepo:
 
 
 class SqlChunkSearchRepo:
-    """余弦距离 top-k。成员3 的检索入口，也是维度校验的唯一发生地。
+    """向量与全文检索入口，也是向量维度校验的唯一发生地。
 
     两个 PG 细节决定了这里的写法：
 
@@ -145,6 +145,50 @@ class SqlChunkSearchRepo:
         )
         result = await self._session.execute(stmt, params)
         return [_to_scored_chunk(r) for r in result.mappings()]
+
+    async def search_keyword(
+        self,
+        scope: Scope,
+        kb_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+    ) -> list[ActiveChunk]:
+        """按 PostgreSQL FTS 相关度取 top-k 活动 chunk。
+
+        参数化 query 防止把用户文本当 SQL/tsquery 语法执行。`simple` 与 Worker
+        生成 tsvector 时使用的配置一致。当前中文数据需用索引中的完整连续词查询；
+        中文分词策略尚未评测，不在这里伪造分词或用子串匹配冒充全文检索。
+        """
+        normalized_query = query_text.strip()
+        if not normalized_query:
+            return []
+
+        stmt = text(
+            f"""
+            WITH query AS (
+                SELECT plainto_tsquery('simple', :query_text) AS terms
+            )
+            SELECT {_CHUNK_COLUMNS}
+            FROM v_active_chunks AS c
+            CROSS JOIN query AS q
+            WHERE c.workspace_id = :workspace_id
+              AND c.kb_id = :kb_id
+              AND c.tsvector @@ q.terms
+            ORDER BY ts_rank_cd(c.tsvector, q.terms) DESC, c.chunk_id ASC
+            LIMIT :limit
+            """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "workspace_id": scope.workspace_id,
+                "kb_id": kb_id,
+                "query_text": normalized_query,
+                "limit": limit,
+            },
+        )
+        return [_to_active_chunk(row) for row in result.mappings()]
 
     async def _kb_dims(self, scope: Scope, kb_id: UUID) -> set[int]:
         """本 scope 内该库现存活动向量用到的维度集合。"""
