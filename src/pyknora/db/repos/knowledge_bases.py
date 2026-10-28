@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyknora.core.scope import Scope
@@ -53,6 +53,35 @@ class SqlKnowledgeBaseRepo:
     async def get_embedding_profile(self, scope: Scope, kb_id: UUID) -> EmbeddingProfile | None:
         kb = await self.get(scope, kb_id)
         return kb.profile if kb is not None else None
+
+    async def list(
+        self,
+        scope: Scope,
+        *,
+        limit: int,
+        after_created_at: datetime | None = None,
+        after_kb_id: UUID | None = None,
+    ) -> tuple[list[KnowledgeBase], bool]:
+        statement = select(KnowledgeBaseRow).where(
+            KnowledgeBaseRow.workspace_id == scope.workspace_id,
+            KnowledgeBaseRow.deleted_at.is_(None),
+        )
+        if after_created_at is not None and after_kb_id is not None:
+            statement = statement.where(
+                or_(
+                    KnowledgeBaseRow.created_at > after_created_at,
+                    and_(
+                        KnowledgeBaseRow.created_at == after_created_at,
+                        KnowledgeBaseRow.kb_id > after_kb_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            KnowledgeBaseRow.created_at.asc(), KnowledgeBaseRow.kb_id.asc()
+        ).limit(limit + 1)
+        rows = list((await self._session.scalars(statement)).all())
+        has_more = len(rows) > limit
+        return [_to_schema(row) for row in rows[:limit]], has_more
 
     async def rename(
         self,

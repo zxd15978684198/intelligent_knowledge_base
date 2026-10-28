@@ -1,6 +1,15 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-28（Asia/Shanghai）。**2026-10-28 追加：成员1任务1 / S05，见下方「本轮」**；其后的历史章节保留为其自身时点的记录。
+更新日期：2026-10-28（Asia/Shanghai）。**2026-10-28 追加：成员1任务2 / S05 查询，见下方「本轮」**；其后的历史章节保留为其自身时点的记录。
+
+## 本轮：S05 知识库查询（2026-10-28，成员1）
+
+- 任务：进度表任务2 ↔ S05 查询部分；起始 HEAD `76ef94f`，`git status --short` 为空。前置任务1已完成，本轮未推进任务15。
+- 改动文件：`src/pyknora/api/v1/knowledge_bases.py`、`db/repos/knowledge_bases.py`、`db/repos/reads.py`、`schemas/kb.py`、`services/contracts/reads.py`、`core/settings.py`；新增 `services/kb/cursor.py`、`tests/contract/{__init__.py,test_c1.py}`、`tests/unit/test_kb_cursor.py`；扩展 `tests/api/test_api_knowledge_bases.py`。
+- 已实现：`GET /api/v1/knowledge-bases` 按 `(created_at,kb_id)` 稳定键集分页，只查当前 workspace 且排除软删除行；游标以 HMAC-SHA256 签名并绑定 workspace、principal 和24小时有效期，篡改、跨 Scope 重放、过期统一返回 410 `CURSOR_EXPIRED`；C1 在保留原 `get_embedding_profile` 签名的基础上追加 `get/list`，真实仓储和 Fake 均满足契约。
+- 已执行：`uv run ruff check src tests scripts` → `All checks passed!`；`uv run pytest -q tests/unit tests/contract` → 33 passed（31 unit + 2 contract）；`uv run pytest -q tests/api/test_api_knowledge_bases.py` → 6 passed；`uv run pytest -q tests/integration` → 28 passed；`uv run pytest -q` → 101 passed；`uv run python scripts/ci.py --stage all` → ruff check、ruff format check、31个单元测试全部 PASS。
+- 未验证 / 未做：未运行联网 security 阶段；未实现成员4的真实 membership/RLS；未推进任务15；未做并发翻页的快照一致性承诺（每页重新按当前 Scope 和未删除状态查询）；未提交。五份ADR仍为“提议”。
+- 风险与下一步：`cursor_secret` 当前有开发默认值，生产必须用 `PYKNORA_CURSOR_SECRET` 覆盖；下一阶段应由成员4基于 C1 `get(scope,kb_id)` 实现任务15，非授权继续统一404。
 
 ## 本轮：S05 KB 表与 CRUD（2026-10-28，成员1）
 

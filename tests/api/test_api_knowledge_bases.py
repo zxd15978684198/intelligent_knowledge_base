@@ -126,3 +126,75 @@ async def test_soft_deleted_name_can_be_reused(clean_db: None) -> None:
         )
         assert second.status_code == 201, second.text
         assert second.json()["kb_id"] != kb_id
+
+
+async def test_list_uses_stable_scoped_cursor_pagination(clean_db: None) -> None:
+    async with await _real_client() as client:
+        created_ids = []
+        for name in ("分页一", "分页二", "分页三"):
+            response = await client.post(
+                "/api/v1/knowledge-bases", headers=bearer(), json=_payload(name)
+            )
+            assert response.status_code == 201
+            created_ids.append(response.json()["kb_id"])
+
+        b_response = await client.post(
+            "/api/v1/knowledge-bases",
+            headers=bearer("22222222-2222-2222-2222-222222222222"),
+            json=_payload("B区不可见"),
+        )
+        b_id = b_response.json()["kb_id"]
+
+        seen: list[str] = []
+        cursor = None
+        while True:
+            params = {"limit": 2}
+            if cursor:
+                params["cursor"] = cursor
+            page = await client.get("/api/v1/knowledge-bases", headers=bearer(), params=params)
+            assert page.status_code == 200, page.text
+            seen.extend(item["kb_id"] for item in page.json()["items"])
+            cursor = page.json()["next_cursor"]
+            if cursor is None:
+                break
+
+        assert len(seen) == len(set(seen))
+        assert set(created_ids).issubset(seen)
+        assert b_id not in seen
+
+
+async def test_cursor_rejects_tampering_and_cross_scope_replay(clean_db: None) -> None:
+    async with await _real_client() as client:
+        for name in ("游标一", "游标二", "游标三"):
+            await client.post("/api/v1/knowledge-bases", headers=bearer(), json=_payload(name))
+
+        first = await client.get("/api/v1/knowledge-bases", headers=bearer(), params={"limit": 1})
+        cursor = first.json()["next_cursor"]
+        assert cursor
+
+        tampered = await client.get(
+            "/api/v1/knowledge-bases",
+            headers=bearer(),
+            params={"limit": 1, "cursor": f"x{cursor[1:]}"},
+        )
+        assert tampered.status_code == 410
+        assert tampered.json()["error"]["code"] == "CURSOR_EXPIRED"
+
+        replayed = await client.get(
+            "/api/v1/knowledge-bases",
+            headers=bearer("22222222-2222-2222-2222-222222222222"),
+            params={"limit": 1, "cursor": cursor},
+        )
+        assert replayed.status_code == 410
+
+
+async def test_list_limit_is_validated(clean_db: None) -> None:
+    async with await _real_client() as client:
+        too_small = await client.get(
+            "/api/v1/knowledge-bases", headers=bearer(), params={"limit": 0}
+        )
+        too_large = await client.get(
+            "/api/v1/knowledge-bases", headers=bearer(), params={"limit": 101}
+        )
+        assert too_small.status_code == 422
+        assert too_large.status_code == 422
