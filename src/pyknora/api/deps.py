@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
 from pyknora.core.settings import settings
+from pyknora.db.repos.knowledge_bases import SqlKnowledgeBaseRepo
 from pyknora.db.repos.reads import (
     SqlChunkRepo,
     SqlChunkSearchRepo,
@@ -167,7 +168,9 @@ def get_build_repo(
     return SqlIndexBuildRepo(session)
 
 
-def get_kb_repo() -> Any:
+def get_kb_repo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Any:
     """KB 仓库。
 
     成员1 未交付前用进程级 `FakeKbRepo`（数据假、schema 真）。
@@ -176,7 +179,10 @@ def get_kb_repo() -> Any:
     """
     from pyknora.api.main import get_app_state
 
-    return get_app_state().kb_repo
+    state = get_app_state()
+    if state.extra.get("kb_repo_configured"):
+        return state.kb_repo
+    return SqlKnowledgeBaseRepo(session)
 
 
 def get_max_upload_bytes() -> int:

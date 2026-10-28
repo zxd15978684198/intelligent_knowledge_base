@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import asyncio
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, text
@@ -286,7 +286,8 @@ async def test_a7_cross_workspace_isolated(session, scope_a, scope_b, kb_repo, e
     )
     repo_a = kb_repo
     repo_b = type(kb_repo)()
-    repo_b.add(scope_b, kb_id, profile)
+    kb_id_b = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    repo_b.add(scope_b, kb_id_b, profile)
 
     up_a = await docs.upload_document(
         session, scope=scope_a, kb_repo=repo_a, kb_id=kb_id, filename="a.txt", data=TXT
@@ -296,7 +297,7 @@ async def test_a7_cross_workspace_isolated(session, scope_a, scope_b, kb_repo, e
     await session.commit()
 
     up_b = await docs.upload_document(
-        session, scope=scope_b, kb_repo=repo_b, kb_id=kb_id, filename="a.txt", data=TXT
+        session, scope=scope_b, kb_repo=repo_b, kb_id=kb_id_b, filename="a.txt", data=TXT
     )
     await session.commit()
     await ingest_worker.run_once(session, worker_id="w2", kb_repo=repo_b, embedder=embedder)

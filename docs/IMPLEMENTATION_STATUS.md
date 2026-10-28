@@ -1,6 +1,16 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-28（Asia/Shanghai）。**2026-10-28 追加：数据契约外键落地，见下方「当前轮」**；其后的 Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-28（Asia/Shanghai）。**2026-10-28 追加：成员1任务1 / S05，见下方「本轮」**；其后的历史章节保留为其自身时点的记录。
+
+## 本轮：S05 KB 表与 CRUD（2026-10-28，成员1）
+
+- 任务：S05 ↔ 进度表任务1；起始 HEAD `c1cfb7b`，开工时 `git status --short` 为空。本轮只完成任务1，任务2的列表/游标分页、S06配置固化和任务15权限联调未推进。
+- 改动文件：新增 `migrations/0002_knowledge_bases.sql`、`src/pyknora/api/v1/knowledge_bases.py`、`src/pyknora/db/repos/knowledge_bases.py`、`src/pyknora/services/kb/service.py`、`tests/api/test_api_knowledge_bases.py`；追加 `models/tables.py` 的 `KnowledgeBaseRow`、`schemas/kb.py` 的版本字段、`api/deps.py` 真实仓储注入、`api/main.py` 路由，以及 API/集成测试真实 KB 种子和复合外键断言。
+- 已实现：知识库创建、详情、带 `If-Match` 的改名、软删除；同区活动名称由部分唯一索引约束；删除递增 `generation`/`row_version` 并同事务写 outbox；`documents(workspace_id,kb_id)` 复合外键拒绝跨区引用；未显式注入测试替身时默认使用 `SqlKnowledgeBaseRepo`。
+- 已执行：`uv sync --extra dev` → 成功；`uv run python scripts/migrate.py` → `0001`、`0002` 成功，重复执行再次 `migrations ok`；`uv run ruff check src tests scripts` → `All checks passed!`；`uv run pytest -q tests/unit` → 27 passed；`uv run pytest -q tests/integration` → 28 passed；`uv run pytest -q` → 92 passed；`uv run python scripts/ci.py --stage all` → ruff check、ruff format check、27个单元测试全部 PASS。
+- 门禁限制：`git config core.hooksPath .githooks` 已设置，但仓库中的 `.githooks/pre-commit` Git模式为 `100644`、磁盘不可执行，`git hook run pre-commit` 报 `cannot find a hook named pre-commit`；未跨阶段修改该公共钩子，改为直接运行其唯一入口 `scripts/ci.py --stage all` 并通过。
+- 未验证 / 未做：未运行独立 security 阶段；未实现任务2列表/游标；未扩展共享 `KbRepo` 的 `get/list` 签名；未提交。五份ADR仍为“提议”。本轮期间另出现无关的 `.gitignore` 修改和已暂存 `.idea/*` 删除，均未回滚、未编辑、未纳入本轮交付。
+- 下一步：单独推进任务2“知识库查询”与 C1 契约测试；若提交本轮，先由仓库维护者修复 `.githooks/pre-commit` 的可执行位，并只暂存本轮文件。
 
 ## 当前轮：数据契约补外键（2026-10-28，lead）
 
