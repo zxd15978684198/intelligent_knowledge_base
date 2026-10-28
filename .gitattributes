@@ -1,0 +1,4 @@
+# Git for Windows 用 sh 执行钩子，CRLF 会让钩子报 "bad interpreter"；
+# 这两行保证检出时钩子与 shell 脚本始终是 LF。
+.githooks/* text eol=lf
+*.sh       text eol=lf

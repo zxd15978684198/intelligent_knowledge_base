@@ -48,6 +48,14 @@ erDiagram
 
 通则：UUID 主键；每表 `UNIQUE(workspace_id,<pk>)` 供复合 FK；租户 FK 都含 workspace_id，禁止仅 FK(resource_id) 使跨空间行可连。除事件/不可变历史外有 created_at、updated_at、row_version；可变资源有 deleted_at/generation。不可变指**内容和来源**不改，状态列可按拥有者转移。内容表默认私有，不把 Graph State 当事实数据库。JSONB 严格按版本 schema，大小上限，禁止秘密/PII 原文。
 
+> **落地状态（2026-10-28，成员2 已落库，其余待建）**：通则里"每表 `UNIQUE(workspace_id,<pk>)` 供复合 FK"在 `migrations/0001_init.sql` 里已经兑现为 **7 条复合外键**（`document_versions`/`index_builds`/`chunks`/`ingestion_jobs`/`job_attempts`/`document_blobs`，全部 `ON DELETE RESTRICT`）。
+>
+> 两处与本文原先的设想不同，以落地为准：
+> 1. `documents.kb_id` 的复合 FK 指向 `knowledge_bases`，**父表不在 0001**（属成员1 的 0002），因此这条 FK 延后到 0002 建表后 `ALTER TABLE` 补上，已写进计划书 §4.3 判定表；
+> 2. 上表 `documents` 行写的"活动指针用 deferred FK 解决互引用"，本仓库**没有实现**：三个指针列不建 FK，一致性由 `publish()` 的单事务保证（计划书 I3）。原因是指针切换存在中间态，普通 FK 会在事务中途炸，DEFERRABLE 又会把约束推迟到提交才报错、定位更难。
+>
+> 回归断言：`tests/integration/test_schema_constraints.py`（孤儿切片 / 跨区版本 / RESTRICT 阻止硬删）。
+
 | 表 / 主键 | 核心字段、FK（省略共同 workspace 前缀） | 唯一/索引和约束 |
 | --- | --- | --- |
 | workspaces / workspace_id | name,status,policy_revision | workspace 为隔离根，删除先 tombstone |

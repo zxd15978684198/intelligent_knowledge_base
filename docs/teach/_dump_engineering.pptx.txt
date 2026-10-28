@@ -1,0 +1,351 @@
+
+===== SLIDE 1 =====
+[TEXT_BOX (17)] 八维大学生短训 · AI 大模型课程 · WEEK 18 DAY 1
+[TEXT_BOX (17)] PyKnora 项目启动
+动手写代码前，先学会工程分析
+[TEXT_BOX (17)] 今天用 5 项工程能力，把 Day2 要做的功能（hash 变更检测、版本管理、
+增量索引、工作区权限隔离）完整分析清楚。
+[TEXT_BOX (17)] 配套：PRD_PyKnora_v1.4 · TDD_PyKnora_v0.1 · 五步教学法
+--NOTES-- 开场：今天不写代码，今天练的是工程师最值钱的能力——拿到 PRD 先分析。
+所有分析产出，明天 Day2 直接变成代码。
+
+===== SLIDE 2 =====
+[TEXT_BOX (17)] AGENDA · 今天训练的 5 项能力
+[TEXT_BOX (17)] 所有分析，都对准 Day2 要写的功能
+[TEXT_BOX (17)] 01
+[TEXT_BOX (17)] 需求识别　分清业务需求 / 功能需求 / 非功能需求，划清 Day2 P0 边界
+[TEXT_BOX (17)] 02
+[TEXT_BOX (17)] 用户故事　把需求写成角色-如何做-价值 + Given/When/Then 验收场景
+[TEXT_BOX (17)] 03
+[TEXT_BOX (17)] 架构推导　从上传 → hash → 版本 → 增量索引画数据流，讲清权限在哪拦截
+[TEXT_BOX (17)] 04
+[TEXT_BOX (17)] Lite Harness　分清 Harness ≠ LLM ≠ LangGraph；增量索引归 Worker，不归 Harness
+[TEXT_BOX (17)] 05
+[TEXT_BOX (17)] 任务拆解　把 Day2 拆成 8–12 条可交给同学或 AI 编程工具的任务
+[TEXT_BOX (17)] 统一节奏：提出问题 → 教师演示 → 模仿练习 → 独立应用 → 标准验收（每道选择题都给大家 30 秒思考再翻答案）
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 02
+--NOTES-- 强调节奏：每道题先停 30 秒，让学生举手或在纸上作答，再翻答案页。
+
+===== SLIDE 3 =====
+[TEXT_BOX (17)] 能力 01 · 需求识别 · 课堂提问
+[TEXT_BOX (17)] 企业有 500 份制度文档，员工查资料很慢，
+想做 AI 知识库。这里的业务问题是什么？
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] 企业没有使用 LangGraph 框架
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 员工查找知识的效率较低
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 企业缺少一个聊天页面
+[TEXT_BOX (17)] 请同学思考 30 秒，选出答案 —— 答案下一页揭晓
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 03
+--NOTES-- 停 30 秒，让学生举手作答。不要急着翻页。
+引导：A 和 C 都是"可能采用的技术方案"，不是业务问题本身。
+
+===== SLIDE 4 =====
+[TEXT_BOX (17)] 能力 01 · 需求识别 · 答案揭晓
+[TEXT_BOX (17)] 正确答案：B
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] 企业没有使用 LangGraph 框架
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 员工查找知识的效率较低
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 企业缺少一个聊天页面
+[TEXT_BOX (17)] 解析
+[TEXT_BOX (17)] LangGraph 是可能采用的技术方案，聊天页面是交互形式——都不是业务问题本身。
+工程师第一步要剥离技术方案，看到原始痛点：查资料慢。
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 04
+--NOTES-- 强调：业务需求 = 为什么做；功能需求 = 系统做什么；技术方案 = 怎么做。
+三层不要混。
+
+===== SLIDE 5 =====
+[TEXT_BOX (17)] 能力 01 · 需求识别 · 三类需求
+[TEXT_BOX (17)] 业务需求 / 功能需求 / 非功能需求，一句话分清
+类别 | 回答什么问题 | Day2 举例 | 反例（不是这类）
+业务需求 | 为什么要做？业务痛点是什么？ | 重复上传造成搜索内容不准确、版本混乱、不应能看到其他用户的知识库 | 用 pgvector（这是方案）
+功能需求 | 系统要提供什么能力？ | hash 比对、版本递增、增量索引、检索权限过滤 | 系统响应要快 200ms（这是非功能）
+非功能需求 | 质量和约束：安全、可靠、性能、可追溯 | 权限服务端校验、幂等、chunk 绑定 workspace_id | 支持文档上传（这是功能）
+[TEXT_BOX (17)] 易错：把"用什么技术"当业务需求，把"质量约束"当功能需求。Day2 写代码前先分清。
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 05
+--NOTES-- 表格三列：问什么问题、Day2 举例、反例。
+让学生自己举一个功能需求和一个非功能需求。
+
+===== SLIDE 6 =====
+[TEXT_BOX (17)] 能力 01 · 需求边界 · Day2 范围
+[TEXT_BOX (17)] Day2 必须做什么，不做什么
+[TEXT_BOX (17)] P0 · Day2 必须完成
+[TEXT_BOX (17)] 文档上传，自动计算 file_hash
+hash 比对：新增 / 修改 / 无变更三分支
+文档版本号自动递增、旧版归档
+增量索引：新增 / 修改 / 删除同步向量
+检索时按 workspace_id 权限过滤
+JWT 解析可信身份，不信前端 user_id
+[TEXT_BOX (17)] P1 · 今天不做，后续迭代
+[TEXT_BOX (17)] 文档内容 diff 对比视图
+版本回滚前端界面
+定时全量巡检索引一致性
+文件在线预览 / 批注
+多用户协同编辑元数据
+复杂分块策略自动调参
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 06
+--NOTES-- 强调范围蔓延：学生很容易顺手做版本回滚、在线预览。今天不做。
+
+===== SLIDE 7 =====
+[TEXT_BOX (17)] 能力 02 · 用户故事 · 课堂提问
+[TEXT_BOX (17)] 任务写一句："开发知识库功能"。
+为什么不能直接交给同学或 AI 开工？
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] 因为这句话太短了，写得越长越好
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 缺角色、目标、价值、输入输出、权限、验收标准，谁都不知道做到哪算完
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 应该先画一张好看的架构图，再开工
+[TEXT_BOX (17)] 请同学思考 30 秒 —— 答案下一页揭晓
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 07
+--NOTES-- 停 30 秒。让学生说理由。
+
+===== SLIDE 8 =====
+[TEXT_BOX (17)] 能力 02 · 用户故事 · 答案揭晓
+[TEXT_BOX (17)] 正确答案：B
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] 写得越长越好
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 缺角色、目标、价值、输入输出、权限、验收标准
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 先画好看的架构图
+[TEXT_BOX (17)] 用户故事标准句式
+[TEXT_BOX (17)] 作为 [角色]，我希望 [做什么]，以便 [获得什么价值]。
+配套 Given / When / Then 验收：给定前置 → 当触发操作 → 那么预期结果。
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 08
+--NOTES-- A 错在"长度"，任务质量不在长度；C 错在顺序，架构图是后面能力 03 的事。
+
+===== SLIDE 9 =====
+[TEXT_BOX (17)] 能力 02 · 用户故事 · Day2 示范
+[TEXT_BOX (17)] Day2 两个核心用户故事 + GWT 验收
+[TEXT_BOX (17)] 故事 1 · file_hash 变更检测
+[TEXT_BOX (17)] 作为知识库管理员，我希望上传同名文件时系统自动识别内容是否变更并维护版本，以便避免重复索引、保留修改历史。
+[TEXT_BOX (17)] Given 已有文档 v1（hash=H0）　When 上传同名文件 hash=H1　Then 自动生成 v2 并增量索引
+异常：上传文件 hash 仍为 H0 → 不升版本、不切分、不调 Embedding，直接返回已存在。
+[TEXT_BOX (17)] 故事 2 · 工作区权限隔离（安全红线）
+[TEXT_BOX (17)] 作为企业员工，我希望只能检索本工作区的文档，以防止其他工作区敏感资料被越权查询。
+[TEXT_BOX (17)] Given 文档 D 属于 A 区，用户 U 属于 B 区　When U 发起检索　Then D 的分片被过滤，返回空，绝不返回 D 任何片段。
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 09
+--NOTES-- 这两个故事明天直接当测试用例写。
+
+===== SLIDE 10 =====
+[TEXT_BOX (17)] 能力 02 · 模仿练习（课堂动手）
+[TEXT_BOX (17)] 把"用户可信身份检验"写成完整用户故事
+[TEXT_BOX (17)] Day2 安全红线：服务端必须从 JWT 令牌解析 user_id / workspace_id，绝不信任前端传入的 user_id 参数。
+否则攻击者只要改一下请求体里的 user_id，就能冒充任意身份越权访问。
+[TEXT_BOX (17)] 请完成两件事（8 分钟，两人一组）
+[TEXT_BOX (17)] ① 按标准句式写用户故事：作为【谁】，我希望【系统做什么】，以便【获得什么价值】。
+② 写两条 Given / When / Then 验收：
+　　· 正常场景：合法用户带有效 JWT 请求时，系统应该怎样？
+　　· 异常场景：攻击者在请求里伪造 user_id=admin，系统应该怎样？
+[TEXT_BOX (17)] 提示：想想这三个角色——【企业员工】、【工作区管理员】、【攻击者】。
+价值是"我的身份不能被前端伪造"，不是"系统要校验登录"这种技术描述。
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 10
+--NOTES-- 停 8 分钟，让学生写。老师巡视，挑两组投影。
+提醒：不要写成"系统要校验 JWT"这种技术任务，要站在用户/攻击者视角。
+
+===== SLIDE 11 =====
+[TEXT_BOX (17)] 能力 02 · 模仿练习 · 参考答案
+[TEXT_BOX (17)] 标准用户故事 + 验收条件
+[TEXT_BOX (17)] 用户故事：
+作为企业员工，我希望系统只根据我登录令牌解析我的身份和工作区，以便即使有人在请求里伪造参数，也无法冒充我访问其他工作区的知识。
+[TEXT_BOX (17)] 正常场景验收
+[TEXT_BOX (17)] Given 用户 U 持有合法 JWT，属于工作区 A；　When U 发起检索请求
+Then 服务端从 JWT 解出 user_id=U、workspace=A，检索只命中 A 区分片，返回 U 应有结果。
+[TEXT_BOX (17)] 异常场景验收（越权测试）
+[TEXT_BOX (17)] Given 用户 U 在请求体里加了 user_id=admin、workspace=B；　When 请求到达服务端
+Then 服务端忽略请求体里的身份字段，仍按 JWT 解出的 U/A 执行；越权访问被拒绝，日志记录本次伪造尝试。
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 11
+--NOTES-- 对照检查：你的故事里——
+1. 角色是"企业员工"不是"后端开发"；2. 价值是"身份不能被伪造"；3. 异常场景覆盖了请求体篡改；4. 验收能跑测试。
+缺一条就算不合格，补完再往下走。
+
+===== SLIDE 12 =====
+[TEXT_BOX (17)] 能力 03 · 架构推导 · 课堂提问
+[TEXT_BOX (17)] 管理员上传一份 50MB PDF，
+能不能直接同步丢给大模型处理？
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] 可以，大模型能力强，直接处理 PDF 最快
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 不能：解析、切分、向量化是确定性耗时任务，应走异步 Worker；大模型只负责问答生成
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 不能：应该让 Agent 自己决定要不要解析、要不要切分
+[TEXT_BOX (17)] 请同学思考 30 秒 —— 答案下一页揭晓
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 10
+--NOTES-- C 是迷惑项：Agent 不做确定性任务。
+
+===== SLIDE 13 =====
+[TEXT_BOX (17)] 能力 03 · 架构推导 · 答案揭晓
+[TEXT_BOX (17)] 正确答案：B
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] 大模型直接处理 PDF 最快
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 确定性耗时任务走异步 Worker；大模型只做问答生成
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 让 Agent 自己决定要不要解析
+[TEXT_BOX (17)] 为什么这么拆？
+[TEXT_BOX (17)] 1. 解析 / 切分 / Embedding 是固定流程，不需要大模型决策，交给 Worker 稳定可重试。
+2. 大文件处理耗时几十秒，不能阻塞 HTTP 上传响应。
+3. 问答链路要求低延迟，必须和入库链路物理分开。
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 11
+--NOTES-- C 错在：Agent 是用来处理不确定任务的；确定性任务用代码更稳。
+
+===== SLIDE 14 =====
+[TEXT_BOX (17)] 能力 03 · 数据流图 · Day2 两条链路
+[TEXT_BOX (17)] 写入链路（Worker）和查询链路（Harness）必须分开
+[TEXT_BOX (17)] 写入链路：上传 → hash → 版本 → 增量索引（异步 Worker，不走 Harness）
+[TEXT_BOX (17)] 用户上传
+[TEXT_BOX (17)] Auth 鉴权
+[TEXT_BOX (17)] 文档服务
+[TEXT_BOX (17)] Worker
+hash/版本/切分
+[TEXT_BOX (17)] pgvector 向量
+[TEXT_BOX (17)] 查询链路：问答检索（Lite Harness 管控，权限在检索前过滤）
+[TEXT_BOX (17)] 用户提问
+[TEXT_BOX (17)] Auth 鉴权
+[TEXT_BOX (17)] Lite Harness
+[TEXT_BOX (17)] Retrieval 检索
+带 workspace 过滤
+[TEXT_BOX (17)] LLM 生成
+[TEXT_BOX (17)] 三个关键判断：
+1. 增量索引归 Worker：hash、版本、切分、向量增删，都是确定性任务，不进 Harness。
+2. 权限在 Retrieval 之前过滤：workspace_id 由 Auth 从 JWT 解析，传给检索服务做 metadata filter。
+3. Harness 只管问答：运行预算、上下文、日志，不做文档处理。
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 12
+--NOTES-- 这张图是明天编码的蓝图。
+重点让学生指出：权限过滤在哪一步？为什么不能放在 LLM 之后？
+
+===== SLIDE 15 =====
+[TEXT_BOX (17)] 能力 04 · Lite Harness · 课堂提问
+[TEXT_BOX (17)] RAG Agent 反复调用检索工具，始终不停止，
+系统应该怎么办？
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] 没关系，大模型自己会停下来
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 设置最大工具调用次数和执行时间预算，超限强制终止
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 多部署几个 Agent 分担负载
+[TEXT_BOX (17)] 请同学思考 30 秒 —— 答案下一页揭晓
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 13
+--NOTES-- 这题引出 Harness 的 RunBudget 概念。
+
+===== SLIDE 16 =====
+[TEXT_BOX (17)] 能力 04 · Lite Harness · 答案揭晓
+[TEXT_BOX (17)] 正确答案：B
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] 大模型自己会停
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 设置最大工具调用次数和执行时间预算，超限强制终止
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 多部署几个 Agent 分担
+[TEXT_BOX (17)] 这就是 Harness 的 RunBudget：对智能工作流的资源上限
+[TEXT_BOX (17)] Context　可信上下文：user_id、workspace_id、run_id（来自 JWT，前端不可篡改）
+Budget　执行预算：最长 60s、最多 5 次工具调用、Token 上限
+State / Observability　运行状态 + 事件日志，出问题能回溯每一步
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 14
+--NOTES-- C 错在：加机器解决不了死循环问题。
+
+===== SLIDE 17 =====
+[TEXT_BOX (17)] 能力 04 · Harness 职责边界
+[TEXT_BOX (17)] Day2 里 Harness 做什么、不做什么
+[TEXT_BOX (17)] Harness 要做的（问答链路）
+[TEXT_BOX (17)] 把 JWT 解析出的 workspace_id / user_id 传给检索服务
+限制一次问答最多调用检索 5 次
+超时 60 秒强制终止工作流
+记录 run_id / trace_id 运行日志
+维护状态：running / completed / failed
+[TEXT_BOX (17)] Harness 不做的（归 Worker / 业务服务）
+[TEXT_BOX (17)] 计算 file_hash、判断文件是否变更
+维护文档版本号、归档旧文档
+解析 PDF、切分 chunk、调用 Embedding
+增删改 pgvector 里的向量
+实际的权限判定（由 Auth + 检索服务执行）
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 15
+--NOTES-- 这页是 Day2 最容易混淆的点：增量索引不归 Harness。
+反复强调：Harness 是问答工作流的运行管理器，不是万能容器。
+
+===== SLIDE 18 =====
+[TEXT_BOX (17)] 能力 05 · 任务拆解 · 课堂提问
+[TEXT_BOX (17)] 把"实现增量索引"这一句直接丢给 AI 编程工具，
+会发生什么？
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] AI 很强，一次就能生成正确可用的代码
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 它不知道要不要清理旧向量、hash 怎么比、版本怎么升、权限怎么绑，产出难以集成和验收
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 只要写得长一点，把要求描述清楚就行
+[TEXT_BOX (17)] 请同学思考 30 秒 —— 答案下一页揭晓
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 16
+--NOTES-- 这题点出任务拆解的核心：不是写得长，是写得有结构。
+
+===== SLIDE 19 =====
+[TEXT_BOX (17)] 能力 05 · 任务拆解 · 答案揭晓
+[TEXT_BOX (17)] 正确答案：B
+[TEXT_BOX (17)] A
+[TEXT_BOX (17)] AI 一次就能写对
+[TEXT_BOX (17)] B
+[TEXT_BOX (17)] 缺输入、输出、权限、依赖、验收，AI 只能猜
+[TEXT_BOX (17)] C
+[TEXT_BOX (17)] 写得长一点就行
+[TEXT_BOX (17)] 合格任务的四项标准
+[TEXT_BOX (17)] 小
+[TEXT_BOX (17)] 范围明确，半天可完成自测
+[TEXT_BOX (17)] 清
+[TEXT_BOX (17)] 输入输出权限依赖写清楚
+[TEXT_BOX (17)] 可测
+[TEXT_BOX (17)] 有验收标准，能跑测试判断
+[TEXT_BOX (17)] 可分配
+[TEXT_BOX (17)] 能定负责人，可分配出去
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 17
+--NOTES-- C 错在：长度不是质量，结构化才是。
+
+===== SLIDE 20 =====
+[TEXT_BOX (17)] 能力 05 · Day2 任务看板
+[TEXT_BOX (17)] 明天直接按这张表开工
+ID | 任务 | 优先级 | 依赖 | 验收标准
+DOC-001 | 文件上传 + 元数据落库 | P0 | 鉴权、表模型 | 合法文件保存成功；未授权拒绝
+DOC-002 | file_hash 计算与变更判断 | P0 | DOC-001 | 同文件 hash 一致；改动后 hash 变化
+VER-001 | 版本号自动递增、旧版归档 | P0 | DOC-002 | 新增 v1；修改 v+1；hash 不变不升级
+ING-001 | Worker：解析、切分、生成 chunk | P0 | VER-001 | chunk 绑定文档版本与 workspace_id
+ING-002 | 增量索引：向量增删 | P0 | ING-001 | 修改清旧向量；删除清空；无变更跳过
+PERM-001 | 检索阶段 workspace 权限过滤 | P0 | 表模型 | 跨区检索返回空，不泄露 chunk
+RET-001 | Harness 传可信 workspace_id 给检索 | P0 | PERM-001 | 不用前端传入参数，只信 JWT
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 18
+--NOTES-- 这张表明天直接用。每组认领任务，按依赖顺序开发。
+
+===== SLIDE 21 =====
+[TEXT_BOX (17)] DAY 1 收尾
+[TEXT_BOX (17)] 今天的 5 份产出，明天直接用
+[TEXT_BOX (17)] 01　Day2 功能需求拆解表（业务 / 功能 / 非功能、P0 边界）
+02　用户故事 + Given/When/Then 验收用例（hash、版本、权限）
+03　数据流图：上传 → hash → 版本 → 增量索引；检索权限过滤链路
+04　Lite Harness 最小设计表（明确不介入入库 Worker）
+05　Day2 开发任务看板（明天按表编码）
+[TEXT_BOX (17)] 课后思考题
+[TEXT_BOX (17)] Q1　文档修改后只升版本、不清旧向量，会发生什么业务问题？
+Q2　为什么权限过滤不能放在 Harness 里判断，而要下沉到检索服务？
+[TEXT_BOX (17)] Week18 · Day1 项目启动
+[TEXT_BOX (17)] 19
+--NOTES-- 收尾：明天 Day2 直接按任务看板编码，遇到问题回到今天的分析文档。
