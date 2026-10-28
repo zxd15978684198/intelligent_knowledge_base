@@ -5,14 +5,15 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyknora.api.deps import get_kb_repo, get_scope, get_session
 from pyknora.core.errors import AppError, ErrorCode, not_found
 from pyknora.core.scope import Scope
-from pyknora.schemas.kb import EmbeddingProfile, KnowledgeBase
+from pyknora.schemas.kb import EmbeddingProfile, KnowledgeBase, KnowledgeBasePage
+from pyknora.services.kb.cursor import decode_cursor, encode_cursor
 from pyknora.services.kb.service import (
     create_knowledge_base,
     delete_knowledge_base,
@@ -86,6 +87,31 @@ async def create(
             normalize=body.normalize,
         ),
     )
+
+
+@router.get("", response_model=KnowledgeBasePage)
+async def list_knowledge_bases(
+    scope: Annotated[Scope, Depends(get_scope)],
+    repo: Annotated[Any, Depends(get_kb_repo)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: str | None = None,
+) -> KnowledgeBasePage:
+    position = decode_cursor(scope, cursor) if cursor else None
+    items, has_more = await repo.list(
+        scope,
+        limit=limit,
+        after_created_at=position.created_at if position else None,
+        after_kb_id=position.kb_id if position else None,
+    )
+    next_cursor = None
+    if has_more and items:
+        last = items[-1]
+        next_cursor = encode_cursor(
+            scope,
+            created_at=last.created_at,
+            kb_id=last.kb_id,
+        )
+    return KnowledgeBasePage(items=list(items), next_cursor=next_cursor, limit=limit)
 
 
 @router.get("/{kb_id}", response_model=KnowledgeBase)

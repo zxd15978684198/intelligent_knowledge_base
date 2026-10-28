@@ -40,3 +40,11 @@ class KnowledgeBase(BaseModel):
     deleted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class KnowledgeBasePage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    items: list[KnowledgeBase]
+    next_cursor: str | None = None
+    limit: int = Field(ge=1, le=100)
