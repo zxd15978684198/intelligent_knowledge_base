@@ -17,7 +17,7 @@
 - Task Orchestration 负责任务分解、依赖 DAG、执行状态、评估和重规划。
 - Celery/Redis 负责可靠异步文档处理、周期任务和独立 Worker，不取代 Agent 运行时。
 - Research Graph 支持 Playwright 与 BrowserSkill 双适配，并经来源审核与统一摄取管线入库。
-
+![img.png](img.png)[](%E6%88%90%E5%91%98%E4%BB%BB%E5%8A%A1%E8%BF%9B%E5%BA%A6%E8%A1%A8.md)
 ```mermaid
 flowchart TD
     PRD["PRD 需求基线"] --> RULES["01 项目规范与 AGENTS.md"]
