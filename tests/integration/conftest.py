@@ -29,7 +29,27 @@ TABLES = (
     "document_blobs",
     "documents",
     "embedding_cache",
+    "knowledge_bases",
 )
+
+KB_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+KB_ID_B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+
+async def _seed_knowledge_bases(session) -> None:
+    await session.execute(
+        text(
+            """
+            INSERT INTO knowledge_bases (
+                kb_id, workspace_id, name, embedding_model_key, embedding_dim,
+                chunk_size, chunk_overlap, normalize
+            ) VALUES
+                (:kb_a, :ws_a, '测试知识库 A', 'test/hashing', 512, 512, 64, true),
+                (:kb_b, :ws_b, '测试知识库 B', 'test/hashing', 512, 512, 64, true)
+            """
+        ),
+        {"kb_a": KB_ID, "ws_a": WORKSPACE_A, "kb_b": KB_ID_B, "ws_b": WORKSPACE_B},
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +72,7 @@ async def session():
     async with factory() as s:
         for table in TABLES:
             await s.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+        await _seed_knowledge_bases(s)
         await s.commit()
         yield s
 
@@ -80,9 +101,6 @@ def kb_repo(scope_a: Scope) -> FakeKbRepo:
     # 漏了归属就等于这条 KB 谁都不属于——这会掩盖跨区越权的 bug。
     repo.add(scope_a, KB_ID, profile)
     return repo
-
-
-KB_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
 
 @pytest.fixture

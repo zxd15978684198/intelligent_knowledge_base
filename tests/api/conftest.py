@@ -36,6 +36,7 @@ TABLES = (
     "document_blobs",
     "documents",
     "embedding_cache",
+    "knowledge_bases",
 )
 
 
@@ -65,6 +66,20 @@ async def clean_db() -> AsyncIterator[None]:
     async with factory() as session:
         for table in TABLES:
             await session.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+        await session.execute(
+            text(
+                """
+                INSERT INTO knowledge_bases (
+                    kb_id, workspace_id, name, embedding_model_key, embedding_dim,
+                    chunk_size, chunk_overlap, normalize
+                ) VALUES (
+                    :kb_id, :workspace_id, '上传测试知识库',
+                    'test/hashing', 512, 512, 64, true
+                )
+                """
+            ),
+            {"kb_id": KB_ID, "workspace_id": WORKSPACE_A},
+        )
         await session.commit()
     yield
 
