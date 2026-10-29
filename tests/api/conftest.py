@@ -58,8 +58,24 @@ async def seed_role_catalog(session) -> None:
     用一条 `VALUES` 列表写完（4 角色 × 至多 15 权限点）：逐个 `INSERT` 是 50+ 次
     round-trip，会让每个用例平白多出几十毫秒的固定成本。
     """
+    # 内置四个角色不能整表删掉再重灌：`0008_roles_are_data.sql` 给
+    # `workspace_memberships.role` 加了指向 `roles(role_key)` 的外键（`ON DELETE
+    # RESTRICT`），而 `seed_test_identity` 在调用本函数前已经造了 owner 成员。
+    # 所以按"引用方向"清理：
+    #   1. 删测试自建的角色（内置的不动），它们的授权行随 `ON DELETE CASCADE` 走；
+    #   2. 清空全部授权行（含内置角色的，矩阵要重灌）；
+    #   3. 把内置角色 upsert 回去，描述以 `permissions.SEED` 为准。
+    builtin = ", ".join(f"'{role_key}'" for role_key in SEED)
+
+    # 夹具自愈：若能进到这里还留着"挂在自建角色上的成员"，说明上一轮清场没覆盖到它。
+    # 外键是 `ON DELETE RESTRICT`，不先退回 `member`，下面删自建角色就会 ForeignKeyViolation。
+    # 退回内置角色是安全的——内置角色必定存在，且本意就是"每个用例自己搭的自建角色
+    # 不应该跨用例继续被引用"。
+    await session.execute(
+        text(f"UPDATE workspace_memberships SET role = 'member' WHERE role NOT IN ({builtin})")
+    )
+    await session.execute(text(f"DELETE FROM roles WHERE role_key NOT IN ({builtin})"))
     await session.execute(text("DELETE FROM role_grants"))
-    await session.execute(text("DELETE FROM roles"))
 
     role_values: list[str] = []
     role_params: dict[str, str] = {}
@@ -68,7 +84,10 @@ async def seed_role_catalog(session) -> None:
         role_params[f"d{index}"] = f"test seed: {role_key}"
         role_values.append(f"(CAST(:k{index} AS text), CAST(:d{index} AS text))")
     await session.execute(
-        text(f"INSERT INTO roles (role_key, description) VALUES {', '.join(role_values)}"),
+        text(
+            f"INSERT INTO roles (role_key, description) VALUES {', '.join(role_values)} "
+            "ON CONFLICT (role_key) DO UPDATE SET description = EXCLUDED.description"
+        ),
         role_params,
     )
 
@@ -104,6 +123,10 @@ async def seed_test_identity(session) -> None:
     `password_hash` 是测试占位串而不是真哈希：这些夹具行永远不走登录接口，
     写一个"看起来像 bcrypt"的假哈希只会让人以为它可登录。
     """
+    # 角色必须先于成员落库：`0008_roles_are_data.sql` 给 `workspace_memberships.role`
+    # 加了指向 `roles(role_key)` 的外键，"先插成员再补角色"会被数据库直接拒绝。
+    await seed_role_catalog(session)
+
     for principal_id in (WORKSPACE_A, WORKSPACE_B):
         suffix = str(principal_id)[:8]
         await session.execute(
@@ -141,8 +164,6 @@ async def seed_test_identity(session) -> None:
             ),
             {"ws": principal_id, "pid": principal_id},
         )
-
-    await seed_role_catalog(session)
 
 
 @pytest.fixture(autouse=True)

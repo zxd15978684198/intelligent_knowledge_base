@@ -259,3 +259,47 @@ class SqlIdentityRepo:
             self._session.add(RoleGrantRow(role_id=role.role_id, permission=permission))
         await self._session.flush()
         return True
+
+    # ------------------------------------------------------------------ 角色目录
+    # 角色是**数据**：`roles` 表是唯一真相源，`role_grants` 给它挂权限点，
+    # `workspace_memberships.role` 通过外键（`0008_roles_are_data.sql`）指向它。
+    # 所以下面这几个方法是"配置角色"而不是"新增一种角色类型"——不需要改代码或迁移。
+
+    async def list_roles(self) -> list[tuple[str, str | None]]:
+        """全部 (role_key, description)，按 role_key 排序。含没有任何权限点的角色。"""
+        stmt = select(RoleRow.role_key, RoleRow.description).order_by(RoleRow.role_key)
+        rows = (await self._session.execute(stmt)).all()
+        return [(str(role_key), description) for role_key, description in rows]
+
+    async def role_exists(self, role_key: str) -> bool:
+        return await self.find_role(role_key) is not None
+
+    async def create_role(self, *, role_key: str, description: str | None = None) -> bool:
+        """建角色。已存在返回 False，不覆盖——覆盖会把别人的权限矩阵悄悄清掉。"""
+        if await self.find_role(role_key) is not None:
+            return False
+        self._session.add(RoleRow(role_key=role_key, description=description))
+        await self._session.flush()
+        return True
+
+    async def delete_role(self, role_key: str) -> bool:
+        """删角色。不存在返回 False。
+
+        仍被成员引用时数据库外键（`ON DELETE RESTRICT`）会拒绝，这里会抛
+        `IntegrityError`——调用方应先用 `count_role_members` 给出可读的 409。
+        """
+        role = await self.find_role(role_key)
+        if role is None:
+            return False
+        await self._session.delete(role)
+        await self._session.flush()
+        return True
+
+    async def count_role_members(self, role_key: str) -> int:
+        """有多少成员正在用这个角色。删角色前的可读性检查，好过让外键抛 500。"""
+        stmt = (
+            select(func.count())
+            .select_from(WorkspaceMembershipRow)
+            .where(WorkspaceMembershipRow.role == role_key)
+        )
+        return int((await self._session.execute(stmt)).scalar_one())

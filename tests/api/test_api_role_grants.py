@@ -184,3 +184,128 @@ async def test_member_can_read_own_permissions(
     assert body["role"] == "member"
     assert DOCUMENT_WRITE in body["permissions"]
     assert WORKSPACE_MANAGE_ROLES not in body["permissions"]
+
+
+# --------------------------------------------------------------------------- 角色是数据
+# `0008_roles_are_data.sql` 之前的三个真相源：`0003` 的 CHECK、`roles.role_key`、
+# `workspaces.py` 的 `Literal`。这三条用例守的是"只剩一个"：建角色只用 HTTP，
+# 成员立刻能被指派，不必改 DDL、不必发版。
+
+
+async def _membership_id(db_session: Any, principal_id: UUID) -> str:
+    return str(
+        (
+            await db_session.execute(
+                text(
+                    "SELECT membership_id FROM workspace_memberships "
+                    "WHERE workspace_id = :ws AND user_id = :pid"
+                ),
+                {"ws": WORKSPACE_A_ID, "pid": principal_id},
+            )
+        ).scalar_one()
+    )
+
+
+async def test_new_role_is_assignable_without_any_migration(
+    client: httpx.AsyncClient, clean_db: None, db_session: Any
+) -> None:
+    """新建 `auditor` → 指派给成员 → 立刻能按它的权限点工作。全程只走 HTTP。"""
+    created = await client.post(
+        ROLES_URL,
+        headers=bearer(),
+        json={
+            "role_key": "auditor",
+            "description": "只读审计",
+            "permissions": ["document.read", "chunk.read"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["role_key"] == "auditor"
+
+    member_id = await _add_member(db_session)
+    patched = await client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_A}/members/{await _membership_id(db_session, member_id)}",
+        headers=bearer(),
+        json={"role": "auditor"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["role"] == "auditor"
+
+    # 审计角色只能读，不能上传——证明判权走的是新角色的矩阵，不是某个内置角色的兜底
+    assert (await _upload(client, _as(member_id))).status_code == 403
+
+    catalog = await client.get(ROLES_URL, headers=bearer())
+    by_role = {row["role_key"]: row["permissions"] for row in catalog.json()["roles"]}
+    assert by_role["auditor"] == ["chunk.read", "document.read"]
+
+
+async def test_assigning_a_role_that_does_not_exist_is_rejected(
+    client: httpx.AsyncClient, clean_db: None, db_session: Any
+) -> None:
+    """外键是 `ON DELETE RESTRICT` 的数据库保证，接口层要给出可读的 422 而不是 500。"""
+    member_id = await _add_member(db_session)
+    r = await client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_A}/members/{await _membership_id(db_session, member_id)}",
+        headers=bearer(),
+        json={"role": "auditor_typo"},
+    )
+    assert r.status_code == 422, r.text
+    assert "unknown role" in r.text
+
+
+async def test_role_key_must_look_like_an_identifier(
+    client: httpx.AsyncClient, clean_db: None
+) -> None:
+    for bad in ("Auditor", "1auditor", "auditor role", "a" * 65):
+        r = await client.post(ROLES_URL, headers=bearer(), json={"role_key": bad})
+        assert r.status_code == 422, f"{bad!r} 应被拒：{r.text}"
+
+
+async def test_duplicate_role_is_conflict_not_overwrite(
+    client: httpx.AsyncClient, clean_db: None
+) -> None:
+    """重复建同名角色必须 409：静默覆盖会把那个角色现有的权限矩阵清空。"""
+    payload = {"role_key": "auditor", "permissions": ["document.read"]}
+    assert (await client.post(ROLES_URL, headers=bearer(), json=payload)).status_code == 201
+
+    again = await client.post(
+        ROLES_URL, headers=bearer(), json={"role_key": "auditor", "permissions": []}
+    )
+    assert again.status_code == 409, again.text
+
+
+async def test_deleting_a_role_in_use_is_rejected(
+    client: httpx.AsyncClient, clean_db: None, db_session: Any
+) -> None:
+    """还有人挂在这个角色上就删不掉——静默删会把一群人降成无权，比报错更难查。"""
+    assert (
+        await client.post(
+            ROLES_URL, headers=bearer(), json={"role_key": "auditor", "permissions": []}
+        )
+    ).status_code == 201
+    member_id = await _add_member(db_session, role="auditor")
+
+    r = await client.delete(f"{ROLES_URL}/auditor", headers=bearer())
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["details"]["members"] == 1
+
+    # 把成员换回 member 后就能删了
+    await client.patch(
+        f"/api/v1/workspaces/{WORKSPACE_A}/members/{await _membership_id(db_session, member_id)}",
+        headers=bearer(),
+        json={"role": "member"},
+    )
+    assert (await client.delete(f"{ROLES_URL}/auditor", headers=bearer())).status_code == 204
+
+    catalog = await client.get(ROLES_URL, headers=bearer())
+    assert "auditor" not in {row["role_key"] for row in catalog.json()["roles"]}
+
+
+async def test_owner_role_is_protected_from_create_and_delete(
+    client: httpx.AsyncClient, clean_db: None
+) -> None:
+    """owner 是唯一能恢复权限的角色：不允许被重建、被删除。"""
+    assert (
+        await client.post(ROLES_URL, headers=bearer(), json={"role_key": "owner"})
+    ).status_code == 422
+    assert (await client.delete(f"{ROLES_URL}/owner", headers=bearer())).status_code == 422

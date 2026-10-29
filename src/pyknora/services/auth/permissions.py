@@ -92,9 +92,17 @@ SEED: Final[dict[str, frozenset[str]]] = {
     "guest": READ_ONLY,
 }
 
-# 角色闭集：与 workspace_memberships.role 的 CHECK 约束、workspaces.py 的
-# AssignableRole 三处必须一致。多一个（比如给它建了角色但成员表 CHECK 不让写）就是死角色。
-ROLE_KEYS: Final[frozenset[str]] = frozenset(SEED)
+# **内置**角色：`0006` 种下的四个。它们有特殊语义（owner 的权限不可改、owner 不可在
+# 成员接口里被赋值/删除），所以仍然写成常量；但角色集合本身就**不是**闭集了——
+# 合法的角色名以 `roles` 表为准（`0008_roles_are_data.sql` 用外键把成员表指向它）。
+# 判断"某个角色名是否存在"要查库（`SqlIdentityRepo.role_exists`），不要查这个常量。
+BUILTIN_ROLES: Final[frozenset[str]] = frozenset(SEED)
+
+# 旧名保留，语义已从"角色闭集"收窄为"内置角色"。新代码请用 `BUILTIN_ROLES`。
+ROLE_KEYS: Final[frozenset[str]] = BUILTIN_ROLES
+
+# 唯一拥有"不可被剥夺"语义的角色：它的权限不可整组替换，成员表里也不可被改成别的角色。
+OWNER_ROLE: Final = "owner"
 
 
 def is_known_permission(permission: str) -> bool:

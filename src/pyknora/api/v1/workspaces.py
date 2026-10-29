@@ -22,11 +22,12 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import re
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, Response, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyknora.api.deps import get_scope, get_session, require_permission
@@ -35,7 +36,7 @@ from pyknora.core.scope import Scope
 from pyknora.db.repos.principals import SqlIdentityRepo
 from pyknora.services.auth.membership import load_permissions
 from pyknora.services.auth.permissions import (
-    ROLE_KEYS,
+    OWNER_ROLE,
     WORKSPACE_MANAGE_MEMBERS,
     WORKSPACE_MANAGE_ROLES,
     is_known_permission,
@@ -43,15 +44,16 @@ from pyknora.services.auth.permissions import (
 
 router = APIRouter(tags=["workspaces"])
 
-# `owner` 不在可赋值集合里：转移所有权是另一件事（要连带改 workspaces.owner_principal_id），
-# 顺手在一个"改角色"接口里做，迟早出现两个 owner 或零个 owner。
-AssignableRole = Literal["admin", "member", "guest"]
+# 角色名不再枚举在代码里：`0008_roles_are_data.sql` 之后，合法取值由 `roles` 表决定。
+# 代码里只剩两条硬规则——不能在这个接口把成员改成 `owner`（转移所有权要连带改
+# `workspaces.owner_principal_id`），以及角色名必须是 `roles` 里真实存在的一行。
+_ROLE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 class MemberRoleUpdate(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    role: AssignableRole
+    role: str
 
 
 class MembershipDetail(BaseModel):
@@ -96,6 +98,21 @@ async def update_member_role(
         raise not_found("membership")
     if target.role == "owner":
         raise AppError(ErrorCode.INVALID_REQUEST, "owner role cannot be changed here")
+
+    # 角色名必须是 `roles` 表里存在的一行。不查库就让外键去拦的话，用户拿到的是 500
+    # 而不是"你拼错了角色名"。
+    if payload.role == OWNER_ROLE:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "owner role cannot be assigned here; transfer ownership instead",
+            details={"role": payload.role},
+        )
+    if not await repo.role_exists(payload.role):
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "unknown role",
+            details={"role": payload.role},
+        )
 
     updated = await repo.update_member_role(
         workspace_id=ws_id, membership_id=membership_id, role=payload.role
@@ -185,13 +202,19 @@ async def list_role_catalog(
     scope: Annotated[Scope, Depends(get_scope)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> RoleCatalog:
-    """把 `role_grants` 的现状原样返回，不做任何"应有权限"的补充推导。"""
+    """角色目录：**以 `roles` 表为准**，逐个附上它当前的权限点。
+
+    不做任何"应有权限"的推导——`roles` 里没有 `document.write` 就是没有，不会因为
+    "admin 应该什么都能干"被补上。一个刚建好、还没配权限点的角色也会出现在目录里
+    （空数组），而不是隐身。
+    """
     if ws_id != scope.workspace_id:
         raise not_found("workspace")
 
-    grants = await SqlIdentityRepo(session).list_role_grants()
-    per_role: dict[str, list[str]] = {key: [] for key in ROLE_KEYS}
-    for role_key, permission in grants:
+    repo = SqlIdentityRepo(session)
+    roles = await repo.list_roles()
+    per_role: dict[str, list[str]] = {role_key: [] for role_key, _ in roles}
+    for role_key, permission in await repo.list_role_grants():
         per_role.setdefault(role_key, []).append(permission)
     return RoleCatalog(
         roles=[
@@ -221,9 +244,11 @@ async def replace_role_permissions(
     """
     if ws_id != scope.workspace_id:
         raise not_found("workspace")
-    if role_key not in ROLE_KEYS:
+
+    repo = SqlIdentityRepo(session)
+    if not await repo.role_exists(role_key):
         raise not_found("role")
-    if role_key == "owner":
+    if role_key == OWNER_ROLE:
         # 能改 owner 权限 = 能把唯一能恢复权限的人自锁死，不可逆，直接拒。
         raise AppError(
             ErrorCode.INVALID_REQUEST,
@@ -239,10 +264,117 @@ async def replace_role_permissions(
             details={"permissions": unknown},
         )
 
-    repo = SqlIdentityRepo(session)
     await repo.replace_role_grants(role_key=role_key, permissions=payload.permissions)
     await session.commit()
     return RolePermissionView(
         role_key=role_key,
         permissions=sorted(set(payload.permissions)),
     )
+
+
+class RoleCreate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    role_key: str
+    description: str | None = None
+    permissions: list[str] = Field(default_factory=list)
+
+
+@router.post(
+    "/workspaces/{ws_id}/roles",
+    response_model=RolePermissionView,
+    status_code=status.HTTP_201_CREATED,
+    summary="新建角色（角色集合是数据，不是 DDL）",
+    dependencies=[Depends(require_permission(WORKSPACE_MANAGE_ROLES))],
+)
+async def create_role(
+    ws_id: UUID,
+    payload: RoleCreate,
+    scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> RolePermissionView:
+    """建角色 = 往 `roles` 插一行 + 往 `role_grants` 插若干行，**不改代码、不加迁移**。
+
+    这是这次改造的目的本身：`0008_roles_are_data.sql` 给成员表加了
+    `role → roles(role_key)` 外键，所以新角色一旦建成，立刻可以被成员使用；
+    在此之前，加角色必须同时改 DDL 的 CHECK 和 `workspaces.py` 里的 `Literal`。
+    """
+    if ws_id != scope.workspace_id:
+        raise not_found("workspace")
+    if not _ROLE_KEY_RE.match(payload.role_key):
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "invalid role_key: expect ^[a-z][a-z0-9_]{0,63}$",
+            details={"role_key": payload.role_key},
+        )
+    if payload.role_key == OWNER_ROLE:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "owner is built in and cannot be re-created",
+            details={"role_key": payload.role_key},
+        )
+
+    unknown = sorted({p for p in payload.permissions if not is_known_permission(p)})
+    if unknown:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "unknown permission",
+            details={"permissions": unknown},
+        )
+
+    repo = SqlIdentityRepo(session)
+    if not await repo.create_role(role_key=payload.role_key, description=payload.description):
+        # 已存在就 409，不静默覆盖——覆盖会把那个角色现有的权限矩阵悄悄清空。
+        raise AppError(
+            ErrorCode.CONFLICT,
+            "role already exists",
+            details={"role_key": payload.role_key},
+        )
+    if payload.permissions:
+        await repo.replace_role_grants(role_key=payload.role_key, permissions=payload.permissions)
+    await session.commit()
+    return RolePermissionView(
+        role_key=payload.role_key,
+        permissions=sorted(set(payload.permissions)),
+    )
+
+
+@router.delete(
+    "/workspaces/{ws_id}/roles/{role_key}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除角色（仍有成员在用时拒绝）",
+    dependencies=[Depends(require_permission(WORKSPACE_MANAGE_ROLES))],
+)
+async def delete_role(
+    ws_id: UUID,
+    role_key: str,
+    scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """删角色。`role_grants` 随角色级联删除，但成员表是 `ON DELETE RESTRICT`：
+
+    还有人在用这个角色时删不掉——先给这些人换角色再删。让数据库拦，比在应用层
+    "先 count 再删"可靠：中间那一下仍可能有人被加进这个角色。
+    """
+    if ws_id != scope.workspace_id:
+        raise not_found("workspace")
+    if role_key == OWNER_ROLE:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "owner role cannot be deleted",
+            details={"role_key": role_key},
+        )
+
+    repo = SqlIdentityRepo(session)
+    if not await repo.role_exists(role_key):
+        raise not_found("role")
+    members = await repo.count_role_members(role_key)
+    if members:
+        raise AppError(
+            ErrorCode.CONFLICT,
+            "role is still in use; reassign its members first",
+            details={"role_key": role_key, "members": members},
+        )
+    await repo.delete_role(role_key)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
