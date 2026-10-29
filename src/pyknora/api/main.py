@@ -28,7 +28,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from pyknora.core.errors import AppError, ErrorCode
+from pyknora.core.settings import settings
 from pyknora.db.session import dispose_engine
+from pyknora.services.ingest.embedder import build_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,10 @@ def _error_response(exc: AppError, request: Request) -> JSONResponse:
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("pyknora api starting")
+    state = get_app_state()
+    if state.embedder is None:
+        # 建立 provider 不会立即加载模型；本地权重在第一次 query 时按需加载。
+        state.embedder = build_embedder(settings)
     try:
         yield
     finally:
@@ -150,11 +156,13 @@ def create_app() -> FastAPI:
 
     from pyknora.api.v1 import documents as documents_router
     from pyknora.api.v1 import jobs as jobs_router
+    from pyknora.api.v1 import query as query_router
     from pyknora.api.v1 import knowledge_bases as knowledge_bases_router
     from pyknora.api.v1 import lineage as lineage_router
 
     app.include_router(documents_router.router, prefix="/api/v1")
     app.include_router(jobs_router.router, prefix="/api/v1")
+    app.include_router(query_router.router, prefix="/api/v1")
     app.include_router(knowledge_bases_router.router, prefix="/api/v1")
     app.include_router(lineage_router.router, prefix="/api/v1")
     return app

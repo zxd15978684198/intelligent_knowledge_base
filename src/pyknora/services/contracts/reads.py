@@ -51,7 +51,7 @@ class ChunkSearchRepo(Protocol):
         limit: int = 10,
         document_id=None,
     ) -> Sequence[ScoredChunk]:
-        """按余弦距离取 top-k。**这是成员3 唯一该用的检索入口。**
+        """按余弦距离取 top-k 向量候选；关键词候选使用 `search_keyword`。
 
         语义护栏四条：
         1. scope 必填且进 SQL 谓词，跨区的 chunk 不会被读进本进程。
@@ -60,6 +60,21 @@ class ChunkSearchRepo(Protocol):
         3. 库内若存在多个 `embedding_dim`（换过模型且未重建），同样抛错，
            因为这种库的向量不可比，返回任何结果都是错的。
         4. 返回按 `distance` 升序，`distance` 是距离不是相似度。
+        """
+        ...
+
+    async def search_keyword(
+        self,
+        scope: Scope,
+        kb_id,
+        query_text: str,
+        *,
+        limit: int = 10,
+    ) -> Sequence[ActiveChunk]:
+        """按 PostgreSQL 全文检索排名返回活动 chunk。
+
+        scope 与 kb_id 必须在 SQL 中过滤；返回顺序按关键词相关度从高到低。
+        中文按当前 `simple` 配置整词匹配，具体分词质量仍需后续评测。
         """
         ...
 
