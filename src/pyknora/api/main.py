@@ -157,15 +157,11 @@ def create_app() -> FastAPI:
     from pyknora.api.v1 import documents as documents_router
     from pyknora.api.v1 import jobs as jobs_router
     from pyknora.api.v1 import query as query_router
-
-    app.include_router(documents_router.router, prefix="/api/v1")
-    app.include_router(jobs_router.router, prefix="/api/v1")
-    app.include_router(query_router.router, prefix="/api/v1")
-
     from pyknora.api.v1 import knowledge_bases as knowledge_bases_router
 
     app.include_router(documents_router.router, prefix="/api/v1")
     app.include_router(jobs_router.router, prefix="/api/v1")
+    app.include_router(query_router.router, prefix="/api/v1")
     app.include_router(knowledge_bases_router.router, prefix="/api/v1")
 
     return app
