@@ -205,6 +205,28 @@ class JobAttemptRow(Base):
     __table_args__ = (UniqueConstraint("workspace_id", "attempt_id"),)
 
 
+# ---------- 成员4：身份与权限（migrations/0003_identity_acl.sql） ----------
+# 追加在文件末尾，不重排上面的类：`__tablename__` 是迁移的镜像，顺序不携带语义，
+# 但重排会让别人的 diff 永远冲突。
+
+
+class PrincipalRow(Base):
+    """身份主体。表名不是 `users`——全仓按 principal 口径命名。"""
+
+    __tablename__ = "principals"
+
+    principal_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    username: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    # 只放 bcrypt 哈希。这个字段永远不进日志、不进响应体。
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class KnowledgeBaseRow(Base):
     """成员1拥有的知识库配置；追加在共享映射文件末尾以减少合并冲突。"""
 
@@ -239,3 +261,81 @@ class KnowledgeBaseRow(Base):
             postgresql_where=deleted_at.is_(None),
         ),
     )
+
+
+class IndexMigrationRow(Base):
+    """成员5：重建 / 迁库的记账行（migrations/0004）。追加在共享映射文件末尾。"""
+
+    __tablename__ = "index_migrations"
+
+    migration_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    kb_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    source_build_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    target_build_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)  # export|replay|reindex
+    # pending|running|succeeded|failed
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    manifest: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "migration_id"),
+        Index("index_migrations_kb_idx", "workspace_id", "kb_id", "created_at"),
+    )
+
+
+class WorkspaceRow(Base):
+    __tablename__ = "workspaces"
+
+    workspace_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_principal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WorkspaceMembershipRow(Base):
+    """用户↔工作区。`user_id` 引用 `principals.principal_id`，见迁移顶部第 2 条注释。"""
+
+    __tablename__ = "workspace_memberships"
+
+    membership_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="member")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id"),)
+
+
+class RoleRow(Base):
+    __tablename__ = "roles"
+
+    role_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    role_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+
+
+class RoleGrantRow(Base):
+    __tablename__ = "role_grants"
+
+    grant_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    role_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    permission: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    __table_args__ = (UniqueConstraint("role_id", "permission"),)

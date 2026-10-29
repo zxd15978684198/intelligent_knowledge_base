@@ -20,6 +20,12 @@ from pyknora.schemas.kb import EmbeddingProfile
 from pyknora.services.ingest.embedder import HashingEmbedder
 
 TABLES = (
+    # 成员4 的身份表：不在清单里就 TRUNCATE 不到，上一个用例的成员关系会漏给下一个。
+    "role_grants",
+    "roles",
+    "workspace_memberships",
+    "workspaces",
+    "principals",
     "outbox",
     "job_attempts",
     "ingestion_jobs",
@@ -30,6 +36,7 @@ TABLES = (
     "documents",
     "embedding_cache",
     "knowledge_bases",
+    "index_migrations",
 )
 
 KB_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
