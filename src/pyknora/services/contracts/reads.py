@@ -14,10 +14,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Protocol, runtime_checkable
+from uuid import UUID
 
 from pyknora.core.scope import Scope
 from pyknora.schemas.document import ActiveChunk, ActiveDocument, IndexBuild, ScoredChunk
+from pyknora.schemas.kb import EmbeddingProfile, KnowledgeBase
 
 
 @runtime_checkable
@@ -47,7 +50,7 @@ class ChunkSearchRepo(Protocol):
         limit: int = 10,
         document_id=None,
     ) -> Sequence[ScoredChunk]:
-        """按余弦距离取 top-k。**这是成员3 唯一该用的检索入口。**
+        """按余弦距离取 top-k 向量候选；关键词候选使用 `search_keyword`。
 
         语义护栏四条：
         1. scope 必填且进 SQL 谓词，跨区的 chunk 不会被读进本进程。
@@ -56,6 +59,21 @@ class ChunkSearchRepo(Protocol):
         3. 库内若存在多个 `embedding_dim`（换过模型且未重建），同样抛错，
            因为这种库的向量不可比，返回任何结果都是错的。
         4. 返回按 `distance` 升序，`distance` 是距离不是相似度。
+        """
+        ...
+
+    async def search_keyword(
+        self,
+        scope: Scope,
+        kb_id,
+        query_text: str,
+        *,
+        limit: int = 10,
+    ) -> Sequence[ActiveChunk]:
+        """按 PostgreSQL 全文检索排名返回活动 chunk。
+
+        scope 与 kb_id 必须在 SQL 中过滤；返回顺序按关键词相关度从高到低。
+        中文按当前 `simple` 配置整词匹配，具体分词质量仍需后续评测。
         """
         ...
 
@@ -71,6 +89,21 @@ class IndexBuildRepo(Protocol):
 class KbRepo(Protocol):
     """C1：成员1 交付。成员2 只调这个，绝不直连 knowledge_bases 表。"""
 
-    async def get_embedding_profile(self, scope: Scope, kb_id) -> object | None:
+    async def get(self, scope: Scope, kb_id: UUID) -> KnowledgeBase | None:
+        """不存在、跨区、已删除统一返回 None。"""
+        ...
+
+    async def list(
+        self,
+        scope: Scope,
+        *,
+        limit: int,
+        after_created_at: datetime | None = None,
+        after_kb_id: UUID | None = None,
+    ) -> tuple[Sequence[KnowledgeBase], bool]:
+        """稳定键集分页；bool 表示是否仍有下一页。"""
+        ...
+
+    async def get_embedding_profile(self, scope: Scope, kb_id: UUID) -> EmbeddingProfile | None:
         """返回 EmbeddingProfile。KB 不存在、跨区、已删除，统一返回 None。"""
         ...

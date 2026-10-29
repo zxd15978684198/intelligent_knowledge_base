@@ -14,6 +14,10 @@ class ErrorCode:
     FORBIDDEN = "FORBIDDEN"
     RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND"
     INVALID_REQUEST = "INVALID_REQUEST"
+    # 注册撞唯一键（用户名/邮箱已存在）。不复用 IDEMPOTENCY_CONFLICT：
+    # 那个码是"重放同一个幂等键"，与"这个用户名被人占了"是两件事，混用会让前端
+    # 分不清该提示"换一个名字"还是"稍后重试"。
+    CONFLICT = "CONFLICT"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     REVISION_MISSING = "REVISION_MISSING"
     REVISION_CONFLICT = "REVISION_CONFLICT"
@@ -38,6 +42,7 @@ _HTTP_STATUS: dict[str, int] = {
     ErrorCode.UNSUPPORTED_FORMAT: 422,
     ErrorCode.PARSE_FAILED: 422,
     ErrorCode.PARSE_INCOMPLETE: 422,
+    ErrorCode.CONFLICT: 409,
     ErrorCode.IDEMPOTENCY_CONFLICT: 409,
     ErrorCode.REVISION_CONFLICT: 409,
     ErrorCode.STALE_ATTEMPT: 409,

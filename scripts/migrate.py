@@ -40,7 +40,11 @@ def main() -> int:
             "-",
         ]
         print("+", " ".join(cmd), "<", sql_file.name)
-        subprocess.run(cmd, input=script, text=True, check=True)
+        # encoding 必须显式写死 utf-8：text=True 且不指定 encoding 时，Python 用
+        # locale.getpreferredencoding(False) 决定管道编码，在中文 Windows 上可能是
+        # cp936/GBK。SQL 里语句内部的中文注释会被编成 GBK 字节，psql 按 UTF-8 校验
+        # 就会报 `invalid byte sequence for encoding "UTF8": 0xb5`（"的"的 GBK 首字节）。
+        subprocess.run(cmd, input=script, text=True, encoding="utf-8", check=True)
     print("migrations ok")
     return 0
 

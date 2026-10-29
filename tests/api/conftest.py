@@ -26,7 +26,14 @@ from pyknora.schemas.kb import EmbeddingProfile
 from pyknora.services.ingest.embedder import HashingEmbedder
 from tests.api.tokens import JWT_SECRET, KB_ID
 
+# 身份表排在最前：`workspace_memberships` 引用 `workspaces`/`principals`，
+# 一次 TRUNCATE ... CASCADE 就能连带清干净，但顺序写清楚能少一次排查。
 TABLES = (
+    "role_grants",
+    "roles",
+    "workspace_memberships",
+    "workspaces",
+    "principals",
     "outbox",
     "job_attempts",
     "ingestion_jobs",
@@ -38,6 +45,55 @@ TABLES = (
     "embedding_cache",
     "knowledge_bases",
 )
+
+
+async def seed_test_identity(session) -> None:
+    """给会员4 的鉴权链路造最小身份数据。
+
+    为什么必须造：`deps.get_scope` 现在真的查 `workspace_memberships` 了，
+    没有成员关系的 token 会被 403。以前 token 里的 sub 直接当身份用（`_load_membership`
+    恒 True），测试自然不需要这层数据——这正是那个占位掩盖掉的东西。
+
+    `password_hash` 是测试占位串而不是真哈希：这些夹具行永远不走登录接口，
+    写一个"看起来像 bcrypt"的假哈希只会让人以为它可登录。
+    """
+    for principal_id in (WORKSPACE_A, WORKSPACE_B):
+        suffix = str(principal_id)[:8]
+        await session.execute(
+            text(
+                """
+                INSERT INTO principals (principal_id, username, email, password_hash)
+                VALUES (:pid, :username, :email, :hash)
+                ON CONFLICT (principal_id) DO NOTHING
+                """
+            ),
+            {
+                "pid": principal_id,
+                "username": f"user_{suffix}",
+                "email": f"{suffix}@test.local",
+                "hash": "test-fixture-not-a-login-hash",
+            },
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO workspaces (workspace_id, name, owner_principal_id)
+                VALUES (:ws, :name, :pid)
+                ON CONFLICT (workspace_id) DO NOTHING
+                """
+            ),
+            {"ws": principal_id, "name": f"workspace {suffix}", "pid": principal_id},
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO workspace_memberships (workspace_id, user_id, role)
+                VALUES (:ws, :pid, 'owner')
+                ON CONFLICT (workspace_id, user_id) DO NOTHING
+                """
+            ),
+            {"ws": principal_id, "pid": principal_id},
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +122,9 @@ async def clean_db() -> AsyncIterator[None]:
     async with factory() as session:
         for table in TABLES:
             await session.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+        # 清场之后立刻补回最小身份数据：鉴权链路需要它，而调用方不该为
+        # "我的用例要不要自己插 principals"操心。
+        await seed_test_identity(session)
         await session.execute(
             text(
                 """
@@ -112,6 +171,13 @@ async def client(kb_repo: FakeKbRepo) -> AsyncIterator[httpx.AsyncClient]:
     这样任何意外的崩溃都会带着 traceback 失败，而不是变成一条
     "status 500" 的断言错误让人误以为是业务逻辑问题。
     """
+    # 不用 clean_db 的用例（如"没带 token 就 401"）也要能通过鉴权——
+    # 它们的 token 是夹具造的，必须先在库里存在对应的成员关系。
+    factory = get_session_factory()
+    async with factory() as session:
+        await seed_test_identity(session)
+        await session.commit()
+
     configure(kb_repo=kb_repo, embedder=HashingEmbedder(dim=512))
     async with _make_client(create_app(), strict=True) as c:
         yield c
