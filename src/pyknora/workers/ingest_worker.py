@@ -113,7 +113,21 @@ async def process_job(
     embedder: EmbeddingProvider,
 ) -> ProcessResult:
     """处理一件已 claim 的作业。调用方负责 commit。"""
-    scope = Scope(workspace_id=job.workspace_id, principal_id=job.workspace_id)
+    # 身份只从作业 payload 里取（入队时由 API 层从 JWT 解出的 principal 写入）。
+    # 老作业没有这个字段时退回 workspace_id 并告警：跨区仍然被 workspace 谓词挡住，
+    # 但 principal 语义缺失，不能把它当成"就是本人"。
+    raw_actor = job.payload.get("principal_id")
+    if raw_actor:
+        try:
+            actor_id = UUID(str(raw_actor))
+        except ValueError as exc:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST, "job payload principal_id is not a uuid"
+            ) from exc
+    else:
+        logger.warning("job %s 缺少 principal_id，身份退回 workspace_id", job.job_id)
+        actor_id = job.workspace_id
+    scope = Scope(workspace_id=job.workspace_id, principal_id=actor_id)
 
     if job.job_type == "purge":
         from pyknora.services.ingest.documents import purge_document_chunks

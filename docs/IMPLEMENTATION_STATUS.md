@@ -1,6 +1,24 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加：成员2 四任务收口，见下方「本轮：成员2 四任务收口」**；其后的成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：成员2 两条 P0 缺陷修复，见下方「本轮：成员2 P0 修复」**；更早的成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+
+## 本轮：成员2 P0 修复（2026-10-29，成员2）
+
+- 任务：成员2 自审打回的两条 P0 缺陷（加固进度表任务 **3/4/5/6** 的防线，不新增任务号）。起始 HEAD `1724a23`，开工时工作区干净。
+- 缺陷与修法：
+  1. **只校验维度、不校验模型**（`src/pyknora/services/ingest/embedder.py`）：512 维的模型不止一个，原 `check_profile_compat` 只比 `embedding_dim`，两套不兼容的向量空间会被静默混用——不报错，只是检索结果全错。新增 `EmbeddingProfileMismatch`（`details` 带 `field/expected/actual`），`check_profile_compat` 改为**维度与模型名都比**；老 profile 缺字段时仍跳过（兼容）。
+  2. **worker 身份伪造**（`src/pyknora/workers/ingest_worker.py`）：原 `Scope(principal_id=job.workspace_id)` 把一个工作区 UUID 当成用户身份。改为从 `job.payload["principal_id"]` 取 UUID；`src/pyknora/services/ingest/documents.py` 三处入队 payload（新建 v1 / 新版本 / purge）补齐该字段；老作业无字段时 `logger.warning` 回落 `workspace_id`，非法值抛 `INVALID_REQUEST`。
+  3. **（修 P0 时被测试逼出的第三处）上传入口用错身份来源**（`src/pyknora/services/ingest/documents.py`）：原拿 `settings.embedding_model_key` 与 KB profile 比对，而该字段**只有 local 后端权威**（openai 走 `openai_embedding_model`、hashing 固定 `test/hashing`），非 local 部署下每份上传都会误报。新增 `resolve_embedding_identity(settings)`，返回 `build_embedder` 会产出的 `(model_key, dim)` 但不加载权重；`HashingEmbedder` 的 `test/hashing` 提为 `HASHING_MODEL_KEY` 常量。
+- 改动文件：`src/pyknora/services/ingest/embedder.py`、`src/pyknora/services/ingest/documents.py`、`src/pyknora/workers/ingest_worker.py`、`tests/unit/test_profile_compat.py`、`tests/conftest.py`（新增）。
+- 已执行（真实输出；连临时真库 `pyknora-pg-p0`，宿主 **5434**，`0001`+`0002`+`0003` 三条迁移在重建库上跑通 → **16 表 + `v_active_chunks`**）：
+  - `uv run --frozen pytest -q` → **185 passed**，exit 0（`tests/unit` 61 / `tests/contract` 20 / `tests/api` 61 / `tests/integration` 43）
+  - `uv run --frozen python scripts/ci.py --stage all` → `PASS lint/ruff-check 0.3s` / `PASS lint/ruff-format 0.2s` / `PASS test/pytest 13.2s`，`total 13.6s`
+  - `ruff check`（本轮 5 个文件）→ `All checks passed!`；`ruff format --check` → 已格式化
+- 中间失败与闭环：`X9` 改完立刻让 `tests/integration` **9 条全红**，报 `EmbeddingProfileMismatch: kb wants 'test/hashing', process has 'BAAI/bge-small-zh-v1.5'`——根因即上第 3 条，修复后 43 条集成全绿。这次失败反过来证明新校验有效：它逮住的第一件事就是自己的错。
+- 未验证 / 未做：
+  - **真实 embedder 端到端仍未跑**（`BAAI/bge-small-zh-v1.5` 需下载权重）；`resolve_embedding_identity` 的 local 分支只有单测覆盖，没有真模型比对。
+  - `tests/conftest.py` 把**测试进程**的 embedding 身份钉成 hashing（测试数据本来就用 `test/hashing`，此前只比维度所以没暴露）；生产不受影响，embedder 与 settings 同源。
+- 下一步：成员2 P0 已闭环，无遗留；P1（真实 embedder 端到端）与成员3/5 的并行工作不在本轮范围。
 
 ## 本轮：成员2 四任务收口（2026-10-29，成员2）
 

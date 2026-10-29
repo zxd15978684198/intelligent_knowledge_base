@@ -27,7 +27,7 @@ from pyknora.core.settings import settings
 from pyknora.models.tables import DocumentBlobRow as BLOB_TABLE
 from pyknora.models.tables import DocumentRow, DocumentVersionRow, IndexBuildRow
 from pyknora.services.contracts.reads import KbRepo
-from pyknora.services.ingest.embedder import check_profile_compat
+from pyknora.services.ingest.embedder import check_profile_compat, resolve_embedding_identity
 from pyknora.services.ingest.publish import find_version_by_hash
 from pyknora.services.queue import jobs as queue
 
@@ -72,9 +72,10 @@ async def upload_document(
     # 1b) 上传即校验 embedding 配方。成员1 的 KB profile 与当前部署的 embedding
     #     配置不一致时，在这里就以 4xx 失败，而不是让作业入队、等 worker 消费后
     #     才标 failed——那样用户得轮询才发现，staging 数据还白写了一遍。
-    check_profile_compat(
-        profile, dim=settings.embedding_dim, model_key=settings.embedding_model_key
-    )
+    #     比的是"将要真正执行 embedding 的那个后端"的身份，不是 settings 里的
+    #     `embedding_model_key`（它只在 local 后端才是权威）。
+    expected_model_key, expected_dim = resolve_embedding_identity(settings)
+    check_profile_compat(profile, dim=expected_dim, model_key=expected_model_key)
 
     content_hash = compute_content_hash(data)
 
@@ -128,6 +129,7 @@ async def upload_document(
                 "filename": filename,
                 "content_type": content_type,
                 "kb_id": str(kb_id),
+                "principal_id": str(principal_id or scope.principal_id),
             },
             idempotency_key=idempotency_key,
         )
@@ -183,6 +185,7 @@ async def upload_document(
             "filename": filename,
             "content_type": content_type,
             "kb_id": str(kb_id),
+            "principal_id": str(principal_id or scope.principal_id),
         },
         idempotency_key=idempotency_key,
     )
@@ -279,7 +282,10 @@ async def delete_document(
         scope=scope,
         document_id=document_id,
         job_type="purge",
-        payload={"document_id": str(document_id)},
+        payload={
+            "document_id": str(document_id),
+            "principal_id": str(scope.principal_id),
+        },
     )
     return job.job_id
 
