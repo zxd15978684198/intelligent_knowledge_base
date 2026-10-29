@@ -249,14 +249,70 @@ class FakeKbRepo:
     """
 
     def __init__(self, profiles: dict[tuple[UUID, UUID], object] | None = None) -> None:
-        self._profiles: dict[tuple[UUID, UUID], object] = profiles or {}
+        from datetime import UTC, datetime
+
+        from pyknora.schemas.kb import KnowledgeBase
+
+        now = datetime.now(UTC)
+        self._knowledge_bases: dict[tuple[UUID, UUID], KnowledgeBase] = {}
+        for (workspace_id, kb_id), profile in (profiles or {}).items():
+            self._knowledge_bases[(workspace_id, kb_id)] = KnowledgeBase(
+                kb_id=kb_id,
+                workspace_id=workspace_id,
+                name=f"fake-{kb_id}",
+                profile=profile,
+                row_version=1,
+                generation=1,
+                created_at=now,
+                updated_at=now,
+            )
 
     def add(self, scope: Scope, kb_id: UUID, profile: object) -> None:
         """按 (workspace_id, kb_id) 登记。签名故意要求传 Scope，逼调用方想清归属。"""
-        self._profiles[(scope.workspace_id, kb_id)] = profile
+        from datetime import UTC, datetime
+
+        from pyknora.schemas.kb import KnowledgeBase
+
+        now = datetime.now(UTC)
+        self._knowledge_bases[(scope.workspace_id, kb_id)] = KnowledgeBase(
+            kb_id=kb_id,
+            workspace_id=scope.workspace_id,
+            name=f"fake-{kb_id}",
+            profile=profile,
+            row_version=1,
+            generation=1,
+            created_at=now,
+            updated_at=now,
+        )
+
+    async def get(self, scope: Scope, kb_id: UUID):
+        return self._knowledge_bases.get((scope.workspace_id, kb_id))
+
+    async def list(
+        self,
+        scope: Scope,
+        *,
+        limit: int,
+        after_created_at=None,
+        after_kb_id=None,
+    ):
+        rows = sorted(
+            (
+                kb
+                for (workspace_id, _), kb in self._knowledge_bases.items()
+                if workspace_id == scope.workspace_id and kb.deleted_at is None
+            ),
+            key=lambda kb: (kb.created_at, kb.kb_id),
+        )
+        if after_created_at is not None and after_kb_id is not None:
+            rows = [
+                kb for kb in rows if (kb.created_at, kb.kb_id) > (after_created_at, after_kb_id)
+            ]
+        return rows[:limit], len(rows) > limit
 
     async def get_embedding_profile(self, scope: Scope, kb_id: UUID) -> object | None:
-        return self._profiles.get((scope.workspace_id, kb_id))
+        kb = await self.get(scope, kb_id)
+        return kb.profile if kb is not None else None
 
 
 def _to_active_chunk(row) -> ActiveChunk:

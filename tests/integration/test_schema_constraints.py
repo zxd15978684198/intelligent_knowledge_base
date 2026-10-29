@@ -20,6 +20,7 @@ from pyknora.core.scope import Scope
 
 FK_CHUNKS_DOC = "chunks_workspace_id_document_id_fkey"
 FK_VERSION_DOC = "document_versions_workspace_id_document_id_fkey"
+FK_DOCUMENT_KB = "documents_kb_fk"
 
 _SKIP_HINT = (
     "当前库是旧 schema（没有外键）：重建容器后再跑迁移 —— "
@@ -36,6 +37,17 @@ async def _fk_present(session, name: str) -> bool:
 
 
 async def _insert_document(session, scope: Scope, doc_id, kb_id) -> None:
+    await session.execute(
+        text(
+            """
+            INSERT INTO knowledge_bases (
+                kb_id, workspace_id, name, embedding_model_key, embedding_dim,
+                chunk_size, chunk_overlap, normalize
+            ) VALUES (:kb_id, :ws, :name, 'test/hashing', 512, 512, 64, true)
+            """
+        ),
+        {"kb_id": kb_id, "ws": scope.workspace_id, "name": f"约束测试-{kb_id}"},
+    )
     await session.execute(
         text(
             """
@@ -65,6 +77,27 @@ async def test_orphan_chunk_is_rejected_by_the_database(session) -> None:
                 """
             ),
             {"ws": uuid4()},
+        )
+
+
+async def test_document_cannot_reference_kb_from_another_workspace(
+    session, scope_a, scope_b
+) -> None:
+    """documents 的新增复合外键必须拒绝跨工作区 KB 引用。"""
+    assert await _fk_present(session, FK_DOCUMENT_KB), "成员1的 0002 必须创建 documents_kb_fk"
+
+    with pytest.raises(IntegrityError):
+        await session.execute(
+            text(
+                """
+                INSERT INTO documents (document_id, workspace_id, kb_id)
+                VALUES (gen_random_uuid(), :workspace_id, :kb_id)
+                """
+            ),
+            {
+                "workspace_id": scope_b.workspace_id,
+                "kb_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            },
         )
 
 

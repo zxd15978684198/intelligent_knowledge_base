@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,3 +34,17 @@ class KnowledgeBase(BaseModel):
     workspace_id: UUID
     name: str
     profile: EmbeddingProfile
+    active_index_build_id: UUID | None = None
+    row_version: int = Field(gt=0)
+    generation: int = Field(gt=0)
+    deleted_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class KnowledgeBasePage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    items: list[KnowledgeBase]
+    next_cursor: str | None = None
+    limit: int = Field(ge=1, le=100)

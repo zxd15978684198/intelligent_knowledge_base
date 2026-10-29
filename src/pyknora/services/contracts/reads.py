@@ -14,10 +14,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Protocol, runtime_checkable
+from uuid import UUID
 
 from pyknora.core.scope import Scope
 from pyknora.schemas.document import ActiveChunk, ActiveDocument, IndexBuild, ScoredChunk
+from pyknora.schemas.kb import EmbeddingProfile, KnowledgeBase
 
 
 @runtime_checkable
@@ -86,6 +89,21 @@ class IndexBuildRepo(Protocol):
 class KbRepo(Protocol):
     """C1：成员1 交付。成员2 只调这个，绝不直连 knowledge_bases 表。"""
 
-    async def get_embedding_profile(self, scope: Scope, kb_id) -> object | None:
+    async def get(self, scope: Scope, kb_id: UUID) -> KnowledgeBase | None:
+        """不存在、跨区、已删除统一返回 None。"""
+        ...
+
+    async def list(
+        self,
+        scope: Scope,
+        *,
+        limit: int,
+        after_created_at: datetime | None = None,
+        after_kb_id: UUID | None = None,
+    ) -> tuple[Sequence[KnowledgeBase], bool]:
+        """稳定键集分页；bool 表示是否仍有下一页。"""
+        ...
+
+    async def get_embedding_profile(self, scope: Scope, kb_id: UUID) -> EmbeddingProfile | None:
         """返回 EmbeddingProfile。KB 不存在、跨区、已删除，统一返回 None。"""
         ...

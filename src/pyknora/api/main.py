@@ -60,6 +60,7 @@ def configure(*, kb_repo: Any = None, embedder: Any = None) -> AppState:
     """注入依赖。测试与生产都走这一条，不搞两套。"""
     _state.kb_repo = kb_repo
     _state.embedder = embedder
+    _state.extra["kb_repo_configured"] = True
     return _state
 
 
@@ -160,6 +161,13 @@ def create_app() -> FastAPI:
     app.include_router(documents_router.router, prefix="/api/v1")
     app.include_router(jobs_router.router, prefix="/api/v1")
     app.include_router(query_router.router, prefix="/api/v1")
+
+    from pyknora.api.v1 import knowledge_bases as knowledge_bases_router
+
+    app.include_router(documents_router.router, prefix="/api/v1")
+    app.include_router(jobs_router.router, prefix="/api/v1")
+    app.include_router(knowledge_bases_router.router, prefix="/api/v1")
+
     return app
 
 
