@@ -154,6 +154,8 @@ def create_app() -> FastAPI:
             "embedder": getattr(state.embedder, "model_key", None),
         }
 
+
+    from pyknora.api.v1 import chat as chat_router
     from pyknora.api.v1 import auth as auth_router
     from pyknora.api.v1 import documents as documents_router
     from pyknora.api.v1 import jobs as jobs_router
@@ -162,6 +164,7 @@ def create_app() -> FastAPI:
     from pyknora.api.v1 import query as query_router
     from pyknora.api.v1 import workspaces as workspaces_router
 
+
     app.include_router(documents_router.router, prefix="/api/v1")
     app.include_router(jobs_router.router, prefix="/api/v1")
     # 成员4：注册/登录必须在其它业务路由之前可用——它们是所有鉴权的前置。
@@ -169,6 +172,7 @@ def create_app() -> FastAPI:
     app.include_router(workspaces_router.router, prefix="/api/v1")
 
     app.include_router(query_router.router, prefix="/api/v1")
+    app.include_router(chat_router.router, prefix="/api/v1")
     app.include_router(knowledge_bases_router.router, prefix="/api/v1")
     app.include_router(lineage_router.router, prefix="/api/v1")
 
