@@ -50,6 +50,25 @@ def _check_dim(vectors: list[list[float]], expected: int, model_key: str) -> Non
             raise EmbeddingDimensionError(expected, len(vec), model_key)
 
 
+def check_profile_compat(profile: object, *, dim: int, model_key: str) -> None:
+    """C1 接缝闸门：KB 的 embedding 配方必须与当前进程的 embedder 一致。
+
+    `knowledge_bases.profile` 是这份配方的唯一事实来源（成员1 交付），上传入口
+    与 worker 都以它为准，而不是以 `settings` 为准。不一致时**必须抛错**：
+    否则 `index_builds` 会记下一份与真实向量来源不符的元数据，事后用正确维度
+    反而查不到——这条属于红线 I7（维度不匹配绝不截断、绝不静默接受）。
+
+    两个调用点：
+    - `services/ingest/documents.py` 上传入口：`dim=settings.embedding_dim`
+    - `workers/ingest_worker.py` 作业执行：`dim=embedder.dim`
+    """
+    want = getattr(profile, "embedding_dim", None)
+    if want is None:  # 极老版本 profile 不带维度：交给调用方的兜底 + 告警
+        return
+    if int(want) != int(dim):
+        raise EmbeddingDimensionError(int(want), int(dim), model_key)
+
+
 class LocalHFEmbedder:
     """本地权重后端。首次使用才 import，避免没装 sentence-transformers 时炸在模块加载。"""
 

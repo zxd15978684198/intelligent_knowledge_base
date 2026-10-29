@@ -170,12 +170,38 @@ def _print_plan(stages: list[dict]) -> None:
             print(f"   $ {step['run']}")
 
 
+def _venv_executable(name: str, root: str) -> str | None:
+    """返回 venv 里的可执行文件路径；找不到返回 None。
+
+    为什么不直接用 `uv run <tool>`：`uv run` 每次都会先初始化 uv 缓存目录
+    （本机是 `D:\\uv-cache\\sdists-v9\\.git`），在受限沙箱/权限被改过的机器上
+    会直接 `error: Failed to initialize cache ... 拒绝访问 (os error 5)`，
+    门禁在第一步就以 exit 2 红掉——那已经不是代码问题，而是环境问题伪装成
+    代码问题。venv 里的 exe 是现成的，直连既绕开缓存初始化，也快得多。
+    """
+    bindir = "Scripts" if os.name == "nt" else "bin"
+    suffix = ".exe" if os.name == "nt" else ""
+    candidate = os.path.join(root, ".venv", bindir, f"{name}{suffix}")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _resolve_argv(argv: list[str], root: str) -> list[str]:
+    """把 `uv run <tool> ...` 换成 `<venv>/<tool> ...`；解析不到就原样返回。"""
+    if len(argv) >= 3 and argv[0] == "uv" and argv[1] == "run" and not argv[2].startswith("-"):
+        exe = _venv_executable(argv[2], root)
+        if exe is not None:
+            return [exe, *argv[3:]]
+    return list(argv)
+
+
 def _run_step(step: dict, root: str, timeout: float) -> tuple[bool, float, int]:
-    print(f"\n==> {step['label']}\n    $ {step['run']}", flush=True)
+    argv = _resolve_argv(step["argv"], root)
+    shown = step["run"] if argv == list(step["argv"]) else subprocess.list2cmdline(argv)
+    print(f"\n==> {step['label']}\n    $ {shown}", flush=True)
     started = time.monotonic()
     try:
         completed = subprocess.run(
-            step["argv"],
+            argv,
             cwd=root,
             timeout=timeout,
             check=False,

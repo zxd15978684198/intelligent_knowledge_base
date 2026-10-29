@@ -14,8 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
-from pyknora.models.tables import DocumentRow, IndexBuildRow
-from pyknora.schemas.document import ActiveChunk, ActiveDocument, IndexBuild, ScoredChunk
+from pyknora.models.tables import DocumentRow, DocumentVersionRow, IndexBuildRow
+from pyknora.schemas.document import (
+    ActiveChunk,
+    ActiveDocument,
+    DocumentVersionInfo,
+    IndexBuild,
+    ScoredChunk,
+)
 from pyknora.services.ingest.embedder import EmbeddingDimensionError
 
 # 按文档列 chunk 时取的列。不含 embedding/tsvector：见 ActiveChunk 的 docstring。
@@ -25,6 +31,19 @@ _CHUNK_COLUMNS = """
     char_start, char_end, token_count, locator_ref,
     embedding_model_key, embedding_dim, chunk_size,
     active_document_version_id
+"""
+
+# 历史 build 的列清单。**不能复用 _CHUNK_COLUMNS**：那张是给 v_active_chunks 用的，
+# 视图里的 kb_id / embedding_model_key / embedding_dim / chunk_size /
+# active_document_version_id 都是 join 出来的，基表 chunks 上并没有这些列
+# （见 migrations/0001_init.sql:100-124）。
+_CHUNK_COLUMNS_BY_BUILD = """
+    c.chunk_id, c.workspace_id, d.kb_id, c.document_id, c.build_id,
+    c.index_version, c.attempt_id, c.chunk_ordinal, c.content,
+    c.page_no, c.heading_path, c.char_start, c.char_end,
+    c.token_count, c.locator_ref,
+    b.embedding_model_key, b.embedding_dim, b.chunk_size,
+    d.active_document_version_id
 """
 
 
@@ -53,6 +72,32 @@ class SqlDocumentRepo:
             created_at=row.created_at,
         )
 
+    async def get_version(self, scope: Scope, version_id: UUID) -> DocumentVersionInfo | None:
+        """取不可变版本快照的元数据。
+
+        跨区与不存在统一返回 None——不区分"无权"和"没有"，否则这个方法就成了
+        存在性探针（错误码规范 I8 的同一条理由）。
+        """
+        stmt = select(DocumentVersionRow).where(
+            DocumentVersionRow.workspace_id == scope.workspace_id,
+            DocumentVersionRow.document_version_id == version_id,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        return DocumentVersionInfo(
+            document_version_id=row.document_version_id,
+            workspace_id=row.workspace_id,
+            document_id=row.document_id,
+            content_hash=row.content_hash,
+            byte_size=row.byte_size,
+            object_key=row.object_key,
+            parse_status=row.parse_status,
+            created_by_principal_id=row.created_by_principal_id,
+            ingestion_source=row.ingestion_source,
+            created_at=row.created_at,
+        )
+
 
 class SqlChunkRepo:
     def __init__(self, session: AsyncSession) -> None:
@@ -76,6 +121,79 @@ class SqlChunkRepo:
             {
                 "workspace_id": scope.workspace_id,
                 "document_id": document_id,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        return [_to_active_chunk(r) for r in result.mappings()]
+
+    async def get_chunks(self, scope: Scope, chunk_ids: Sequence[UUID]) -> list[ActiveChunk]:
+        """按 id 批量取**当前活动**版本的切片。
+
+        成员3/5 用它做引用二次授权：模型吐出的 chunk_id 必须重新查一次活动视图，
+        才知道它此刻还算不算数（文档可能已被替换或删除）。
+
+        **失效的 id 直接缺席，不补 None、不抛错。** 调用方用"返回条数比请求少"
+        判定引用失效；补占位会把"失效"伪装成"存在但内容为空"，引用校验就废了。
+        """
+        ids = list(dict.fromkeys(chunk_ids))  # 去重并保留入参顺序
+        if not ids:
+            return []
+        params: dict[str, object] = {"workspace_id": scope.workspace_id}
+        placeholders: list[str] = []
+        for index, chunk_id in enumerate(ids):
+            key = f"chunk_{index}"
+            placeholders.append(f":{key}")
+            params[key] = chunk_id
+        in_clause = ", ".join(placeholders)
+        stmt = text(
+            f"""
+            SELECT {_CHUNK_COLUMNS}
+            FROM v_active_chunks
+            WHERE workspace_id = :workspace_id
+              AND chunk_id IN ({in_clause})
+            ORDER BY document_id, chunk_ordinal
+            """
+        )
+        result = await self._session.execute(stmt, params)
+        return [_to_active_chunk(r) for r in result.mappings()]
+
+    async def list_chunks_by_build(
+        self, scope: Scope, build_id: UUID, *, limit: int = 100, offset: int = 0
+    ) -> list[ActiveChunk]:
+        """读**历史** build 的切片——`v_active_chunks` 的受控例外（I1）。
+
+        为什么必须开这个例外：视图只暴露 `documents.active_build_id` 指向的那一个
+        build，而成员5 的引用追溯要看"当时的版本"，那个 build 早已 retired，
+        视图里根本不存在，不开这个口就永远读不到历史。
+
+        例外成立的前提是三重谓词，缺一不可：
+        1. `c.workspace_id = :workspace_id` —— 跨区读不到（R3）。
+        2. `JOIN index_builds ON (workspace_id, build_id)` —— 拿别的 workspace 的
+           build_id 进来 join 不上，返回空而不是读到别人的切片。
+        3. `JOIN documents ... AND d.deleted_at IS NULL` —— 文档删了就整体不可见，
+           历史版本不能成为绕过删除的旁路。
+        """
+        stmt = text(
+            f"""
+            SELECT {_CHUNK_COLUMNS_BY_BUILD}
+            FROM chunks AS c
+            JOIN documents AS d
+              ON d.workspace_id = c.workspace_id AND d.document_id = c.document_id
+            JOIN index_builds AS b
+              ON b.workspace_id = c.workspace_id AND b.build_id = c.build_id
+            WHERE c.workspace_id = :workspace_id
+              AND c.build_id = :build_id
+              AND d.deleted_at IS NULL
+            ORDER BY c.chunk_ordinal
+            LIMIT :limit OFFSET :offset
+            """
+        )
+        result = await self._session.execute(
+            stmt,
+            {
+                "workspace_id": scope.workspace_id,
+                "build_id": build_id,
                 "limit": limit,
                 "offset": offset,
             },
@@ -217,23 +335,28 @@ class SqlIndexBuildRepo:
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:
             return None
-        return IndexBuild(
-            build_id=row.build_id,
-            workspace_id=row.workspace_id,
-            document_id=row.document_id,
-            index_version=row.index_version,
-            attempt_id=row.attempt_id,
-            embedding_model_key=row.embedding_model_key,
-            embedding_dim=row.embedding_dim,
-            chunk_size=row.chunk_size,
-            chunk_overlap=row.chunk_overlap,
-            normalize=row.normalize,
-            chunk_count=row.chunk_count,
-            state=row.state,
-            created_at=row.created_at,
-            activated_at=row.activated_at,
-            retired_at=row.retired_at,
+        return _to_index_build(row)
+
+    async def list_builds(
+        self, scope: Scope, document_id: UUID, *, limit: int = 50, offset: int = 0
+    ) -> list[IndexBuild]:
+        """一个文档的**全部**构建记录（staging/active/retired），最新的在前。
+
+        成员5 的引用追溯要从"当前 active"往回翻历史，所以必须包含 retired；
+        顺序给 created_at 倒序，正序会让每个调用方自己记得反转。
+        """
+        stmt = (
+            select(IndexBuildRow)
+            .where(
+                IndexBuildRow.workspace_id == scope.workspace_id,
+                IndexBuildRow.document_id == document_id,
+            )
+            .order_by(IndexBuildRow.created_at.desc(), IndexBuildRow.build_id.desc())
+            .limit(limit)
+            .offset(offset)
         )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_index_build(row) for row in rows]
 
 
 class FakeKbRepo:
@@ -313,6 +436,27 @@ class FakeKbRepo:
     async def get_embedding_profile(self, scope: Scope, kb_id: UUID) -> object | None:
         kb = await self.get(scope, kb_id)
         return kb.profile if kb is not None else None
+
+
+def _to_index_build(row: IndexBuildRow) -> IndexBuild:
+    """ORM 行 -> 只读快照。集中一份，避免 `get` 与 `list_builds` 两处字段慢慢漂移。"""
+    return IndexBuild(
+        build_id=row.build_id,
+        workspace_id=row.workspace_id,
+        document_id=row.document_id,
+        index_version=row.index_version,
+        attempt_id=row.attempt_id,
+        embedding_model_key=row.embedding_model_key,
+        embedding_dim=row.embedding_dim,
+        chunk_size=row.chunk_size,
+        chunk_overlap=row.chunk_overlap,
+        normalize=row.normalize,
+        chunk_count=row.chunk_count,
+        state=row.state,
+        created_at=row.created_at,
+        activated_at=row.activated_at,
+        retired_at=row.retired_at,
+    )
 
 
 def _to_active_chunk(row) -> ActiveChunk:

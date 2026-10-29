@@ -23,9 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyknora.core.errors import AppError, ErrorCode, not_found
 from pyknora.core.scope import Scope
+from pyknora.core.settings import settings
 from pyknora.models.tables import DocumentBlobRow as BLOB_TABLE
 from pyknora.models.tables import DocumentRow, DocumentVersionRow, IndexBuildRow
 from pyknora.services.contracts.reads import KbRepo
+from pyknora.services.ingest.embedder import check_profile_compat
 from pyknora.services.ingest.publish import find_version_by_hash
 from pyknora.services.queue import jobs as queue
 
@@ -66,6 +68,13 @@ async def upload_document(
     profile = await kb_repo.get_embedding_profile(scope, kb_id)
     if profile is None:
         raise not_found("knowledge base")
+
+    # 1b) 上传即校验 embedding 配方。成员1 的 KB profile 与当前部署的 embedding
+    #     配置不一致时，在这里就以 4xx 失败，而不是让作业入队、等 worker 消费后
+    #     才标 failed——那样用户得轮询才发现，staging 数据还白写了一遍。
+    check_profile_compat(
+        profile, dim=settings.embedding_dim, model_key=settings.embedding_model_key
+    )
 
     content_hash = compute_content_hash(data)
 

@@ -19,7 +19,13 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from pyknora.core.scope import Scope
-from pyknora.schemas.document import ActiveChunk, ActiveDocument, IndexBuild, ScoredChunk
+from pyknora.schemas.document import (
+    ActiveChunk,
+    ActiveDocument,
+    DocumentVersionInfo,
+    IndexBuild,
+    ScoredChunk,
+)
 from pyknora.schemas.kb import EmbeddingProfile, KnowledgeBase
 
 
@@ -106,4 +112,59 @@ class KbRepo(Protocol):
 
     async def get_embedding_profile(self, scope: Scope, kb_id: UUID) -> EmbeddingProfile | None:
         """返回 EmbeddingProfile。KB 不存在、跨区、已删除，统一返回 None。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# C2 追加面（成员2 交付给成员3/5 的只读扩展）
+#
+# 下面四个 Protocol 是**新增**的，与上面五个既有契约互不影响：不改任何已有签名，
+# 只把下游新暴露出的读取需求收进契约，免得它们各自手写 SQL 打 v_active_chunks。
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ChunkLookupRepo(Protocol):
+    async def get_chunks(self, scope: Scope, chunk_ids: Sequence[UUID]) -> Sequence[ActiveChunk]:
+        """按 id 批量取**当前活动**版本的切片。
+
+        用于引用二次授权：模型给出的 chunk_id 必须重新查一次活动视图才算数。
+        **失效的 id 直接缺席，不补 None、不报错**——调用方要靠"返回集合比请求小"
+        发现引用已失效。补占位会把"失效"伪装成"存在但内容为空"。
+        """
+        ...
+
+
+@runtime_checkable
+class BuildListRepo(Protocol):
+    async def list_builds(
+        self, scope: Scope, document_id: UUID, *, limit: int = 50, offset: int = 0
+    ) -> Sequence[IndexBuild]:
+        """一个文档的**全部**构建记录（staging/active/retired），按 created_at 倒序。"""
+        ...
+
+
+@runtime_checkable
+class BuildChunkRepo(Protocol):
+    async def list_chunks_by_build(
+        self, scope: Scope, build_id: UUID, *, limit: int = 100, offset: int = 0
+    ) -> Sequence[ActiveChunk]:
+        """**历史** build 的切片——即 v_active_chunks 看不到的那部分。
+
+        I1 的受控例外：可见性不再来自 active 指针，而来自
+        `scope.workspace_id + 显式 build_id + 文档未删除` 三重谓词。
+        实现必须自己保证这三条；调用方不得绕过本方法直接查 chunks 基表。
+        顺序按 chunk_ordinal，不做"最新覆盖"推断。
+
+        **为什么和 `BuildListRepo` 分开**：这两个能力落在两个不同的仓储上
+        （构建记录在 build 仓储、切片在 chunk 仓储）。合成一个 Protocol 会逼出
+        一个只为"凑接口"而存在的适配类——接口应该描述能力，不应该描述拼装方式。
+        """
+        ...
+
+
+@runtime_checkable
+class DocumentVersionRepo(Protocol):
+    async def get_version(self, scope: Scope, version_id: UUID) -> DocumentVersionInfo | None:
+        """不可变版本快照的元数据；跨区与不存在统一 None。"""
         ...

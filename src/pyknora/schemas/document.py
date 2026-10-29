@@ -106,3 +106,25 @@ class ScoredChunk(BaseModel):
     embedding_dim: int
     active_document_version_id: UUID | None = None
     distance: float
+
+
+class DocumentVersionInfo(BaseModel):
+    """不可变版本快照的元数据，供成员5 的引用追溯使用。
+
+    刻意**不含正文**：正文在 `document_blobs`（真实部署在对象存储），要正文请按
+    `document_version_id` 走成员2 的读取路径。`object_key` 原样带出，是为了让引用
+    能指回同一个存储对象，而不是在引用里复制一份内容。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    document_version_id: UUID
+    workspace_id: UUID
+    document_id: UUID
+    content_hash: str
+    byte_size: int
+    object_key: str
+    parse_status: str
+    created_by_principal_id: UUID
+    ingestion_source: str
+    created_at: datetime

@@ -28,12 +28,27 @@ from pyknora.core.settings import settings
 from pyknora.models.tables import ChunkRow, DocumentVersionRow
 from pyknora.services.contracts.reads import KbRepo
 from pyknora.services.ingest import parser, publish, splitter
-from pyknora.services.ingest.embedder import EmbeddingProvider
+from pyknora.services.ingest.embedder import EmbeddingProvider, check_profile_compat
 from pyknora.services.ingest.embedding_service import EmbeddingService, digest_content
 from pyknora.services.queue import jobs as queue
 from pyknora.services.queue.jobs import ClaimedJob
 
 logger = logging.getLogger(__name__)
+
+
+def _kb_field(profile: object, name: str, default: object) -> object:
+    """取 KB profile 字段；缺失时回落到 settings 默认值并留下 warning。
+
+    兜底是必要的（profile 结构在成员1 那边演进，字段不同步不能直接炸），
+    但必须留痕：否则"配方静默回落到 settings"这类不一致永远看不见，等到检索
+    结果不对时才反过来查。
+    """
+    value = getattr(profile, name, None)
+    if value is None:
+        logger.warning("kb profile 缺少 %s，回落到 %r", name, default)
+        return default
+    return value
+
 
 # 这些错误重试也不会好，直接放弃本次尝试
 _NO_RETRY = frozenset(
@@ -127,6 +142,16 @@ async def process_job(
     if profile is None:
         raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "knowledge base gone during ingestion")
 
+    # C1 接缝：KB 的 profile 是 embedding 配方的唯一来源，优先级高于 settings。
+    # 不一致就停在这里——静默用 embedder 的维度会把 index_builds 的元数据写成
+    # 假的（记录与真实向量来源不符），之后用正确维度反而查不到（红线 I7）。
+    check_profile_compat(profile, dim=embedder.dim, model_key=embedder.model_key)
+    recipe_model_key = str(_kb_field(profile, "embedding_model_key", embedder.model_key))
+    recipe_dim = int(_kb_field(profile, "embedding_dim", embedder.dim))
+    recipe_chunk_size = int(_kb_field(profile, "chunk_size", settings.chunk_size))
+    recipe_chunk_overlap = int(_kb_field(profile, "chunk_overlap", settings.chunk_overlap))
+    recipe_normalize = bool(_kb_field(profile, "normalize", True))
+
     # 先确认版本快照仍在（给 404 而不是后面的 PARSE_FAILED，报错更准）
     await _load_version(session, scope=scope, version_id=version_id)
     data = await _load_bytes(session, scope=scope, version_id=version_id)
@@ -135,8 +160,8 @@ async def process_job(
     parsed = parser.parse(data, filename, content_type)
     chunks = splitter.chunk_parsed(
         parsed,
-        chunk_size=getattr(profile, "chunk_size", settings.chunk_size),
-        chunk_overlap=getattr(profile, "chunk_overlap", settings.chunk_overlap),
+        chunk_size=recipe_chunk_size,
+        chunk_overlap=recipe_chunk_overlap,
     )
 
     # ---- 分配 index_version（锁 documents 行） ----
@@ -174,11 +199,11 @@ async def process_job(
         document_id=job.document_id,
         attempt_id=job.attempt_id,
         index_version=next_version,
-        embedding_model_key=embedder.model_key,
-        embedding_dim=embedder.dim,
-        chunk_size=getattr(profile, "chunk_size", settings.chunk_size),
-        chunk_overlap=getattr(profile, "chunk_overlap", settings.chunk_overlap),
-        normalize=getattr(profile, "normalize", True),
+        embedding_model_key=recipe_model_key,
+        embedding_dim=recipe_dim,
+        chunk_size=recipe_chunk_size,
+        chunk_overlap=recipe_chunk_overlap,
+        normalize=recipe_normalize,
     )
 
     # ---- 向量化（带缓存） ----
@@ -227,8 +252,8 @@ async def process_job(
             build_id=build.build_id,
             document_version_id=version_id,
             chunk_count=len(chunks),
-            embedding_model_key=embedder.model_key,
-            embedding_dim=embedder.dim,
+            embedding_model_key=recipe_model_key,
+            embedding_dim=recipe_dim,
         ),
     )
     return ProcessResult(

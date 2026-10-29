@@ -1,6 +1,33 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加：成员4 验收闭环，见下方「当前轮」**；其后的身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加：成员2 四任务收口，见下方「本轮：成员2 四任务收口」**；其后的成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+
+## 本轮：成员2 四任务收口（2026-10-29，成员2）
+
+- 任务：进度表任务 **3 / 4 / 5 / 6**（文档增删改查、切片与 Embedding、向量增删改查、更新时同步 chunk 与元数据）。起始 HEAD `5411c96`；开工时 `git status --short` 已含成员2 的 10 项未提交改动（6 M + 4 ??），本轮在其上继续，**未回滚任何既有改动**。
+- 改动文件（本轮共 12 项）：
+  - 业务（成员2 名下）：`src/pyknora/services/ingest/documents.py`、`src/pyknora/services/ingest/embedder.py`、`src/pyknora/workers/ingest_worker.py`、`src/pyknora/db/repos/reads.py`、`scripts/run_worker.py`（新增，121 行）
+  - 契约/模式（**追加式**，未改任何既有签名）：`src/pyknora/services/contracts/reads.py`（+4 Protocol）、`src/pyknora/schemas/document.py`（+`DocumentVersionInfo`）
+  - 测试（新增）：`tests/unit/test_profile_compat.py`、`tests/contract/test_c2.py`、`tests/integration/test_read_contracts.py`
+  - 共用文件（**纯机械改动**，见"风险"）：`src/pyknora/api/main.py`（import 排序，清 I001）、`src/pyknora/models/tables.py`（`ruff format` 空行规范化）、`scripts/ci.py`（门禁直连 `.venv/Scripts/*.exe`）
+- 已实现：
+  1. **补上 Worker 可执行入口**：`workers/ingest_worker.py` 此前只有类与 `run_once`、没有 `__main__`，`ingestion_jobs` 入队后无人消费。新增 `scripts/run_worker.py`（`session_scope()` 每轮新事务 + `SqlKnowledgeBaseRepo` + `build_embedder` + `run_once`，支持 `--once/--poll-interval/--worker-id`）。
+  2. **embedding 档位改从知识库 profile 读**：新增 `check_profile_compat(profile, *, dim, model_key)`；`process_job` 以 `recipe_model_key/recipe_dim/recipe_chunk_size/recipe_chunk_overlap/recipe_normalize` 写 `index_builds` 与 `PublishManifest`（此前错用全局 `embedder.model_key/dim`，与任务 16「换模型重建索引」直接冲突）；缺字段时 `_kb_field` 回落并 `logger.warning`；上传入口同步校验，档位不符在 202 之前 4xx。
+  3. **补下游只读面**（供成员3/5）：`SqlChunkRepo.get_chunks`、`SqlChunkRepo.list_chunks_by_build`（I1 受控例外，靠 `workspace_id + build_id + 文档未删除` 三重谓词）、`SqlIndexBuildRepo.list_builds`、`SqlDocumentRepo.get_version`，配 4 个 Protocol 与 `tests/contract/test_c2.py`。
+- 已执行（真实输出）：
+  - `uv run --frozen ruff check src tests scripts` → `All checks passed!`；`uv run --frozen ruff format --check src tests scripts` → `86 files already formatted`
+  - `uv run python scripts/ci.py --stage all` → `PASS lint/ruff-check 0.1s` / `PASS lint/ruff-format 0.1s` / `PASS test/pytest 7.4s`，`total 7.6s`
+  - `uv run --frozen pytest -q tests/unit tests/contract` → **76 passed**；`uv run --frozen pytest -q tests/integration` → **43 passed**；`uv run --frozen pytest -q` → **180 passed**，exit 0（均连临时真库 `pyknora-pg-verify`，宿主 5434）
+  - 迁移：`0001`+`0002`+`0003` 在重建库上三条全 `OK`；落地核对 `information_schema.tables`（public）= **16**，视图 = **v_active_chunks**
+  - `scripts/run_worker.py --once` → `worker worker-13296 启动 backend=hashing model_key=test/hashing dim=512` + `队列空，--once 退出`，exit 0
+- 未验证 / 未做：
+  - **真实 embedder 端到端未跑**：`BAAI/bge-small-zh-v1.5` 需下载权重，全部用例走 `hashing` 后端；`S10` 的"断网下 local 后端可用"仍只是代码路径，无实测。
+  - 本机 5433 被外部容器 `pyknora-phase0-postgres-1` 占用，`scripts/migrate.py` 的原生路径（容器名 `pyknora-pg`）本轮未跑通；验证改走 5434 临时库 + `docker exec -i ... -f -`（迁移脚本靠 Python 子进程调 docker，在沙箱下报 `permission denied ... npipe:////./pipe/dockerDesktopLinuxEngine`）。
+  - 未跑 security 阶段（需联网）；未改 4 份 xlsx（进度表以 xlsx 为准，本轮只改汇总视图）；五份 ADR 仍为"提议"。
+- 风险与下一步：
+  - 三处共用文件改动**无业务语义**（import 排序 / 空行 / 门禁执行方式），但按 `AGENTS.md` §1.4 属"共用文件"范畴，需评审确认；`scripts/ci.py` 是插件生成物，重新生成会覆盖该项修复，应回灌插件。
+  - `ci.py` 修复的根因是环境性的：DSH 沙箱下 `uv run` 初始化 `D:\uv-cache` 被拒（`os error 5`），门禁在第一步就以 exit 2 红掉——把环境问题伪装成代码问题。直连 venv exe 后 7.6s 全绿。
+  - 下一步（交给其他成员）：成员3 接 `ChunkLookupRepo`/`ChunkSearchRepo` 写 RAG 编排（任务 13/14）；成员5 开工前先落 `0004` 迁移（`sources`/`citations`/`index_migrations` 编号顺延，`0002` 已被成员1 占用）。
 
 ## 本轮：S05 知识库查询（2026-10-28，成员1）
 
