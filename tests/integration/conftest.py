@@ -30,6 +30,7 @@ TABLES = (
     "documents",
     "embedding_cache",
     "knowledge_bases",
+    "index_migrations",
 )
 
 KB_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
