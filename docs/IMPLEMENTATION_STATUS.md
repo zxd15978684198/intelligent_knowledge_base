@@ -14,7 +14,7 @@
   - `src/pyknora/models/tables.py`：`is_public` 列注释补「预留：公开 KB 可见性，当前所有查询不读」。
   - `src/pyknora/services/auth/membership.py`、`src/pyknora/api/v1/workspaces.py`：注释写明 `role_grants` 未被消费、`_ADMIN_ROLES` 是闭集、`load_membership` 每请求一次查询是刻意反缓存。
   - `tests/unit/test_security_guards.py`（新，9 条）、`tests/api/test_auth_revocation.py`（新，2 条）。
-  - `.env.example`（新增 `PYKNORA_ENV` / `PYKNORA_JWT_SECRET` / 生产禁 owner 连库注记）、`README.md`（快速开始第 1 步）、`docs/adr/0006_Identity_ACL_Tenancy.md`（追加「实现期补充」段，状态仍 `提议`）。
+  - `.env.example`（新增 `PYKNORA_ENV` / `PYKNORA_JWT_SECRET` / 生产禁 owner 连库注记）、`README.md`（快速开始第 1 步）、`docs/adr/0006_Identity_Roles_RLS.md`（追加「实现期补充」段，状态仍 `提议`）。
 - 已执行（真实输出）：
   - `uv run --frozen ruff check`（9 个改动文件）→ `All checks passed!`；`ruff format --check` → `9 files already formatted`。
   - `pytest -q tests/unit tests/contract` → 117 passed。
