@@ -1,6 +1,33 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：任务 16 重建索引 `/admin/reindex` 完成（成员5 实现 / lead 复核），见下方「本轮：任务 16 重建索引」**；再往前是 B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`，见下方「本轮：任务 17 迁库演练」**；再往前是任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+
+## 本轮：任务 17 迁库演练（2026-10-29，成员5 实现 / lead）
+
+- 任务：进度表任务 **17** ↔ 修复计划 **F9**（P2）；前置 17 ← 5、8、16 已全部满足。起始 HEAD `f4fd18d`（`docs(plan): F9 任务17 施工方案细化到可执行粒度 + 修正过期现状`）；本轮改动**未提交**，`git status --short` 为 ` M scripts/migrate.py` + 5 个新文件 + `.tmp_migration/`。
+- 改动文件：
+  - `src/pyknora/services/migration/snapshot.py`（新，713 行）：8 张表的导出/重放/校验纯逻辑。`TABLES` = 8 个 `TableSpec`（`principals` / `workspaces` / `knowledge_bases` / `documents` / `document_versions` / `document_blobs` / `index_builds` / `chunks`）、`REPLAY_ORDER`、`SnapshotError`、`TableSpec`、`Check`，以及 `build_snapshot` / `export_metadata` / `replay_metadata` / `verify_metadata` / `render_sql` / `count_embedding_inserts` / `assert_no_embedding`；`FORBIDDEN_COLUMNS = frozenset({"embedding","tsvector"})` 把"搬了向量吗"收敛到一处可查。
+  - `scripts/export_metadata.py`（新，77 行）：产物两个文件 `<out>.json`（给 replay 用）+ 同名 `.sql`（给人看/给 psql 用）。计划书 `全员模块实现路径.md:641` 的判据「导出 SQL 里 `embedding` 的 `INSERT` 行数 == 0」由 `count_embedding_inserts()` 判定，非 0 即 **exit 3**。
+  - `scripts/replay_metadata.py`（新，71 行）：按 `REPLAY_ORDER` 写入目标库，写完后 `chunks` 无向量、`v_active_chunks` 为空（这是"没搬向量"的可观测证据）；**刻意不提供 `--reindex` 开关**，避免把"重放"和"重建索引"揉成一个动作。
+  - `scripts/verify_migration.py`（新，77 行）：按 workspace 比对 KB 集合 / profile 五字段 / documents 集合 / 活动 chunk 边界与正文 / `v_active_chunks` 行数 / 向量 NULL 数；任一不一致非 0 退出，不静默通过。
+  - `tests/unit/test_migration_snapshot.py`（新，202 行，**12 条用例**）。
+  - **未改**：`services/ingest/publish.py`、`db/repos/reads.py`、`migrations/`（复用任务 16 的 `reindex_knowledge_base()`，不碰发布语义）。
+- 已执行（迁移演练，真实输出）：
+  - 目标库：**同一个** `pyknora-pg-p0` 容器里 `CREATE DATABASE pyknora_migrate`（不是另起 5435）；`0001_init.sql`～`0005_*.sql` 按号段顺序 `psql -f` 应用完毕。
+  - 导出：8 张表 → `.tmp_migration/snapshot.json` + `.tmp_migration/snapshot.sql`；判据行输出「导出 SQL 中涉及 embedding/tsvector 的 INSERT 行数 = 0」。
+  - 重放后目标库：**5 个 KB / 7 篇文档 / 31 个切片 / `embedding` 非空 0 行**。
+  - 重算前校验：`v_active_chunks` **源 1 / 目标 0**，并报「缺向量 1 行」——`migrate` 后必须先 `reindex`，这条被用数据证出来了。
+  - 重算：**4 个存活 KB**（其中两个种子 KB 各 3 篇 15 片），**1 个软删 KB 跳过**。
+  - 重算后校验：`uv run python scripts/verify_migration.py --source postgresql+asyncpg://postgres:dev@127.0.0.1:5434/pyknora --target postgresql+asyncpg://postgres:dev@127.0.0.1:5434/pyknora_migrate` → 每个 workspace 的 `knowledge_bases` 集合、KB profile 五字段、`documents` 集合、活动 chunk 边界与正文逐项、`v_active_chunks` 行数、向量无 NULL 全部 `OK` → **结论：全部校验项一致**。
+- 本轮文档核对实跑（lead，唯一新跑的验证命令）：`uv run python -m pytest --collect-only -q tests/unit` → `tests/unit/test_migration_snapshot.py: 12`、**`88 tests collected in 1.41s`**（原 76 + 12；全量 **236** = 88 + 契约 20 + API 80 + 集成 48）。**口径**：用例数以这条 `--collect-only` 为准；此前口头流转的「21 条」与磁盘上的 12 个 `test_` 函数不符，一律按实测记。
+- 演练暴露的 3 个真问题（不粉饰，详见 `docs/plans/任务17_迁库演练记录.md`）：
+  1. `v_active_chunks` **不 join `knowledge_bases`**：KB 被软删后，只要文档没删、build 是 active、向量非空，切片仍会露在视图里（源库那条"幽灵行"）。校验器因此自行加 `JOIN knowledge_bases … AND k.deleted_at IS NULL` 才对齐口径——这是**校验器的口径修正，不是视图改动**（视图属 `0001_init.sql`，不可回改历史号段）。
+  2. `reindex_knowledge_base` 对软删 KB 取不到 profile（`repo.get` 过滤 `deleted_at`）→ 已删 KB 无法重算向量。这是**设计边界而非缺陷**；校验器据此分两组断言：存活 KB 必须无 NULL 向量、软删 KB 必须保持 NULL。
+  3. 演练数据里两个种子 workspace 只有 `knowledge_bases` 行（`scripts/seed_for_m3.py` 不写 `workspaces`），且 `workspace_memberships` 不在导出 8 表内 → `POST /api/v1/admin/reindex` 依赖 JWT + membership 的 HTTP 路径在演练里走不通，改用进程内 `reindex_knowledge_base()`（scope 取 KB 所属空间），记录里已注明"绕过 HTTP"；HTTP 202 路径仍由 `tests/api/test_api_admin.py` 与烟测库覆盖。
+- 边界（刻意不做，不是遗漏）：**不搬向量**（只搬"元信息 + 原文"，跨 PG 版本/跨维度靠目标库重算换可迁移性）；**不搬权限数据**（`workspace_memberships` 不在导出 8 表内）；**不搬 `outbox`**；`mode=export` / `mode=replay` 仍未接进 `/admin/reindex`，仍返回 422 `INVALID_REQUEST`。
+- 未验证：① 真实大库（数百文档）的导出/重放耗时与内存占用（当前是单文件快照）；② 并发重放 / 并发重算；③ 跨机器网络传输（演练是同容器内两库）；④ export/replay 的 **HTTP 端点未做**——演练走 CLI 三脚本 + 进程内 reindex。
+- 回滚方式：`DROP DATABASE pyknora_migrate` 即可；源库 `pyknora` 全程只读导出，未被写入。
+- 下一步：**17/17 任务已全部 `已完成/100%`**；剩余为非任务项，见 `docs/项目结构说明.md` §8（`citations` 表、`tests/contract/test_c3.py`、五份 ADR 仍"提议"、Phase 0 九项 PoC 全 `NOT_STARTED`）。本轮未提交，由 lead 统一提交。
 
 ## 本轮：任务 16 重建索引 `/admin/reindex`（2026-10-29，成员5 实现 / lead 复核）
 
