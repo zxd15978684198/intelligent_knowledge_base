@@ -29,11 +29,18 @@ from pyknora.api.deps import (
     get_kb_repo,
     get_scope,
     get_session,
+    require_permission,
 )
 from pyknora.core.errors import AppError, ErrorCode, not_found
 from pyknora.core.scope import Scope
 from pyknora.core.settings import settings
 from pyknora.db.repos.reads import SqlChunkRepo, SqlDocumentRepo, SqlIndexBuildRepo
+from pyknora.services.auth.permissions import (
+    CHUNK_READ,
+    DOCUMENT_DELETE,
+    DOCUMENT_READ,
+    DOCUMENT_WRITE,
+)
 from pyknora.services.ingest.documents import delete_document, upload_document
 from pyknora.services.ingest.parser import SUPPORTED_SUFFIXES
 
@@ -88,6 +95,7 @@ def _suffix_of(filename: str) -> str:
     status_code=status.HTTP_202_ACCEPTED,
     response_model=DocumentAccepted,
     summary="上传文档（hash 三分支）",
+    dependencies=[Depends(require_permission(DOCUMENT_WRITE))],
 )
 async def upload(
     kb_id: UUID,
@@ -150,6 +158,7 @@ async def upload(
     "/documents/{document_id}",
     response_model=DocumentDetail,
     summary="文档详情（含当前活动索引指针）",
+    dependencies=[Depends(require_permission(DOCUMENT_READ))],
 )
 async def get_document(
     document_id: UUID,
@@ -184,6 +193,7 @@ async def get_document(
     "/documents/{document_id}/chunks",
     response_model=ChunkPage,
     summary="当前活动构建的切片列表",
+    dependencies=[Depends(require_permission(CHUNK_READ))],
 )
 async def list_chunks(
     document_id: UUID,
@@ -213,6 +223,7 @@ async def list_chunks(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=DocumentAccepted,
     summary="删除文档（先阻断可见性，再异步清理）",
+    dependencies=[Depends(require_permission(DOCUMENT_DELETE))],
 )
 async def remove(
     document_id: UUID,

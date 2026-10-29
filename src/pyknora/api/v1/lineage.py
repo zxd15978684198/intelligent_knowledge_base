@@ -16,15 +16,16 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pyknora.api.deps import get_scope, get_session
+from pyknora.api.deps import get_scope, get_session, require_permission
 from pyknora.core.errors import not_found
 from pyknora.core.scope import Scope
 from pyknora.db.repos.lineage import SqlDocumentVersionRepo
 from pyknora.db.repos.reads import SqlDocumentRepo
 from pyknora.schemas.lineage import DocumentLineage
+from pyknora.services.auth.permissions import LINEAGE_READ
 from pyknora.services.lineage.service import build_lineage
 
-router = APIRouter(tags=["lineage"])
+router = APIRouter(tags=["lineage"], dependencies=[Depends(require_permission(LINEAGE_READ))])
 
 
 @router.get(

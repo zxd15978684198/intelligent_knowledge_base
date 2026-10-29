@@ -34,6 +34,31 @@ async def load_membership(session: AsyncSession, principal_id: UUID, workspace_i
     return membership is not None
 
 
+async def load_permissions(
+    session: AsyncSession, *, principal_id: UUID, workspace_id: UUID
+) -> frozenset[str]:
+    """该成员在本工作区拥有的权限点集合。
+
+    链路：`workspace_memberships.role` → `roles` → `role_grants` → 权限点。
+    非成员（含账号被停用）→ **空集**，即 fail-closed：拿不到权限点就没有任何动作权限。
+
+    两个 id **强制关键字传参**：它们的类型相同（都是 UUID），调用方写成位置参数时，
+    传反了不会有任何报错，只会稳定返回空集——排起来像"权限没生效"，实际是查错了人。
+    这条规则是被踩出来的，不是风格偏好。
+
+    和 `load_membership` 一样是刻意"每请求查一次、不缓存"：`role_grants` 是可改配置，
+    缓存会让"撤掉某人的写权限"滞后一个 TTL 才生效。真正的成本是两次查询
+    （成员关系 + 权限点），但它们都在同一个事务、同一条连接上，且都由
+    `get_scope`/`get_permissions` 的依赖缓存兜住——同一请求里多处 `require_permission`
+    只查一次。
+    """
+    repo = SqlIdentityRepo(session)
+    membership = await repo.find_membership(workspace_id, principal_id)
+    if membership is None:
+        return frozenset()
+    return frozenset(await repo.list_permissions_for_role(membership.role))
+
+
 async def set_workspace_context(session: AsyncSession, workspace_id: UUID) -> None:
     """给当前事务打上 `app.workspace_id`，供 RLS 策略读取。
 

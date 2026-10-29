@@ -14,7 +14,7 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| `migrations/` | 手写数字号段 SQL（0001–0005），不用 alembic；**只追加不改历史** |
+| `migrations/` | 手写数字号段 SQL（0001–0006），不用 alembic；**只追加不改历史** |
 | `src/pyknora/core/` | `Settings`、`Scope`（身份只从 JWT 来）、17 个统一错误码 |
 | `src/pyknora/api/` | FastAPI 交付面；`deps.py` 是权限唯一入口，`main.py` 是应用工厂 |
 | `src/pyknora/api/v1/` | 9 组路由：`auth`/`workspaces`/`knowledge_bases`/`documents`/`jobs`/`query`/`chat`/`lineage`/`admin` |
@@ -51,7 +51,7 @@ docker run -d --name pyknora-pg -p 5433:5432 \
 #                            只用 hashing 后端可省，但那样检索是假向量）
 uv sync --extra dev --extra local-embed
 
-# 3. 建表（0001–0005）
+# 3. 建表（0001–0006）
 uv run python scripts/migrate.py
 
 # 4. 造数：两个 workspace、内容相同，用来验证跨区隔离

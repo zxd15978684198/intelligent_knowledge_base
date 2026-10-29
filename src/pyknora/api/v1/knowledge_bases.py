@@ -9,10 +9,15 @@ from fastapi import APIRouter, Depends, Header, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pyknora.api.deps import get_kb_repo, get_scope, get_session
+from pyknora.api.deps import get_kb_repo, get_scope, get_session, require_permission
 from pyknora.core.errors import AppError, ErrorCode, not_found
 from pyknora.core.scope import Scope
 from pyknora.schemas.kb import EmbeddingProfile, KnowledgeBase, KnowledgeBasePage
+from pyknora.services.auth.permissions import (
+    KNOWLEDGE_BASE_DELETE,
+    KNOWLEDGE_BASE_READ,
+    KNOWLEDGE_BASE_WRITE,
+)
 from pyknora.services.kb.cursor import decode_cursor, encode_cursor
 from pyknora.services.kb.service import (
     create_knowledge_base,
@@ -67,7 +72,12 @@ def _expected_version(if_match: str | None) -> int:
     return version
 
 
-@router.post("", status_code=status.HTTP_201_CREATED, response_model=KnowledgeBase)
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    response_model=KnowledgeBase,
+    dependencies=[Depends(require_permission(KNOWLEDGE_BASE_WRITE))],
+)
 async def create(
     body: KnowledgeBaseCreate,
     scope: Annotated[Scope, Depends(get_scope)],
@@ -89,7 +99,11 @@ async def create(
     )
 
 
-@router.get("", response_model=KnowledgeBasePage)
+@router.get(
+    "",
+    response_model=KnowledgeBasePage,
+    dependencies=[Depends(require_permission(KNOWLEDGE_BASE_READ))],
+)
 async def list_knowledge_bases(
     scope: Annotated[Scope, Depends(get_scope)],
     repo: Annotated[Any, Depends(get_kb_repo)],
@@ -114,7 +128,11 @@ async def list_knowledge_bases(
     return KnowledgeBasePage(items=list(items), next_cursor=next_cursor, limit=limit)
 
 
-@router.get("/{kb_id}", response_model=KnowledgeBase)
+@router.get(
+    "/{kb_id}",
+    response_model=KnowledgeBase,
+    dependencies=[Depends(require_permission(KNOWLEDGE_BASE_READ))],
+)
 async def get_one(
     kb_id: UUID,
     scope: Annotated[Scope, Depends(get_scope)],
@@ -126,7 +144,11 @@ async def get_one(
     return kb
 
 
-@router.patch("/{kb_id}", response_model=KnowledgeBase)
+@router.patch(
+    "/{kb_id}",
+    response_model=KnowledgeBase,
+    dependencies=[Depends(require_permission(KNOWLEDGE_BASE_WRITE))],
+)
 async def patch(
     kb_id: UUID,
     body: KnowledgeBasePatch,
@@ -147,6 +169,7 @@ async def patch(
     "/{kb_id}",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=KnowledgeBaseDeleted,
+    dependencies=[Depends(require_permission(KNOWLEDGE_BASE_DELETE))],
 )
 async def remove(
     kb_id: UUID,

@@ -13,11 +13,12 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyknora.models.tables import (
     PrincipalRow,
+    RoleGrantRow,
     RoleRow,
     WorkspaceMembershipRow,
     WorkspaceRow,
@@ -182,3 +183,79 @@ class SqlIdentityRepo:
     async def find_role(self, role_key: str) -> RoleRow | None:
         stmt = select(RoleRow).where(RoleRow.role_key == role_key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_permissions_for_role(self, role_key: str) -> list[str]:
+        """该角色被授予的权限点（`roles ⋈ role_grants`），按字母序稳定返回。
+
+        角色不存在、或角色存在但一个授权都没有 → **空列表**。调用方据此 fail-closed：
+        给默认权限就等于把"忘了授权"变成"放行"，而这类错误在权限系统里是致命的。
+
+        按 `role_key` 而不是 `role_id` 查：成员的 `workspace_memberships.role` 存的是
+        字符串 key，按 key 查少一次"先解出 role_id"的往返。
+        """
+        stmt = (
+            select(RoleGrantRow.permission)
+            .join(RoleRow, RoleRow.role_id == RoleGrantRow.role_id)
+            .where(RoleRow.role_key == role_key)
+            .order_by(RoleGrantRow.permission)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_role_grants(self) -> list[tuple[str, str]]:
+        """全部 (role_key, permission)，给管理端点列矩阵用。"""
+        stmt = (
+            select(RoleRow.role_key, RoleGrantRow.permission)
+            .join(RoleGrantRow, RoleGrantRow.role_id == RoleRow.role_id)
+            .order_by(RoleRow.role_key, RoleGrantRow.permission)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(str(role_key), str(permission)) for role_key, permission in rows]
+
+    async def add_role_grant(self, *, role_key: str, permission: str) -> bool:
+        """给角色补一个权限点。已存在视为成功（幂等），角色不存在返回 False。"""
+        role = await self.find_role(role_key)
+        if role is None:
+            return False
+        exists = (
+            await self._session.execute(
+                select(RoleGrantRow.grant_id).where(
+                    RoleGrantRow.role_id == role.role_id,
+                    RoleGrantRow.permission == permission,
+                )
+            )
+        ).scalar_one_or_none()
+        if exists is not None:
+            return True
+        self._session.add(RoleGrantRow(role_id=role.role_id, permission=permission))
+        await self._session.flush()
+        return True
+
+    async def remove_role_grant(self, *, role_key: str, permission: str) -> bool:
+        """撤掉一个权限点。返回是否真的删到了行（调用方据此区分 404 与幂等）。"""
+        role = await self.find_role(role_key)
+        if role is None:
+            return False
+        result = await self._session.execute(
+            delete(RoleGrantRow).where(
+                RoleGrantRow.role_id == role.role_id,
+                RoleGrantRow.permission == permission,
+            )
+        )
+        return result.rowcount > 0
+
+    async def replace_role_grants(self, *, role_key: str, permissions: list[str]) -> bool:
+        """整组替换：先删该角色的全部授权，再逐条插入。角色不存在返回 False。
+
+        必须与调用方在**同一个事务**里提交：分两次提交会出现"权限已清空、新权限还没写进
+        来"的窗口，那一瞬间该角色的所有成员失去全部权限。
+        """
+        role = await self.find_role(role_key)
+        if role is None:
+            return False
+        await self._session.execute(
+            delete(RoleGrantRow).where(RoleGrantRow.role_id == role.role_id)
+        )
+        for permission in sorted(set(permissions)):
+            self._session.add(RoleGrantRow(role_id=role.role_id, permission=permission))
+        await self._session.flush()
+        return True

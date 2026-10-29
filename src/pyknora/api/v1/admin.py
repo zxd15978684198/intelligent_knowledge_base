@@ -22,13 +22,20 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pyknora.api.deps import get_kb_repo, get_scope, get_session, require_kb_access
+from pyknora.api.deps import (
+    get_kb_repo,
+    get_scope,
+    get_session,
+    require_kb_access,
+    require_permission,
+)
 from pyknora.api.main import get_app_state
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
+from pyknora.services.auth.permissions import INDEX_REBUILD
 from pyknora.services.migration.reindex import MODE_REINDEX, reindex_knowledge_base
 
-router = APIRouter(tags=["admin"])
+router = APIRouter(tags=["admin"], dependencies=[Depends(require_permission(INDEX_REBUILD))])
 
 
 class ReindexRequest(BaseModel):

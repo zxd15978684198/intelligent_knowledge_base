@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from pyknora.api.deps import get_chunk_search_repo, get_scope
+from pyknora.api.deps import get_chunk_search_repo, get_scope, require_permission
 from pyknora.api.main import get_app_state
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
@@ -24,10 +24,11 @@ from pyknora.schemas.chat import (
     StreamErrorEvent,
     TokenEvent,
 )
+from pyknora.services.auth.permissions import CHAT_RUN
 from pyknora.services.rag.answer import stream_answer
 from pyknora.services.retrieval.search import search_hybrid
 
-router = APIRouter(tags=["chat"])
+router = APIRouter(tags=["chat"], dependencies=[Depends(require_permission(CHAT_RUN))])
 
 
 def _sse(event: str, payload: object) -> str:

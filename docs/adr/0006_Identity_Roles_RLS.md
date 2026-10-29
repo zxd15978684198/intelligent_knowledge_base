@@ -64,6 +64,13 @@
    探测 `current_user` 是否 `rolsuper`/`rolbypassrls`，是则告警。只告警不阻断——否决
    `FORCE ROW LEVEL SECURITY` 的理由（第 6 条备选方案）依然成立，这里只把隐性假设变成可观测项。
 
-另记两条**预留字段**的现状，避免后来者误判为已实现：`role_grants` 表当前没有任何代码读取，
-角色判定是 `api/v1/workspaces.py` 的 `_ADMIN_ROLES`；`workspaces.is_public` 同样是死字段，
-可见性一律由 `workspace_memberships` 决定。
+另记两条**预留字段**的现状，避免后来者误判为已实现：
+
+- `workspaces.is_public` 仍是死字段——可见性一律由 `workspace_memberships` 决定，这轮没动它
+  （理由见上方第 5 条：公开 KB 会同时冲破 I1 活动版本聚合与 I2 `Scope` 单一来源）。
+- `role_grants` **已不再是空壳**（2026-10-29 落地）：运行期判权链变为
+  `workspace_memberships.role` → `roles` → `role_grants` → 权限点集合，`api/deps.py` 的
+  `require_permission()` 按权限点拒绝，原先 `api/v1/workspaces.py` 的 `_ADMIN_ROLES` 硬编码集合已删除。
+  种子矩阵见 `migrations/0006_role_grants.sql`（owner/admin 全量、member 去掉两个管理点、guest 只读），
+  权限点目录在 `src/pyknora/services/auth/permissions.py`。ADR 状态仍是 `提议`——表结构与判定链
+  已按本文第 3 条实现，但"角色继承/自定义角色"等扩展仍未定，不因此升为"已定"。

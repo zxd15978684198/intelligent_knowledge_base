@@ -1,6 +1,25 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：`role_grants` 从「预留」变「已接入」（成员4 域，经用户「好吧你落地role_grants」授权代做）——运行期判权链改为 `workspace_memberships.role` → `roles` → `role_grants`，新增 15 个权限点、6 个 `/workspaces/{ws}/roles|permissions` 端点、`api/deps.py` 权限依赖工厂，全量 **263 passed**，见下方「本轮：`role_grants` 落地」**；再往前是 P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+
+## 本轮：`role_grants` 落地（2026-10-29，lead 代修成员4 域，经用户「好吧你落地role_grants」授权）
+
+- 背景：用户先问「`role_grants` 空壳、`is_public` 死字段是干什么的」→ 我答「不是废弃，是**预留未接入**：表和列都建好了，但系统里没有任何代码读写」并说明真正接线要动成员4 的目录 → 用户回「好吧你落地role_grants」= 授权跨域实现。
+- 决策：**运行期判权链改为 `workspace_memberships.role` → `roles` → `role_grants` → 权限点集合**，`api/v1/workspaces.py` 的 `_ADMIN_ROLES` 硬编码集合删除。权限**每请求查一次、不跨请求缓存**（与 P0-2 同原则：撤权必须在下一个请求生效，集进 JWT 或进程缓存都是"吊销延迟"这类看不见的错）。判权失败统一 `AppError(PERMISSION_DENIED)` → 403，消息点名缺哪个权限点（`missing permission: document.write`），便于排障也不泄漏"存在但无权"的对象信息。
+- 起始 HEAD `b99391a`；`git status --short` 本轮开始时干净。
+- 改动文件（12 改 + 4 新增）：
+  - 新增 `migrations/0006_role_grants.sql`：补 `owner/admin/member/guest` 四个角色（`ON CONFLICT (role_key) DO UPDATE` 自愈——此前 `0003` 建过 `member`，但测试夹具 `TRUNCATE roles` 会把它删掉，不自愈则 `UPDATE` 影响 0 行、`role_grants` 挂空）+ 49 行权限矩阵（15/15/12/7）+ `COMMENT ON` 说明。**号段说明**：`0004` 归成员5、`0005` 是合并时占用（待成员5 追认），本轮占用 `0006`，`0007+` 仍归各成员原号段。
+  - 新增 `src/pyknora/services/auth/permissions.py`（99 行）：15 个权限点常量 + `ALL_PERMISSIONS` / `ADMIN_ONLY` / `READ_ONLY` / `SEED` / `ROLE_KEYS` / `is_known_permission()`。**有意收紧**：`guest` 从"没人用"变成真只读（原任何成员都能上传）；`member` 保留 `index.rebuild`（与接入前行为一致，避免顺手改变重建索引的权限面）。
+  - `src/pyknora/db/repos/principals.py`：新增 `list_permissions_for_role` / `list_role_grants` / `add_role_grant` / `remove_role_grant`（均幂等，返回 `bool`）。
+  - `src/pyknora/services/auth/membership.py`：新增 `load_permissions()`，签名**关键字限定** `(session, *, principal_id, workspace_id)`。
+  - `src/pyknora/api/deps.py`：新增 `get_permissions()` 与 `require_permission(permission)` 依赖工厂（403）。
+  - 路由接线：`router` 级——`query`(query.run) / `chat`(chat.run) / `lineage`(lineage.read) / `admin`(index.rebuild)；端点级——`knowledge_bases`(列表/详情=x read、建/改=write、删=delete)、`documents`(上传=document.write、列表/详情=document.read、切片=chunk.read、删除=document.delete)、`jobs`(读取=job.read、取消=job.cancel)、`workspaces`(改成员角色=workspace.manage_members，**语义仍是 404 不泄漏成员关系**)。
+  - 新增 3 个管理端点：`GET /workspaces/{ws}/permissions`（自省，不要求管理权——谁都能看自己有什么）、`GET /workspaces/{ws}/roles`（`workspace.manage_members`）、`PUT /workspaces/{ws}/roles/{role_key}/permissions`（`workspace.manage_roles`，**整组替换**；`owner` 不可替换）。
+- 顺手修的真 bug（**新用例逼出来的**）：`src/pyknora/api/deps.py` 里写成 `load_permissions(session, scope.workspace_id, scope.principal_id)`，而签名是 `(session, principal_id, workspace_id)`——两个参数都是 `UUID`，传反不报错，稳定返回空集 → 所有走权限依赖的接口一律 403。修法：调用点改关键字传参，并把 `load_permissions` 签名改成关键字限定，让同类错误在类型层面无法再发生（这条已写进它的 docstring）。
+- 新增测试：`tests/unit/test_permissions.py` **8 条**（常量自洽 / `SEED` 矩阵 / `is_known_permission`）、`tests/api/test_api_role_grants.py` **9 条**（member 默认能上传 / guest 只读且点名缺 `document.write` / 库层撤 `document.write` 后同一 token 下一次请求 403 / 端点受管且整组替换生效并二次读目录确认落库 / 未知权限点 422 / `owner` 不可替换 422 / member 不能给自己所在的角色提权 / member 可读自己的权限）；`tests/api/conftest.py` 补 `seed_role_catalog()`（每用例 `DELETE` + 批量 `INSERT` 一次写完，与 `roles` 表同源，避免 50 次往返）。
+- 已执行：`uv run --frozen ruff check src tests scripts` → `All checks passed!`；`ruff format --check` → `114 files already formatted`；`uv run --frozen pytest -q`（真库 5434）→ **263 passed / exit 0**（unit 105 / contract 20 / api 90 / integration 48）。
+- 未验证：`PUT` 的真实并发（两个 admin 同时替换同一角色 → 后写覆盖前写，无锁）；权限矩阵调整对既有业务用例的影响只覆盖到上传与建库两条；`0006` 未在 `pyknora_app`（非 superuser）角色下单独验 RLS 交互。
+- 下一步：`0006` 提交后由成员5 追认号段；`is_public` 仍是预留字段（本轮未动，理由见 ADR-0006「实现期补充」末段）。
 
 ## 本轮：P0–P4 安全与一致性收口（2026-10-29，lead 代修成员4 域，经用户「p0-p4全部解决」授权）
 

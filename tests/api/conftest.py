@@ -23,6 +23,7 @@ from pyknora.core.scope import WORKSPACE_A, WORKSPACE_B, Scope
 from pyknora.db.repos.reads import FakeKbRepo
 from pyknora.db.session import dispose_engine, get_session_factory
 from pyknora.schemas.kb import EmbeddingProfile
+from pyknora.services.auth.permissions import SEED
 from pyknora.services.ingest.embedder import HashingEmbedder
 from tests.api.tokens import JWT_SECRET, KB_ID
 
@@ -46,6 +47,51 @@ TABLES = (
     "knowledge_bases",
     "index_migrations",
 )
+
+
+async def seed_role_catalog(session) -> None:
+    """补齐 `roles` / `role_grants`：清场会把迁移种下的角色一起 TRUNCATE 掉。
+
+    权限判定自本轮起查 `role_grants`（fail-closed：没权限点就是拒），所以清场后不补种，
+    每个走 HTTP 的用例都会 403 —— 现象像业务 bug，其实是夹具少了一层。
+
+    用一条 `VALUES` 列表写完（4 角色 × 至多 15 权限点）：逐个 `INSERT` 是 50+ 次
+    round-trip，会让每个用例平白多出几十毫秒的固定成本。
+    """
+    await session.execute(text("DELETE FROM role_grants"))
+    await session.execute(text("DELETE FROM roles"))
+
+    role_values: list[str] = []
+    role_params: dict[str, str] = {}
+    for index, role_key in enumerate(SEED):
+        role_params[f"k{index}"] = role_key
+        role_params[f"d{index}"] = f"test seed: {role_key}"
+        role_values.append(f"(CAST(:k{index} AS text), CAST(:d{index} AS text))")
+    await session.execute(
+        text(f"INSERT INTO roles (role_key, description) VALUES {', '.join(role_values)}"),
+        role_params,
+    )
+
+    pairs = [
+        (role_key, permission)
+        for role_key, permissions in SEED.items()
+        for permission in sorted(permissions)
+    ]
+    grant_values: list[str] = []
+    grant_params: dict[str, str] = {}
+    for index, (role_key, permission) in enumerate(pairs):
+        grant_params[f"k{index}"] = role_key
+        grant_params[f"p{index}"] = permission
+        grant_values.append(f"(CAST(:k{index} AS text), CAST(:p{index} AS text))")
+    await session.execute(
+        text(
+            "INSERT INTO role_grants (role_id, permission) "
+            "SELECT r.role_id, v.permission FROM (VALUES "
+            f"{', '.join(grant_values)}"
+            ") AS v(role_key, permission) JOIN roles AS r ON r.role_key = v.role_key"
+        ),
+        grant_params,
+    )
 
 
 async def seed_test_identity(session) -> None:
@@ -95,6 +141,8 @@ async def seed_test_identity(session) -> None:
             ),
             {"ws": principal_id, "pid": principal_id},
         )
+
+    await seed_role_catalog(session)
 
 
 @pytest.fixture(autouse=True)

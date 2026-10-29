@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -40,7 +40,11 @@ from pyknora.db.repos.reads import (
 )
 from pyknora.db.session import session_scope
 from pyknora.services.auth.jwt import decode_token
-from pyknora.services.auth.membership import load_membership, set_workspace_context
+from pyknora.services.auth.membership import (
+    load_membership,
+    load_permissions,
+    set_workspace_context,
+)
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
@@ -157,3 +161,46 @@ async def require_kb_access(
 
 def get_max_upload_bytes() -> int:
     return settings.max_upload_bytes
+
+
+async def get_permissions(
+    scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> frozenset[str]:
+    """当前主体在当前工作区的权限点集合（判权只读 `role_grants`）。
+
+    **fail-closed**：非成员 / 账号停用 / 角色没有任何授权 → 空集。空集不会让任何
+    `require_permission` 通过，也不存在"默认权限"兜底。
+
+    来源链：`workspace_memberships.role` → `roles` → `role_grants`。
+    刻意不做跨请求缓存：撤权限必须**下一次请求**就生效（与"停用账号立即失效"同一原则）。
+    同一请求里多处 `require_permission` 由 FastAPI 的依赖缓存合并成一次查询。
+    """
+    return await load_permissions(
+        session, principal_id=scope.principal_id, workspace_id=scope.workspace_id
+    )
+
+
+def require_permission(permission: str) -> Callable[..., Awaitable[frozenset[str]]]:
+    """生成"必须拥有某个权限点"的依赖，挂到路由或 `APIRouter` 上：
+
+        @router.post("", dependencies=[Depends(require_permission(Permission.DOCUMENT_WRITE))])
+
+    为什么是 403 而不是 404：走到这一步说明"这人是本空间成员"已由 `get_scope`
+    确认，缺的是**动作权限**，没有需要隐藏的资源 id；用 404 会让前端把"权限不足"
+    误显示成"资源不存在"。跨区访问仍然由资源查询回 404（不承认存在性）。
+
+    权限点字符串一律取 `services.auth.permissions` 的常量：拼错的后果是静默 403，
+    不会抛异常。
+    """
+
+    async def _require(
+        permissions: Annotated[frozenset[str], Depends(get_permissions)],
+    ) -> frozenset[str]:
+        if permission not in permissions:
+            raise AppError(ErrorCode.FORBIDDEN, f"missing permission: {permission}")
+        return permissions
+
+    _require.__name__ = "require_" + permission.replace(".", "_")
+    _require.__doc__ = f"要求权限点 {permission}"
+    return _require

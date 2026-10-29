@@ -7,15 +7,16 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends
 
-from pyknora.api.deps import get_chunk_search_repo, get_scope
+from pyknora.api.deps import get_chunk_search_repo, get_scope, require_permission
 from pyknora.api.main import get_app_state
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
 from pyknora.db.repos.reads import SqlChunkSearchRepo
 from pyknora.schemas.query import QueryRequest, QueryResponse
+from pyknora.services.auth.permissions import QUERY_RUN
 from pyknora.services.retrieval.search import search_hybrid
 
-router = APIRouter(tags=["query"])
+router = APIRouter(tags=["query"], dependencies=[Depends(require_permission(QUERY_RUN))])
 
 
 @router.post(

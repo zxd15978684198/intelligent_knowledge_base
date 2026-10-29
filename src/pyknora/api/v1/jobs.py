@@ -20,9 +20,10 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pyknora.api.deps import get_scope, get_session
+from pyknora.api.deps import get_scope, get_session, require_permission
 from pyknora.core.errors import not_found
 from pyknora.core.scope import Scope
+from pyknora.services.auth.permissions import JOB_CANCEL, JOB_READ
 from pyknora.services.queue import jobs as queue
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,12 @@ class JobDetail(BaseModel):
     terminal: bool
 
 
-@router.get("/jobs/{job_id}", response_model=JobDetail, summary="作业状态")
+@router.get(
+    "/jobs/{job_id}",
+    response_model=JobDetail,
+    summary="作业状态",
+    dependencies=[Depends(require_permission(JOB_READ))],
+)
 async def get_job(
     job_id: UUID,
     scope: Annotated[Scope, Depends(get_scope)],
@@ -64,7 +70,12 @@ async def get_job(
     )
 
 
-@router.post("/jobs/{job_id}/cancel", response_model=JobDetail, summary="取消作业")
+@router.post(
+    "/jobs/{job_id}/cancel",
+    response_model=JobDetail,
+    summary="取消作业",
+    dependencies=[Depends(require_permission(JOB_CANCEL))],
+)
 async def cancel_job(
     job_id: UUID,
     scope: Annotated[Scope, Depends(get_scope)],
