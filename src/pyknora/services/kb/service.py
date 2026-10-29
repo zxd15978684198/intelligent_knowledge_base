@@ -40,9 +40,9 @@ async def create_knowledge_base(
     try:
         return await repo.create(scope, name=name.strip(), profile=profile)
     except IntegrityError as exc:
-        raise AppError(
-            ErrorCode.IDEMPOTENCY_CONFLICT, "knowledge base name already exists"
-        ) from exc
+        # 用 CONFLICT 而不是 IDEMPOTENCY_CONFLICT：后者留给"同一个幂等键换了 payload"，
+        # 名字撞唯一索引是普通冲突。core/errors.py:17-20 对注册撞唯一键已定过同一口径。
+        raise AppError(ErrorCode.CONFLICT, "knowledge base name already exists") from exc
 
 
 async def rename_knowledge_base(
@@ -63,9 +63,7 @@ async def rename_knowledge_base(
             scope, kb_id, name=name.strip(), expected_version=expected_version
         )
     except IntegrityError as exc:
-        raise AppError(
-            ErrorCode.IDEMPOTENCY_CONFLICT, "knowledge base name already exists"
-        ) from exc
+        raise AppError(ErrorCode.CONFLICT, "knowledge base name already exists") from exc
     if updated is None:
         raise AppError(ErrorCode.REVISION_CONFLICT, "knowledge base revision conflict")
     return updated
