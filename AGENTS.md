@@ -43,9 +43,9 @@
 | 数据 | PostgreSQL 16 + `pgvector`；SQLAlchemy 2 async + `asyncpg` |
 | 明确**不用** | Redis、Celery、alembic、lxml（队列=PG 表 + `SKIP LOCKED`，迁移=手写数字号段 SQL） |
 | 本地库 | 容器名与端口以 `.env` 的 `PYKNORA_DB_CONTAINER` / `PYKNORA_DATABASE_URL` 为准；契约默认 `pyknora-pg`，宿主端口 **5433**，库名/用户名 `postgres`，密码 `dev`。**别人的机器上常见 5434 + `pyknora-pg-p0`，先 `docker ps` 再改 `.env`，别改代码默认值** |
-| 库结构 | `migrations/0001_init.sql` 建 **9 张表 + 1 个视图**；ORM 只映射 8 张（`outbox` 走原生 SQL） |
-| 错误码 | `src/pyknora/core/errors.py` 的 **16 个** `ErrorCode`；响应体统一 `{"error":{code,message,retryable,details},"request_id"}` |
-| 测试 | `tests/unit`（不需要数据库）、`tests/integration`（需真 PG）、`tests/api`（ASGI 打真 PG）、`tests/contract/`（C1/C2 已建，C3 待建） |
+| 库结构 | `migrations/0001_init.sql` 建 **9 张表 + 1 个视图**；`0001–0005` 合计 **16 张表 + `v_active_chunks`**；ORM 只映射 15 个 Row（`outbox` 走原生 SQL、`index_migrations` 走 repo 内的 SQLAlchemy Core） |
+| 错误码 | `src/pyknora/core/errors.py` 的 **17 个** `ErrorCode`；响应体统一 `{"error":{code,message,retryable,details},"request_id"}`。其中 `CONFLICT`/`CURSOR_EXPIRED`/`DEPENDENCY_UNAVAILABLE`/`INTERNAL_ERROR` 是实现期新增、`docs/tdd/07` 原表未列，已在该文 §7 登记为**提议** |
+| 测试 | `tests/unit`（88，不需要数据库）、`tests/contract`（20）、`tests/api`（80，ASGI 打真 PG）、`tests/integration`（48，需真 PG）；合计 236 |
 | 本地门禁 | `.githooks/pre-commit` → `scripts/ci.py --stage all`；激活命令 `git config core.hooksPath .githooks`（见 §6.1） |
 
 **两套编号，别混**：`S01–S16` 是实现步骤（计划书），`1–17` 是课件任务编号（进度表/xlsx）。写进度时两个都写清楚。

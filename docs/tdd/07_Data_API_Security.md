@@ -213,6 +213,22 @@ terminal 事件每 run 最多一个（UNIQUE terminal fact key），completed/fa
 | BROWSER_OFFLINE / BROWSER_PAUSED / OWNER_LOST | 409，否 | 需要人工建连/恢复/核查，不能盲重试写 |
 | BROWSER_INCOMPATIBLE / HUMAN_ACTION_REQUIRED | 409，否 | 成套版本不兼容/需用户接管 |
 | TOOL_UNKNOWN_OUTCOME | 409，否 | 外部效果未知，核查而非自动重放 |
+| **实现期新增（提议，待用户接受）**：`CONFLICT` / `CURSOR_EXPIRED` / `DEPENDENCY_UNAVAILABLE` / `INTERNAL_ERROR` | 409/410/503/500，后两者可重试 | 见下 |
+
+**实现期新增的 4 个码**（`src/pyknora/core/errors.py:12`，本表原版未列，状态=**提议**）：
+
+| code | HTTP / retryable | 为什么不能复用已有码 |
+| --- | --- | --- |
+| `CONFLICT` | 409，否 | 「这个用户名/知识库名已被占」与「幂等键重放改参」是两件事：前端要提示"换个名字"而不是"稍后重试"，混用 `IDEMPOTENCY_CONFLICT` 会让用户一直等 |
+| `CURSOR_EXPIRED` | 410，否 | 分页游标签名过期/被篡改，语义是"从头再来"，既不是 404（资源不存在）也不是 422（参数非法） |
+| `DEPENDENCY_UNAVAILABLE` | 503，是 | 上游（Embedding / LLM / 模型文件）不可用，属于**可重试**的临时故障，必须与 500 区分，否则客户端会放弃重试 |
+| `INTERNAL_ERROR` | 500，是 | 兜底未分类异常；标记 retryable 是为了让 SSE 的 `error` 事件能告诉前端"可重试" |
+
+> 与实现的对账：当前实现共 **17 个** `ErrorCode`，其中 13 个在本表原版内，
+> 上述 4 个为新增。表内其余设计期码（`RUN_CONFLICT`/`APPROVAL_*`/`BUDGET_EXCEEDED`/
+> `SSRF_BLOCKED`/`BROWSER_*` 等）**未实现**，因为 PyKnora 当前范围不含此类能力——
+> 别照着这张表数"应该有 30 多个码"。
+
 | CURSOR_EXPIRED / EVENT_CURSOR_EXPIRED | 410，否 | 分页/事件游标失效，取资源快照 |
 | DEPENDENCY_UNAVAILABLE / INTERNAL_ERROR | 503/500，按原因 | 临时下游错误/未知内部错误；只重试幂等操作 |
 
