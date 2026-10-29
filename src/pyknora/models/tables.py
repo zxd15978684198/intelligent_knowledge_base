@@ -225,6 +225,8 @@ class PrincipalRow(Base):
     display_name: Mapped[str | None] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class KnowledgeBaseRow(Base):
     """成员1拥有的知识库配置；追加在共享映射文件末尾以减少合并冲突。"""
 
@@ -288,6 +290,7 @@ class IndexMigrationRow(Base):
         Index("index_migrations_kb_idx", "workspace_id", "kb_id", "created_at"),
     )
 
+
 class WorkspaceRow(Base):
     __tablename__ = "workspaces"
 
@@ -336,4 +339,3 @@ class RoleGrantRow(Base):
     permission: Mapped[str] = mapped_column(String(128), nullable=False)
 
     __table_args__ = (UniqueConstraint("role_id", "permission"),)
-
