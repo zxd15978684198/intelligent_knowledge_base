@@ -1,0 +1,70 @@
+"""成员3：SSE 流式 RAG 问答接口。"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
+
+from pyknora.api.deps import get_chunk_search_repo, get_scope
+from pyknora.api.main import get_app_state
+from pyknora.core.errors import AppError, ErrorCode
+from pyknora.core.scope import Scope
+from pyknora.core.settings import settings
+from pyknora.db.repos.reads import SqlChunkSearchRepo
+from pyknora.schemas.chat import ChatRequest, Citation, DoneEvent, RetrievalEvent, TokenEvent
+from pyknora.services.rag.answer import stream_answer
+from pyknora.services.retrieval.search import search_hybrid
+
+router = APIRouter(tags=["chat"])
+
+
+def _sse(event: str, payload: object) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@router.post(
+    "/knowledge-bases/{kb_id}/chat",
+    response_class=StreamingResponse,
+    summary="流式 RAG 问答",
+)
+async def chat(
+    body: ChatRequest,
+    scope: Annotated[Scope, Depends(get_scope)],
+    kb_id: UUID,
+    repo: Annotated[SqlChunkSearchRepo, Depends(get_chunk_search_repo)],
+) -> StreamingResponse:
+    """SSE 顺序固定为 retrieval、token*、done；检索沿用可信 Scope。"""
+    state = get_app_state()
+    if state.embedder is None:
+        raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "embedding provider not configured")
+    chunks = await search_hybrid(
+        scope, kb_id, body.query, embedder=state.embedder, repo=repo, top_k=body.top_k
+    )
+    citations = [
+        Citation(
+            chunk_id=chunk.chunk_id,
+            document_id=chunk.document_id,
+            page_no=chunk.page_no,
+            snippet=chunk.content[:500],
+        ).model_dump(mode="json")
+        for chunk in chunks
+    ]
+
+    async def events() -> AsyncIterator[str]:
+        yield _sse("retrieval", RetrievalEvent(citations=citations).model_dump(mode="json"))
+        async for kind, value in stream_answer(body.query, chunks, settings=settings):
+            if kind == "token":
+                yield _sse("token", TokenEvent(text=value).model_dump())
+            else:
+                yield _sse("done", DoneEvent(**value).model_dump())
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

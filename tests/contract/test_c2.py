@@ -30,7 +30,7 @@ from pyknora.services.contracts.reads import (
     ChunkRepo,
     ChunkSearchRepo,
     DocumentRepo,
-    DocumentVersionRepo,
+    DocumentVersionLookupRepo,
     IndexBuildRepo,
 )
 
@@ -43,7 +43,7 @@ class _DummySession:
     ("factory", "protocol"),
     [
         (SqlDocumentRepo, DocumentRepo),
-        (SqlDocumentRepo, DocumentVersionRepo),
+        (SqlDocumentRepo, DocumentVersionLookupRepo),
         (SqlChunkRepo, ChunkRepo),
         (SqlChunkRepo, ChunkLookupRepo),
         (SqlChunkRepo, BuildChunkRepo),

@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
 
+    # Chat 生成：OpenAI 兼容的流式 Chat Completions 接口。
+    chat_base_url: str = "https://api.openai.com/v1"
+    chat_api_key: str = ""
+    chat_model: str = "gpt-4o-mini"
+    chat_timeout_s: float = 60.0
+    chat_max_context_chunks: int = 6
+
     # 切片
     chunk_size: int = 512
     chunk_overlap: int = 64

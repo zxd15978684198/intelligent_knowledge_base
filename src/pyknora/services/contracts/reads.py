@@ -27,6 +27,7 @@ from pyknora.schemas.document import (
     ScoredChunk,
 )
 from pyknora.schemas.kb import EmbeddingProfile, KnowledgeBase
+from pyknora.schemas.lineage import DocumentVersion
 
 
 @runtime_checkable
@@ -164,7 +165,29 @@ class BuildChunkRepo(Protocol):
 
 
 @runtime_checkable
-class DocumentVersionRepo(Protocol):
+class DocumentVersionLookupRepo(Protocol):
+    """成员2 追加：按 version_id 取**单条**版本元数据（窄投影，供引用回溯）。
+
+    名字为什么不是 `DocumentVersionRepo`：合并远端 `8caace1` 时发现成员5 已经用
+    那个名字声明了 `list_versions(document_id)`（按文档列全部版本）。两个是不同能力
+    （单条 vs 列表），也落在不同仓储上；硬合成一个 Protocol 会逼出一个只为"凑接口"
+    而存在的适配类。因此成员5 的契约保留原名，成员2 这条换名，双方实现都不必改。
+    """
+
     async def get_version(self, scope: Scope, version_id: UUID) -> DocumentVersionInfo | None:
         """不可变版本快照的元数据；跨区与不存在统一 None。"""
+        ...
+
+
+@runtime_checkable
+class DocumentVersionRepo(Protocol):
+    """成员5 追加（任务8）：只读版本快照，供 lineage 端点聚合。
+
+    **只加不改**：上面五个方法的签名一个都没动。实现见 `db/repos/lineage.py`。
+    返回的是原始行（`DocumentVersion`），`ordinal` / `is_active` 属于读时派生，
+    由 `services/lineage/service.build_lineage` 计算——repo 不该编造库里没有的字段。
+    """
+
+    async def list_versions(self, scope: Scope, document_id) -> Sequence[DocumentVersion]:
+        """按 (created_at, document_version_id) 升序；跨区与不存在的文档返回空序列。"""
         ...
