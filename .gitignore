@@ -8,6 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# IDE
+.idea/
 references/**
 
 # 对标源码切片（只读参考，不入库；不忽略的话 ruff 全仓扫描会报 47 个历史错误）

@@ -16,6 +16,9 @@ from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
 from pyknora.services.queue import jobs as queue
 
+KB_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+KB_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
 
 async def _document(session, scope: Scope) -> object:
     """插一条最小文档行，供作业挂靠。作业表有 (workspace_id, document_id) 复合外键。"""
@@ -28,7 +31,7 @@ async def _document(session, scope: Scope) -> object:
         {
             "d": doc_id,
             "w": scope.workspace_id,
-            "kb": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "kb": KB_A if str(scope.workspace_id).startswith("11111111") else KB_B,
         },
     )
     await session.flush()

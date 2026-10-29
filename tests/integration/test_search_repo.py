@@ -125,6 +125,46 @@ async def test_search_returns_hits_with_distance(session, scope_a) -> None:
     assert hits[0].distance == pytest.approx(0.0, abs=1e-5)
 
 
+async def test_keyword_search_matches_full_chinese_token(session, scope_a) -> None:
+    """simple 配置按连续中文词整词匹配；本测试查询完整锚点词。"""
+    from sqlalchemy import text as sql
+
+    doc_id = await _seed_one(session, scope_a, KB_ID, "银狐锚点 检索测试")
+    await session.execute(
+        sql(
+            "UPDATE chunks SET tsvector = to_tsvector('simple', content) "
+            "WHERE workspace_id = :ws AND document_id = :doc"
+        ),
+        {"ws": scope_a.workspace_id, "doc": doc_id},
+    )
+    await session.commit()
+
+    hits = await SqlChunkSearchRepo(session).search_keyword(scope_a, KB_ID, "银狐锚点", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].document_id == doc_id
+    assert hits[0].content == "银狐锚点 检索测试"
+
+
+async def test_keyword_search_filters_workspace_in_sql(session, scope_a, scope_b) -> None:
+    """相同关键词在另一 workspace 中不可见。"""
+    from sqlalchemy import text as sql
+
+    doc_id = await _seed_one(session, scope_a, KB_ID, "赤鹿锚点 权限测试")
+    await session.execute(
+        sql(
+            "UPDATE chunks SET tsvector = to_tsvector('simple', content) "
+            "WHERE workspace_id = :ws AND document_id = :doc"
+        ),
+        {"ws": scope_a.workspace_id, "doc": doc_id},
+    )
+    await session.commit()
+
+    repo = SqlChunkSearchRepo(session)
+    assert await repo.search_keyword(scope_a, KB_ID, "赤鹿锚点", limit=5)
+    assert await repo.search_keyword(scope_b, KB_ID, "赤鹿锚点", limit=5) == []
+
+
 async def test_dimension_mismatch_raises_before_reaching_pg(session, scope_a) -> None:
     """查询向量 1024 维，库内 512 维 → 抛 EmbeddingDimensionError（不是 500）。"""
     await _seed_one(session, scope_a, KB_ID, "维度不符")

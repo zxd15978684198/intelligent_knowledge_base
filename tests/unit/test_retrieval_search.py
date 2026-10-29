@@ -1,0 +1,210 @@
+"""成员3阶段1：问题向量化后委托给带 Scope 的向量检索仓库。"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from uuid import UUID
+
+import pytest
+
+from pyknora.core.errors import AppError, ErrorCode
+from pyknora.core.scope import WORKSPACE_A, Scope
+from pyknora.schemas.document import ActiveChunk, ScoredChunk
+from pyknora.services.retrieval.rrf import reciprocal_rank_fusion
+from pyknora.services.retrieval.search import search_hybrid, search_vector
+
+KB_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+
+class FakeEmbedder:
+    model_key = "test/model"
+    dim = 3
+
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self.vectors = vectors
+        self.received_texts: list[str] | None = None
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self.received_texts = list(texts)
+        return self.vectors
+
+
+class FakeSearchRepo:
+    def __init__(
+        self,
+        results: Sequence[ScoredChunk] = (),
+        keyword_results: Sequence[ActiveChunk] = (),
+    ) -> None:
+        self.results = results
+        self.keyword_results = keyword_results
+        self.received: tuple[Scope, UUID, list[float], int] | None = None
+        self.keyword_received: tuple[Scope, UUID, str, int] | None = None
+
+    async def search_similar(
+        self,
+        scope: Scope,
+        kb_id: UUID,
+        query_vector: Sequence[float],
+        *,
+        limit: int = 10,
+        document_id: UUID | None = None,
+    ) -> Sequence[ScoredChunk]:
+        assert document_id is None
+        self.received = (scope, kb_id, list(query_vector), limit)
+        return self.results
+
+    async def search_keyword(
+        self, scope: Scope, kb_id: UUID, query_text: str, *, limit: int = 10
+    ) -> Sequence[ActiveChunk]:
+        self.keyword_received = (scope, kb_id, query_text, limit)
+        return self.keyword_results
+
+
+@pytest.fixture
+def scope() -> Scope:
+    return Scope(workspace_id=WORKSPACE_A, principal_id=WORKSPACE_A)
+
+
+async def test_search_vector_embeds_question_and_passes_scope_and_limit(scope: Scope) -> None:
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    result = await search_vector(
+        scope,
+        KB_ID,
+        "  如何申请借阅证？  ",
+        embedder=embedder,
+        repo=repo,
+        top_k=5,
+    )
+
+    assert not result
+    assert embedder.received_texts == ["如何申请借阅证？"]
+    assert repo.received == (scope, KB_ID, [0.1, 0.2, 0.3], 5)
+
+
+@pytest.mark.parametrize("query", ["", "   ", "\n\t"])
+async def test_search_vector_rejects_empty_query_before_dependencies(
+    query: str, scope: Scope
+) -> None:
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    with pytest.raises(AppError) as exc:
+        await search_vector(scope, KB_ID, query, embedder=embedder, repo=repo)
+
+    assert exc.value.code == ErrorCode.INVALID_REQUEST
+    assert embedder.received_texts is None
+    assert repo.received is None
+
+
+async def test_search_vector_rejects_nonpositive_top_k(scope: Scope) -> None:
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    with pytest.raises(AppError) as exc:
+        await search_vector(scope, KB_ID, "问题", embedder=embedder, repo=repo, top_k=0)
+
+    assert exc.value.code == ErrorCode.INVALID_REQUEST
+    assert embedder.received_texts is None
+    assert repo.received is None
+
+
+async def test_search_vector_rejects_unexpected_embedding_count(scope: Scope) -> None:
+    embedder = FakeEmbedder([])
+    repo = FakeSearchRepo()
+
+    with pytest.raises(AppError) as exc:
+        await search_vector(scope, KB_ID, "问题", embedder=embedder, repo=repo)
+
+    assert exc.value.code == ErrorCode.INTERNAL_ERROR
+    assert exc.value.details == {"expected": 1, "actual": 0}
+    assert repo.received is None
+
+
+async def test_search_hybrid_queries_both_channels_with_same_scope(scope: Scope) -> None:
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    hits = await search_hybrid(
+        scope,
+        KB_ID,
+        "  关键词查询  ",
+        embedder=embedder,
+        repo=repo,
+        top_k=3,
+        candidate_k=8,
+    )
+
+    assert hits == []
+    assert embedder.received_texts == ["关键词查询"]
+    assert repo.received == (scope, KB_ID, [0.1, 0.2, 0.3], 8)
+    assert repo.keyword_received == (scope, KB_ID, "关键词查询", 8)
+
+
+def test_rrf_fuses_ranks_and_keeps_one_copy_of_each_chunk() -> None:
+    vector = [
+        _scored_chunk("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "向量第一"),
+        _scored_chunk("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "向量第二"),
+    ]
+    keyword = [
+        _active_chunk("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "关键词第一"),
+        _active_chunk("cccccccc-cccc-cccc-cccc-cccccccccccc", "关键词第二"),
+    ]
+
+    hits = reciprocal_rank_fusion(vector, keyword, limit=3, k=60)
+
+    assert [hit.chunk_id for hit in hits] == [
+        UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        UUID("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+    ]
+    assert hits[0].rrf_score == pytest.approx(1 / 62 + 1 / 61)
+    assert hits[0].vector_rank == 2
+    assert hits[0].keyword_rank == 1
+    # 两路都命中的片段使用向量结果中的公共元数据，不重复返回。
+    assert hits[0].content == "向量第二"
+
+
+def test_rrf_applies_final_limit_and_rejects_invalid_options() -> None:
+    vector = [_scored_chunk("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "片段")]
+
+    assert len(reciprocal_rank_fusion(vector, [], limit=1)) == 1
+    with pytest.raises(ValueError, match="limit"):
+        reciprocal_rank_fusion(vector, [], limit=0)
+    with pytest.raises(ValueError, match="k"):
+        reciprocal_rank_fusion(vector, [], k=0)
+
+
+def _scored_chunk(chunk_id: str, content: str) -> ScoredChunk:
+    return ScoredChunk(
+        chunk_id=UUID(chunk_id),
+        workspace_id=WORKSPACE_A,
+        kb_id=KB_ID,
+        document_id=UUID("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+        build_id=UUID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"),
+        index_version=1,
+        attempt_id=UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        chunk_ordinal=0,
+        content=content,
+        embedding_model_key="test/model",
+        embedding_dim=3,
+        distance=0.1,
+    )
+
+
+def _active_chunk(chunk_id: str, content: str) -> ActiveChunk:
+    return ActiveChunk(
+        chunk_id=UUID(chunk_id),
+        workspace_id=WORKSPACE_A,
+        kb_id=KB_ID,
+        document_id=UUID("dddddddd-dddd-dddd-dddd-dddddddddddd"),
+        build_id=UUID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"),
+        index_version=1,
+        attempt_id=UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        chunk_ordinal=0,
+        content=content,
+        embedding_model_key="test/model",
+        embedding_dim=3,
+        chunk_size=512,
+    )

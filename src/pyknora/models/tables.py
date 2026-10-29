@@ -225,12 +225,41 @@ class PrincipalRow(Base):
     display_name: Mapped[str | None] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+class KnowledgeBaseRow(Base):
+    """成员1拥有的知识库配置；追加在共享映射文件末尾以减少合并冲突。"""
+
+    __tablename__ = "knowledge_bases"
+
+    kb_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    workspace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_model_key: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_dim: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_overlap: Mapped[int] = mapped_column(Integer, nullable=False)
+    normalize: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    active_index_build_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "kb_id"),
+        Index(
+            "knowledge_bases_active_name_uq",
+            "workspace_id",
+            func.lower(name),
+            unique=True,
+            postgresql_where=deleted_at.is_(None),
+        ),
+    )
+
 
 
 class WorkspaceRow(Base):
@@ -281,3 +310,4 @@ class RoleGrantRow(Base):
     permission: Mapped[str] = mapped_column(String(128), nullable=False)
 
     __table_args__ = (UniqueConstraint("role_id", "permission"),)
+

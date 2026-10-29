@@ -36,5 +36,9 @@ class Settings(BaseSettings):
     lease_seconds: int = 90
     max_attempts: int = 3
 
+    # 游标：签名防篡改，默认 24 小时失效。生产必须覆盖开发密钥。
+    cursor_secret: str = "dev-only-insecure-cursor-secret"
+    cursor_ttl_seconds: int = 24 * 60 * 60
+
 
 settings = Settings()

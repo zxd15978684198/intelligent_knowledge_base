@@ -43,6 +43,7 @@ TABLES = (
     "document_blobs",
     "documents",
     "embedding_cache",
+    "knowledge_bases",
 )
 
 
@@ -124,6 +125,20 @@ async def clean_db() -> AsyncIterator[None]:
         # 清场之后立刻补回最小身份数据：鉴权链路需要它，而调用方不该为
         # "我的用例要不要自己插 principals"操心。
         await seed_test_identity(session)
+        await session.execute(
+            text(
+                """
+                INSERT INTO knowledge_bases (
+                    kb_id, workspace_id, name, embedding_model_key, embedding_dim,
+                    chunk_size, chunk_overlap, normalize
+                ) VALUES (
+                    :kb_id, :workspace_id, '上传测试知识库',
+                    'test/hashing', 512, 512, 64, true
+                )
+                """
+            ),
+            {"kb_id": KB_ID, "workspace_id": WORKSPACE_A},
+        )
         await session.commit()
     yield
 

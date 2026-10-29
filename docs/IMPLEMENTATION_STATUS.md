@@ -2,6 +2,25 @@
 
 更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加：成员4 验收闭环，见下方「当前轮」**；其后的身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
 
+## 本轮：S05 知识库查询（2026-10-28，成员1）
+
+- 任务：进度表任务2 ↔ S05 查询部分；起始 HEAD `76ef94f`，`git status --short` 为空。前置任务1已完成，本轮未推进任务15。
+- 改动文件：`src/pyknora/api/v1/knowledge_bases.py`、`db/repos/knowledge_bases.py`、`db/repos/reads.py`、`schemas/kb.py`、`services/contracts/reads.py`、`core/settings.py`；新增 `services/kb/cursor.py`、`tests/contract/{__init__.py,test_c1.py}`、`tests/unit/test_kb_cursor.py`；扩展 `tests/api/test_api_knowledge_bases.py`。
+- 已实现：`GET /api/v1/knowledge-bases` 按 `(created_at,kb_id)` 稳定键集分页，只查当前 workspace 且排除软删除行；游标以 HMAC-SHA256 签名并绑定 workspace、principal 和24小时有效期，篡改、跨 Scope 重放、过期统一返回 410 `CURSOR_EXPIRED`；C1 在保留原 `get_embedding_profile` 签名的基础上追加 `get/list`，真实仓储和 Fake 均满足契约。
+- 已执行：`uv run ruff check src tests scripts` → `All checks passed!`；`uv run pytest -q tests/unit tests/contract` → 33 passed（31 unit + 2 contract）；`uv run pytest -q tests/api/test_api_knowledge_bases.py` → 6 passed；`uv run pytest -q tests/integration` → 28 passed；`uv run pytest -q` → 101 passed；`uv run python scripts/ci.py --stage all` → ruff check、ruff format check、31个单元测试全部 PASS。
+- 未验证 / 未做：未运行联网 security 阶段；未实现成员4的真实 membership/RLS；未推进任务15；未做并发翻页的快照一致性承诺（每页重新按当前 Scope 和未删除状态查询）；未提交。五份ADR仍为“提议”。
+- 风险与下一步：`cursor_secret` 当前有开发默认值，生产必须用 `PYKNORA_CURSOR_SECRET` 覆盖；下一阶段应由成员4基于 C1 `get(scope,kb_id)` 实现任务15，非授权继续统一404。
+
+## 本轮：S05 KB 表与 CRUD（2026-10-28，成员1）
+
+- 任务：S05 ↔ 进度表任务1；起始 HEAD `c1cfb7b`，开工时 `git status --short` 为空。本轮只完成任务1，任务2的列表/游标分页、S06配置固化和任务15权限联调未推进。
+- 改动文件：新增 `migrations/0002_knowledge_bases.sql`、`src/pyknora/api/v1/knowledge_bases.py`、`src/pyknora/db/repos/knowledge_bases.py`、`src/pyknora/services/kb/service.py`、`tests/api/test_api_knowledge_bases.py`；追加 `models/tables.py` 的 `KnowledgeBaseRow`、`schemas/kb.py` 的版本字段、`api/deps.py` 真实仓储注入、`api/main.py` 路由，以及 API/集成测试真实 KB 种子和复合外键断言。
+- 已实现：知识库创建、详情、带 `If-Match` 的改名、软删除；同区活动名称由部分唯一索引约束；删除递增 `generation`/`row_version` 并同事务写 outbox；`documents(workspace_id,kb_id)` 复合外键拒绝跨区引用；未显式注入测试替身时默认使用 `SqlKnowledgeBaseRepo`。
+- 已执行：`uv sync --extra dev` → 成功；`uv run python scripts/migrate.py` → `0001`、`0002` 成功，重复执行再次 `migrations ok`；`uv run ruff check src tests scripts` → `All checks passed!`；`uv run pytest -q tests/unit` → 27 passed；`uv run pytest -q tests/integration` → 28 passed；`uv run pytest -q` → 92 passed；`uv run python scripts/ci.py --stage all` → ruff check、ruff format check、27个单元测试全部 PASS。
+- 门禁限制：`git config core.hooksPath .githooks` 已设置，但仓库中的 `.githooks/pre-commit` Git模式为 `100644`、磁盘不可执行，`git hook run pre-commit` 报 `cannot find a hook named pre-commit`；未跨阶段修改该公共钩子，改为直接运行其唯一入口 `scripts/ci.py --stage all` 并通过。
+- 未验证 / 未做：未运行独立 security 阶段；未实现任务2列表/游标；未扩展共享 `KbRepo` 的 `get/list` 签名；未提交。五份ADR仍为“提议”。本轮期间另出现无关的 `.gitignore` 修改和已暂存 `.idea/*` 删除，均未回滚、未编辑、未纳入本轮交付。
+- 下一步：单独推进任务2“知识库查询”与 C1 契约测试；若提交本轮，先由仓库维护者修复 `.githooks/pre-commit` 的可执行位，并只暂存本轮文件。
+
 ## 当前轮：成员4 验收闭环（2026-10-29，成员4）
 
 - 任务：进度表任务 **9 / 11 / 10 / 12 / 15**——把 2026-10-28 落地但因 Docker 不可用而卡在 `进行中/75%` 的代码补齐验收，转 `已完成/100%`。
