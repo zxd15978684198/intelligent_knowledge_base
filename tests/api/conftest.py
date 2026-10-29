@@ -44,6 +44,7 @@ TABLES = (
     "documents",
     "embedding_cache",
     "knowledge_bases",
+    "index_migrations",
 )
 
 

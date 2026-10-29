@@ -21,6 +21,7 @@ from uuid import UUID
 from pyknora.core.scope import Scope
 from pyknora.schemas.document import ActiveChunk, ActiveDocument, IndexBuild, ScoredChunk
 from pyknora.schemas.kb import EmbeddingProfile, KnowledgeBase
+from pyknora.schemas.lineage import DocumentVersion
 
 
 @runtime_checkable
@@ -106,4 +107,18 @@ class KbRepo(Protocol):
 
     async def get_embedding_profile(self, scope: Scope, kb_id: UUID) -> EmbeddingProfile | None:
         """返回 EmbeddingProfile。KB 不存在、跨区、已删除，统一返回 None。"""
+        ...
+
+
+@runtime_checkable
+class DocumentVersionRepo(Protocol):
+    """成员5 追加（任务8）：只读版本快照，供 lineage 端点聚合。
+
+    **只加不改**：上面五个方法的签名一个都没动。实现见 `db/repos/lineage.py`。
+    返回的是原始行（`DocumentVersion`），`ordinal` / `is_active` 属于读时派生，
+    由 `services/lineage/service.build_lineage` 计算——repo 不该编造库里没有的字段。
+    """
+
+    async def list_versions(self, scope: Scope, document_id) -> Sequence[DocumentVersion]:
+        """按 (created_at, document_version_id) 升序；跨区与不存在的文档返回空序列。"""
         ...

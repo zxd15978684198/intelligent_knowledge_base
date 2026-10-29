@@ -225,6 +225,8 @@ class PrincipalRow(Base):
     display_name: Mapped[str | None] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class KnowledgeBaseRow(Base):
     """成员1拥有的知识库配置；追加在共享映射文件末尾以减少合并冲突。"""
 
@@ -260,6 +262,33 @@ class KnowledgeBaseRow(Base):
         ),
     )
 
+
+class IndexMigrationRow(Base):
+    """成员5：重建 / 迁库的记账行（migrations/0004）。追加在共享映射文件末尾。"""
+
+    __tablename__ = "index_migrations"
+
+    migration_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    workspace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    kb_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    source_build_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    target_build_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)  # export|replay|reindex
+    # pending|running|succeeded|failed
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    manifest: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "migration_id"),
+        Index("index_migrations_kb_idx", "workspace_id", "kb_id", "created_at"),
+    )
 
 
 class WorkspaceRow(Base):
@@ -310,4 +339,3 @@ class RoleGrantRow(Base):
     permission: Mapped[str] = mapped_column(String(128), nullable=False)
 
     __table_args__ = (UniqueConstraint("role_id", "permission"),)
-

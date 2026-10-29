@@ -157,10 +157,10 @@ def create_app() -> FastAPI:
     from pyknora.api.v1 import auth as auth_router
     from pyknora.api.v1 import documents as documents_router
     from pyknora.api.v1 import jobs as jobs_router
-
-    from pyknora.api.v1 import workspaces as workspaces_router
-    from pyknora.api.v1 import query as query_router
     from pyknora.api.v1 import knowledge_bases as knowledge_bases_router
+    from pyknora.api.v1 import lineage as lineage_router
+    from pyknora.api.v1 import query as query_router
+    from pyknora.api.v1 import workspaces as workspaces_router
 
     app.include_router(documents_router.router, prefix="/api/v1")
     app.include_router(jobs_router.router, prefix="/api/v1")
@@ -170,7 +170,7 @@ def create_app() -> FastAPI:
 
     app.include_router(query_router.router, prefix="/api/v1")
     app.include_router(knowledge_bases_router.router, prefix="/api/v1")
-
+    app.include_router(lineage_router.router, prefix="/api/v1")
 
     return app
 
