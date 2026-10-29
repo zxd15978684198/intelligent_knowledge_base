@@ -23,7 +23,13 @@ from pyknora.models.tables import PrincipalRow, WorkspaceRow
 
 
 async def load_membership(session: AsyncSession, principal_id: UUID, workspace_id: UUID) -> bool:
-    """无成员关系即无权限（fail-closed），不区分"空间不存在"与"不是成员"。"""
+    """无成员关系即无权限（fail-closed），不区分"空间不存在"与"不是成员"。
+
+    这条查询**故意**每个请求都跑一次，不做缓存、也不把 role 塞进令牌：
+    它同时承担"改角色/停用账号下一次请求即生效"的职责（`find_membership` 里 join 了
+    `principals.status`）。缓存它省下的是几毫秒，换来的是最长一个 TTL 的授权滞后，
+    方向反了。
+    """
     membership = await SqlIdentityRepo(session).find_membership(workspace_id, principal_id)
     return membership is not None
 

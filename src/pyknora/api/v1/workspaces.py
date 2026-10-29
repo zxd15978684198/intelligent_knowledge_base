@@ -33,6 +33,10 @@ router = APIRouter(tags=["workspaces"])
 # 顺手在一个"改角色"接口里做，迟早出现两个 owner 或零个 owner。
 AssignableRole = Literal["admin", "member", "guest"]
 
+# 角色判定的**唯一**定义在代码里，不在 `role_grants` 表：`0003_identity_acl.sql` 建了
+# 那张表并写入默认角色，但当前没有任何代码读取它（纯预留）。接表意味着每次权限判定多
+# 一次 join 或多一份缓存，而收益是"4 个角色、单维度"——为零，ADR-0006 的备选方案里已经
+# 算过这笔账。想改权限改这里；改 role_grants 不会生效。
 _ADMIN_ROLES = frozenset({"owner", "admin"})
 
 

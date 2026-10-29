@@ -302,6 +302,8 @@ class WorkspaceRow(Base):
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     owner_principal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    # 预留字段，当前**没有任何代码读取**它：可见性一律由 workspace_memberships 决定，
+    # 没有"公开空间"语义。写在这里是为了迁移与远端分支的表结构一致，别当成已实现的功能。
     is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

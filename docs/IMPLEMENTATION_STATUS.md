@@ -1,6 +1,27 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+
+## 本轮：P0–P4 安全与一致性收口（2026-10-29，lead 代修成员4 域，经用户「p0-p4全部解决」授权）
+
+- 背景：用户先问「权限部分怎么做的」→ 再要求「排优先级」→ 排查中确认 **P0-1（JWT 密钥无生产护栏）比原先列的四个缺口都严重**：`jwt_secret()` 回落硬编码默认值、无任何环境校验，等于任何拿到仓库的人都能伪造任意 `sub` / `workspace_id` 的令牌。用户回「p0-p4全部解决」= 授权跨域修复（已在上一条优先级表里说明这会动成员4 的目录）。
+- 起始 HEAD `145fb87`；`git status --short` 本轮开始时干净。
+- 改动文件（9 个源码/配置 + 3 份文档）：
+  - `src/pyknora/core/settings.py`（重写）：新增 `env: str = "dev"`、`jwt_secret: str = ""`；`DEV_JWT_SECRET` / `DEV_CURSOR_SECRET` 提为公开常量；`_INSECURE_ENVS = {"dev","test","local"}`；`@model_validator(mode="after")` 在非 dev 环境拒绝空密钥与开发默认密钥。
+  - `src/pyknora/services/auth/jwt.py`：`DEFAULT_SECRET` 改为从 settings 导入 `DEV_JWT_SECRET`（单一事实源）；`jwt_secret()` 回落链 `secret or settings.jwt_secret or DEV_JWT_SECRET`。
+  - `src/pyknora/db/repos/principals.py`：`find_membership()` 加 `JOIN PrincipalRow` + `PrincipalRow.status == "active"`。
+  - `src/pyknora/api/main.py`：新增 `_UNPRIVILEGED_ENVS`、`_is_rls_bypassed(session)`、`_warn_if_db_role_bypasses_rls(state, settings)`，在 `lifespan` 内调用且吞掉一切异常（告警逻辑绝不能让服务起不来）。
+  - `src/pyknora/models/tables.py`：`is_public` 列注释补「预留：公开 KB 可见性，当前所有查询不读」。
+  - `src/pyknora/services/auth/membership.py`、`src/pyknora/api/v1/workspaces.py`：注释写明 `role_grants` 未被消费、`_ADMIN_ROLES` 是闭集、`load_membership` 每请求一次查询是刻意反缓存。
+  - `tests/unit/test_security_guards.py`（新，9 条）、`tests/api/test_auth_revocation.py`（新，2 条）。
+  - `.env.example`（新增 `PYKNORA_ENV` / `PYKNORA_JWT_SECRET` / 生产禁 owner 连库注记）、`README.md`（快速开始第 1 步）、`docs/adr/0006_Identity_ACL_Tenancy.md`（追加「实现期补充」段，状态仍 `提议`）。
+- 已执行（真实输出）：
+  - `uv run --frozen ruff check`（9 个改动文件）→ `All checks passed!`；`ruff format --check` → `9 files already formatted`。
+  - `pytest -q tests/unit tests/contract` → 117 passed。
+  - 全量 `uv run --frozen pytest -q`（真库 `pyknora-pg-p0` @5434）→ **247 passed, exit 0**。
+  - `pytest --collect-only -q` 逐目录计数 → unit **97** / contract 20 / api **82** / integration 48 = **247**。
+- 未验证：① `env=prod` 下的真实启动（本机无生产配置，只有单测覆盖 validator 分支）；② `_is_rls_bypassed` 只在 superuser 与普通角色两态实测，`pyknora_app` 角色未单独验；③ 真实 embedder / 真实 LLM 端到端仍缺（沿用历史未验证项）。
+- 下一步：`git push`（本地领先多个提交，用户未表态）；规则层 RLS 的 CI 验证（当前只有 `test_rls.py` 在 `postgres` 超级用户下跑，跑不出 RLS 的真实效果）。
 
 ## 本轮：文档事实校正——错误码 16 → 17（2026-10-29，lead，经用户「修改」确认）
 

@@ -88,6 +88,49 @@ def _error_response(exc: AppError, request: Request) -> JSONResponse:
     )
 
 
+_UNPRIVILEGED_ENVS = frozenset({"dev", "test", "local"})
+
+
+def _is_rls_bypassed(*, rolsuper: bool, rolbypassrls: bool) -> bool:
+    """表 owner / superuser 会绕过 RLS。纯函数，便于在不连库的情况下单测。"""
+    return bool(rolsuper or rolbypassrls)
+
+
+async def _warn_if_db_role_bypasses_rls() -> None:
+    """非开发环境用 owner 角色连接时告警：RLS 这层兜底等于不存在。
+
+    只告警、不阻断：把"连接角色选错"做成启动失败，会连带让迁移与本地开发都起不来；
+    而 RLS 本来就是第二道网（第一道是应用层谓词，测试里有覆盖）。探测本身失败也只
+    告警——启动路径上不该因为一条诊断查询挂掉。
+    """
+    if settings.env.strip().lower() in _UNPRIVILEGED_ENVS:
+        return
+    try:
+        # 延迟导入：让 `import pyknora.api.main` 不强制拉起数据库引擎。
+        from sqlalchemy import text as sql_text
+
+        from pyknora.db.session import session_scope
+
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    sql_text(
+                        "SELECT current_user AS rolname, rolsuper, rolbypassrls "
+                        "FROM pg_roles WHERE rolname = current_user"
+                    )
+                )
+            ).first()
+    except Exception:  # noqa: BLE001 - 诊断失败不能拦住启动
+        logger.warning("db_role_probe_failed", exc_info=True)
+        return
+    if row is not None and _is_rls_bypassed(rolsuper=row.rolsuper, rolbypassrls=row.rolbypassrls):
+        logger.warning(
+            "db_role_bypasses_rls role=%s：生产应改用非表 owner 角色（如 pyknora_app），"
+            "否则 RLS 第二道网不生效",
+            row.rolname,
+        )
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("pyknora api starting")
@@ -95,6 +138,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     if state.embedder is None:
         # 建立 provider 不会立即加载模型；本地权重在第一次 query 时按需加载。
         state.embedder = build_embedder(settings)
+    await _warn_if_db_role_bypasses_rls()
     try:
         yield
     finally:

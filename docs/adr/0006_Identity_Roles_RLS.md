@@ -43,3 +43,27 @@
 ## 替代关系
 
 无。若后续接受，本 ADR 取代 `get_scope` 的占位实现与"无身份表"的临时状态；与 ADR-0005（工作区/隐私）在 workspace 语义上互补，冲突时以本 ADR 的身份与隔离部分为准。
+
+## 补充（2026-10-29）：身份失效、密钥护栏与两处预留字段
+
+本轮修三条与本 ADR 直接相关的缺口。**状态仍为"提议"**——验证通过不等于决策已获接受。
+归属提醒：改动落在成员4 的文件里（`core/settings.py`、`services/auth/jwt.py`、
+`db/repos/principals.py`、`api/main.py`），由成员2 越界代修，需成员4 复核。
+
+1. **停用账号立即失效**（原"负面 ①"只算了每请求一次查询的成本，没算失效语义）：
+   `SqlIdentityRepo.find_membership` 改为 join `principals.status = 'active'`。原先只查
+   `workspace_memberships`，被停用的人仍能拿旧令牌把 TTL 用完（默认 1 小时）。现在停用在
+   **下一次请求**生效，不需要黑名单或 refresh token；`status` 回 `active` 即恢复，不会把
+   "停用"做成不可逆的"删成员关系"。验证：`tests/api/test_auth_revocation.py`（停用→403、
+   恢复→200）。
+2. **JWT 默认密钥不得进非开发环境**：`core/settings.py` 新增 `env` 与 `jwt_secret` 字段，
+   非 `dev/test/local` 且密钥为空或等于开发默认值时 `Settings` 构造即抛 `ValidationError`。
+   这条是前文三条护栏（不看 `alg`、`compare_digest`、`sub` 必须是 UUID）的**前置条件**：
+   密钥是公开默认值时，那三条都拦不住伪造。验证：`tests/unit/test_security_guards.py`。
+3. **RLS 兜底的可检查性**（原"负面 ②"只说"取决于部署"）：`api/main.py` 启动时在非开发环境
+   探测 `current_user` 是否 `rolsuper`/`rolbypassrls`，是则告警。只告警不阻断——否决
+   `FORCE ROW LEVEL SECURITY` 的理由（第 6 条备选方案）依然成立，这里只把隐性假设变成可观测项。
+
+另记两条**预留字段**的现状，避免后来者误判为已实现：`role_grants` 表当前没有任何代码读取，
+角色判定是 `api/v1/workspaces.py` 的 `_ADMIN_ROLES`；`workspaces.is_public` 同样是死字段，
+可见性一律由 `workspace_memberships` 决定。

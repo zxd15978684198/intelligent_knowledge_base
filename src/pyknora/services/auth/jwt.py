@@ -24,17 +24,23 @@ from typing import Any
 from uuid import UUID
 
 from pyknora.core.errors import AppError, ErrorCode
+from pyknora.core.settings import DEV_JWT_SECRET, settings
 
-# 开发期默认密钥。生产必须由 PYKNORA_JWT_SECRET 覆盖。
-DEFAULT_SECRET = "dev-only-insecure-secret"
+# 兼容旧引用名；真实来源是 `core/settings.py` 的 DEV_JWT_SECRET（只定义一次）。
+DEFAULT_SECRET = DEV_JWT_SECRET
 
 # 一小时。太长会把"改密码/停用账号"的生效时间拖到不可接受。
 DEFAULT_TTL_SECONDS = 3600
 
 
 def jwt_secret(secret: str | None = None) -> str:
-    """按调用时读环境变量，而不是 import 时读常量——测试要能 monkeypatch.setenv。"""
-    return secret or os.environ.get("PYKNORA_JWT_SECRET", DEFAULT_SECRET)
+    """按调用时读环境变量，而不是 import 时读常量——测试要能 monkeypatch.setenv。
+
+    优先级：显式入参 → 环境变量（测试可 monkeypatch）→ Settings → 开发默认值。
+    生产走不到最后一档：`Settings` 的护栏在非 dev 环境下用默认密钥会直接构造失败
+    （见 `core/settings.py` 的 `_guard_production_secrets`）。
+    """
+    return secret or os.environ.get("PYKNORA_JWT_SECRET") or settings.jwt_secret or DEV_JWT_SECRET
 
 
 def _b64url_encode(data: bytes) -> str:

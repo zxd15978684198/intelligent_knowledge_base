@@ -3,8 +3,8 @@
 企业知识库：增量索引与权限隔离。PDF/Markdown 上传 → 解析切片 → Embedding → 原子发布 →
 混合检索（向量 + 全文）→ 带引用问答（SSE 流式），全链路按 workspace 隔离。
 
-**当前状态全绿**：17 个任务（5 人分工）全部完成，`236` 个用例通过
-（unit 88 / contract 20 / api 80 / integration 48），端到端烟测 14/14，迁库演练通过。
+**当前状态全绿**：17 个任务（5 人分工）全部完成，`247` 个用例通过
+（unit 97 / contract 20 / api 82 / integration 48），端到端烟测 14/14，迁库演练通过。
 进度以 [docs/plans/成员任务进度表.md](docs/plans/成员任务进度表.md) 为准。
 
 ## 目录
@@ -38,6 +38,9 @@
 git config core.hooksPath .githooks
 
 # 1. 起一个带 pgvector 的 PostgreSQL（宿主 5433）
+#    本地用 postgres 超管即可；生产必须改用**非表 owner** 角色（如 0003 建的 pyknora_app），
+#    否则 RLS 兜底不生效——见 .env.example 与 docs/adr/0006。同理生产必须设
+#    PYKNORA_ENV=prod 并提供非默认的 PYKNORA_JWT_SECRET，否则服务拒绝启动（故意的）。
 docker run -d --name pyknora-pg -p 5433:5432 \
   -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=pyknora \
   pgvector/pgvector:pg16

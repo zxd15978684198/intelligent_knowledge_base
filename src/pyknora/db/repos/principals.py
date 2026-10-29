@@ -99,10 +99,27 @@ class SqlIdentityRepo:
     async def find_membership(
         self, workspace_id: UUID, user_id: UUID
     ) -> WorkspaceMembershipRow | None:
-        """成员关系是否存在。`_load_membership` 的真实现就是这一条查询。"""
-        stmt = select(WorkspaceMembershipRow).where(
-            WorkspaceMembershipRow.workspace_id == workspace_id,
-            WorkspaceMembershipRow.user_id == user_id,
+        """成员关系是否存在**且账号仍可用**。`_load_membership` 的真实现就是这一条查询。
+
+        为什么要 join `principals.status`：令牌里只有 `sub` 与 `exp`，签发之后身份状态
+        的变化（停用/删除账号）不会回写进已发出的令牌。只查 `workspace_memberships`
+        的话，被停用的人还能拿旧令牌把 TTL 用完（默认 1 小时）。带上 status 过滤后，
+        停用在**下一次请求**就生效，不需要维护黑名单或 refresh token。
+
+        副作用是期望行为：`workspaces.py` 复用本方法判定"操作者是否 admin"，
+        于是被停用的管理员同时失去改角色的能力。
+        """
+        stmt = (
+            select(WorkspaceMembershipRow)
+            .join(
+                PrincipalRow,
+                PrincipalRow.principal_id == WorkspaceMembershipRow.user_id,
+            )
+            .where(
+                WorkspaceMembershipRow.workspace_id == workspace_id,
+                WorkspaceMembershipRow.user_id == user_id,
+                PrincipalRow.status == "active",
+            )
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
