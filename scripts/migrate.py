@@ -3,10 +3,14 @@
 关键点：**不把 SQL 文件路径传给容器**。容器启动时没有挂载宿主目录，
 容器内不存在 /migrations 路径，`psql -f /migrations/x.sql` 必然报
 `No such file or directory`。改由宿主读文件、经 stdin 喂给 psql。
+
+`--database` 用于迁库演练：目标库是新建的空库，也要先跑同一套迁移建表，
+否则重放会报 `relation "documents" does not exist`。
 """
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -18,7 +22,16 @@ from pyknora.core.settings import settings  # noqa: E402
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="按 0001..000N 顺序建表（宿主读文件 → 容器 psql）")
+    parser.add_argument(
+        "--database",
+        default="pyknora",
+        help="目标数据库名（默认 pyknora；迁库演练时传新建的空库名）",
+    )
+    parser.add_argument("--container", default=settings.db_container, help="PG 容器名")
+    args = parser.parse_args(argv)
+
     docker = "docker"
     for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
         sql_text = sql_file.read_text(encoding="utf-8")
@@ -28,12 +41,12 @@ def main() -> int:
             docker,
             "exec",
             "-i",
-            settings.db_container,
+            args.container,
             "psql",
             "-U",
             "postgres",
             "-d",
-            "pyknora",
+            args.database,
             "-v",
             "ON_ERROR_STOP=1",
             "-f",
