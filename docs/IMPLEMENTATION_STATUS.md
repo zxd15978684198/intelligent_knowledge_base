@@ -1,8 +1,31 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-28（Asia/Shanghai）。**2026-10-28 追加：数据契约外键落地，见下方「当前轮」**；其后的 Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加：成员4 验收闭环，见下方「当前轮」**；其后的身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
 
-## 当前轮：数据契约补外键（2026-10-28，lead）
+## 当前轮：成员4 验收闭环（2026-10-29，成员4）
+
+- 任务：进度表任务 **9 / 11 / 10 / 12 / 15**——把 2026-10-28 落地但因 Docker 不可用而卡在 `进行中/75%` 的代码补齐验收，转 `已完成/100%`。
+- 环境恢复：`docker ps` 可用；`pgvector/pgvector:pg16` 镜像拉取完成后 `docker run -d --name pyknora-pg -p 5433:5432 -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=pyknora pgvector/pgvector:pg16`，容器 `Up`。
+- 改动文件：`scripts/migrate.py`（1 行实质改动 + 注释：`subprocess.run(..., text=True)` → 追加 `encoding="utf-8"`）、`tests/api/test_auth_api.py`（两处 `UUID(membership_id)` → 直接用 asyncpg 返回值）。其余为本轮之前已落盘的文件。
+- 已执行（真实输出）：
+  - `uv run python scripts/migrate.py` → 退出 0，`migrations ok`；`0001_init.sql` 与 `0003_identity_acl.sql` 均执行（重复执行幂等，第二次全为 `already exists, skipping`）。
+  - 库内核对（`docker exec -i pyknora-pg psql ...`）：`SELECT count(*) FROM roles` → **1**；`role_grants` → **3**；`SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname='pyknora_app'` → `t→f / f`（非 superuser、非 bypassrls）；`relrowsecurity` 对 `documents`/`chunks`/`outbox` 均为 `t`；`SELECT reloptions FROM pg_class WHERE relname='v_active_chunks'` → `{security_invoker=true}`。
+  - `uv run pytest -q tests/api` → **49 passed**（首轮 2 failed，原因：测试用 `UUID(asyncpg 返回值)` 触发 `AttributeError: 'asyncpg.pgproto.pgproto.UUID' object has no attribute 'replace'`；修测试后全绿）。
+  - `uv run pytest -q tests/integration` → **33 passed**（含 `test_rls.py` 6 条）。
+  - `uv run pytest -q` → **122 passed**；`uv run ruff check src tests scripts` → `All checks passed!`；`uv run ruff format --check src tests scripts` → `68 files already formatted`。
+- 未验证：无（本轮要验的三条命令均真跑过）。仍未做：没改 4 份 xlsx（只改汇总视图）；没动成员1 的 `0002`/成员5 的 `0004`（`0003` 对 `knowledge_bases`/`citations`/`index_migrations` 用 `to_regclass` 跳过，建表后需重跑 `0003` 或在其迁移内补策略）；没 `git add`/提交。
+- 风险与下一步：① `pyknora_app` 密码是开发占位，生产必须外部注入并删掉迁移里的 `CREATE ROLE` 段；② `deps.get_scope` 每请求多查一次 `workspace_memberships`，压测出热点再加缓存；③ 本轮 `scripts/migrate.py` 是共用文件，改动属缺陷修复（Windows 默认 ANSI 编码把 SQL 里的中文注释编成 GBK 字节，psql 按 UTF-8 校验即报 `invalid byte sequence ... 0xb5`），已在 §9 v0.6 与本节留痕。
+
+## 历史轮：成员4 身份与权限基座（2026-10-28，成员4）
+
+- 任务：进度表任务 **9 / 11 / 10 / 12 / 15**（计划书 S 编号本轮不适用——这几个任务在 `全员模块实现路径.md` 里没有对应 S##，按任务编号交付）。起始 `git status --short` 含既有 `.idea/` 改动（**非本轮，未碰**）；本轮新增/修改文件见下。
+- 改动文件：新增 `migrations/0003_identity_acl.sql`、`src/pyknora/db/repos/principals.py`、`src/pyknora/services/auth/{jwt,passwords,membership}.py`、`src/pyknora/api/v1/{auth,workspaces}.py`、`tests/unit/test_auth_a4.py`、`tests/unit/test_auth_passwords.py`、`tests/api/test_auth_api.py`、`tests/integration/test_rls.py`、`docs/adr/0006_Identity_Roles_RLS.md`（状态：提议）；修改 `src/pyknora/api/{deps,main}.py`、`src/pyknora/models/tables.py`（末尾追加 5 个映射）、`src/pyknora/core/errors.py`（加 `CONFLICT` 枚举 + 409 映射）、`tests/api/conftest.py`（身份表入 TRUNCATE 清单 + `seed_test_identity`）、`tests/integration/conftest.py`（身份表入 TRUNCATE 清单）、`docs/adr/README.md`、`pyproject.toml`/`uv.lock`（`uv add "bcrypt>=4.1"` → 5.0.0）、`docs/plans/成员任务进度表.md`（§1/§3/§4.4/§9 = v0.5）。
+- 已执行（真实输出）：`uv run ruff check src tests scripts` → `All checks passed!`；`uv run ruff format --check src tests scripts` → `68 files already formatted`；`uv run pytest -q tests/unit` → 40 passed（原点 27 + 本轮 13）；`uv run python -c "create_app().openapi()"` → 9 paths，含 `/api/v1/auth/register`、`/api/v1/auth/login`、`/api/v1/workspaces/{ws_id}/members/{membership_id}`。
+- **未验证（关键）**：`tests/api/*`（含新增 `test_auth_api.py`、以及被 `get_scope` 真实现影响的既有文档用例）与 `tests/integration/test_rls.py` **一条都没跑**。原因：本机 Docker 引擎起不来——`docker ps` → `failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`；`Start-Process "…\DockerDesktop\Docker Desktop.exe"` 被沙箱拦在日志写入（`C:\Users\1\AppData\Local\Docker\log\host\*.log`），`Test-NetConnection 127.0.0.1 5433` → False。因此 `0003` 迁移**未在真库执行过**，RLS 策略、`\set ON_ERROR_STOP`、`FOREACH` 循环、`security_invoker` 的 SQL 合法性全部只是静态推断。
+- 未做：① 没改 4 份 xlsx（本轮只改汇总视图）；② 没动成员1 的 `0002`、成员5 的 `0004`，`0003` 里对 `knowledge_bases`/`citations`/`index_migrations` 的 RLS 用 `to_regclass` 跳过，建表后需**重跑 0003** 或在其迁移里补策略；③ 没提交（`git add`/commit 均未执行）。
+- 风险与下一步：① 起 Docker 后依次 `uv run python scripts/migrate.py` → `uv run pytest -q tests/api` → `uv run pytest -q tests/integration`，三绿才可把 5 行改 `已完成/100%`；② `deps.get_scope` 现在**每个请求多查一次 `workspace_memberships`**（且 `set_config` 走同一事务），若压测发现热点再加缓存，别先加；③ `pyknora_app` 的密码是开发占位（与 `postgres:dev` 同级），生产部署必须改由外部注入并删掉迁移里的 `CREATE ROLE` 段。
+
+## 历史轮：数据契约补外键（2026-10-28，lead）
 
 - 触发：用户问"`docs/plans/全员模块实现路径.md` 里有些字段没有关联，是错的吗"。结论：该建的就那几处、实建 7 条；其余"不建"是刻意的，写清理由比补全更重要。
 - 事实（改动前）：`migrations/0001_init.sql` 的 9 张表每张都建了 `UNIQUE (workspace_id, <主键>)`，但整份文件 `REFERENCES` 为 **0**——复合唯一键的唯一用途（给复合 FK 当引用目标）从未兑现；`knowledge_bases` 表不在 0001（属成员1 的 0002），所以跨模块那条 FK 当时无处可加。
