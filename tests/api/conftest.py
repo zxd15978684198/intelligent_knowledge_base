@@ -121,8 +121,10 @@ async def _engine_ready() -> AsyncIterator[None]:
 async def clean_db() -> AsyncIterator[None]:
     factory = get_session_factory()
     async with factory() as session:
-        for table in TABLES:
-            await session.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+        # 合成一条语句：逐表 TRUNCATE 在 Windows 的 docker VM 上每条都要等一次
+        # fsync（DataFileImmediateSync），17 张表足以让夹具慢一个数量级；
+        # 而且句数越多，ACCESS EXCLUSIVE 撞超时的窗口越大。
+        await session.execute(text(f"TRUNCATE TABLE {', '.join(TABLES)} CASCADE"))
         # 清场之后立刻补回最小身份数据：鉴权链路需要它，而调用方不该为
         # "我的用例要不要自己插 principals"操心。
         await seed_test_identity(session)

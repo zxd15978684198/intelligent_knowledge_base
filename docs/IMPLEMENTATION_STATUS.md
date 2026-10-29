@@ -1,8 +1,31 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：成员2 两条 P0 缺陷修复，见下方「本轮：成员2 P0 修复」**；更早的成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：合并远端 chat 分支 + 修 `index_migrations` 主键口径，见下方「本轮：合并 chat 分支」**；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
 
-## 本轮：成员2 P0 修复（2026-10-29，成员2）
+## 本轮：合并远端 chat 分支 + 修 0005 主键口径（2026-10-29，成员2）
+
+- 任务：**无新任务号**（不做新功能，只收口）。两件事：① 收尾一次未完成的 `merge`（远端成员3 的分支 `8caace1`「新增 chat 对话接口」）；② 修合并后暴露的两条红测试。起始 HEAD `4e1d1f2`（工作区已处于 merge 中间态：15 个文件已 staged、4 个冲突未解），收尾后 HEAD `d134c8f`。
+- 4 个冲突的解法：
+  - `.gitignore`：取并集（远端放行 `.env.example`，本侧保留 `.tmp_ref/` 与 WSL 检出忽略）。
+  - `src/pyknora/api/main.py`：两侧路由都保留；`chat` 按字母序排到 `auth` 之前，否则 ruff I001 红。
+  - `src/pyknora/models/tables.py`：两族表并集（本侧 8 张 + 远端 `index_migrations`）。
+  - `src/pyknora/services/contracts/reads.py`：4 个新 Protocol 与远端 `DocumentVersionRepo` **同名不同义**（远端按 document 分页列版本，本侧按 version_id 单查）→ 远端原名保留（`list_versions`），本侧改名 `DocumentVersionLookupRepo`（`get_version`），`tests/contract/test_c2.py` 两处引用同步改。
+- 修的两条红测试（合并后全量 206 项 = 204 通过 + 2 红）：
+  1. `tests/integration/test_index_migrations.py::test_same_migration_id_in_two_workspaces_is_allowed`——`migrations/0004_index_migrations.sql` 把 `migration_id` 写成**单列** PRIMARY KEY，同文件注释与该测试却要求「业务主键在 workspace 内唯一」，两者不可能同时成立（`UniqueViolation: index_migrations_pkey`）。按 I4「不改已合并的历史迁移」，**新开号段** `migrations/0005_index_migrations_pk.sql`：DO 块守护（表不存在则跳过、只在仍是单列主键时动）→ `PRIMARY KEY (workspace_id, migration_id)`，并删掉因此冗余的 `UNIQUE (workspace_id, migration_id)`。ORM `IndexMigrationRow` 同步：`workspace_id` 补 `primary_key=True`，`__table_args__` 去掉 `UniqueConstraint`。
+  2. `tests/api/test_api_lineage.py::test_second_contributor_shows_up_with_active_pointer`——`assert 403 == 202` **不是权限缺陷**：`BOB` 是 B 区 owner，在 A 区没有成员关系，`deps.get_scope` 拒绝是对的；错在测试没造「A 区第二个贡献者」。在该用例内显式插 `workspace_memberships (WORKSPACE_A, BOB, 'member')`，**故意不放进全局夹具**——否则等于把 BOB 在 A 区的权限放大，会让跨区用例变成假通过。
+- 附带的夹具修复（不是新需求，是上面 5 个 fixture ERROR 的根因）：`tests/api/conftest.py` 与 `tests/integration/conftest.py` 原本**逐表** `TRUNCATE`（16 张表 × 每个用例 = 每个用例 16 次 fsync），在 Windows 的 docker VM 上每张表都要等 `DataFileImmediateSync`，整套跑 12 分钟，且 ACCESS EXCLUSIVE 句子越多越容易撞超时（表现就是 5 个 ERROR、单独跑却全绿）。改成一条 `TRUNCATE TABLE a, b, … CASCADE`。
+- 已执行（真实输出；临时真库 `pyknora-pg-p0` 宿主 **5434**，四条迁移 `0001/0002/0003/0004` 重建后 **16 张表 + `v_active_chunks`**，再追加 `0005`）：
+  - `uv run --frozen pytest -q` → **206 passed**，exit 0，**162s**（改夹具前是 12 分钟 + 5 个 ERROR）
+  - 单跑两条原本红的用例 → `9 passed`（`test_index_migrations.py` 7 + `test_api_lineage.py` 2）
+  - `uv run --frozen python scripts/ci.py --stage all` → `PASS lint/ruff-check 0.1s` / `PASS lint/ruff-format 0.0s` / `PASS test/pytest 14.5s`，`GATE_EXIT=0`
+  - `psql` 核对 `index_migrations` 约束 → `index_migrations_pkey | PRIMARY KEY (workspace_id, migration_id)`，原 `index_migrations_workspace_id_migration_id_key` 已不存在
+- 未验证 / 未做：
+  - `0005` 只在「0004 已执行」的路径上实跑过；「0005 先于 0004」的分支只有 `to_regclass` 守护逻辑，**没有实跑**。
+  - `0005` 占用的是成员5 的号段（`0004_*` 一族），原因是合并发生在成员2 侧、而红测试挡在门前；已在 SQL 文件头写明缘由，**需成员5 追认**。
+  - 远端带来的 `/api/v1/chat` 路由只有 import 级验证（`create_app` 能装配），**没有一条 chat 用例**；流式响应、真实 LLM 调用都未验证。
+  - 真实 embedder（`BAAI/bge-small-zh-v1.5`）端到端仍未跑（同前几轮）。
+  - 未 push（`ahead origin/master 7`）。
+
 
 - 任务：成员2 自审打回的两条 P0 缺陷（加固进度表任务 **3/4/5/6** 的防线，不新增任务号）。起始 HEAD `1724a23`，开工时工作区干净。
 - 缺陷与修法：

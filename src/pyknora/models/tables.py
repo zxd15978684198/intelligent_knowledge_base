@@ -268,10 +268,13 @@ class IndexMigrationRow(Base):
 
     __tablename__ = "index_migrations"
 
+    # 复合主键 (workspace_id, migration_id)：与 documents / chunks 同口径——
+    # 业务主键在 workspace 内唯一，跨区同 id 不算冲突。0004 曾误写成单列主键，
+    # 由 migrations/0005_index_migrations_pk.sql 纠正。
     migration_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=uuid4
     )
-    workspace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    workspace_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     kb_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     source_build_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     target_build_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
@@ -286,7 +289,7 @@ class IndexMigrationRow(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        UniqueConstraint("workspace_id", "migration_id"),
+        # (workspace_id, migration_id) 的唯一性由复合主键保证，不再重复声明 UNIQUE。
         Index("index_migrations_kb_idx", "workspace_id", "kb_id", "created_at"),
     )
 

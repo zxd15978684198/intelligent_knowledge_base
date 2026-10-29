@@ -75,6 +75,20 @@ async def test_second_contributor_shows_up_with_active_pointer(
     )
     await db_session.commit()
 
+    # BOB 是 WORKSPACE_B 的 owner，**默认不是 A 区成员**；成员4 的 `deps.get_scope`
+    # 会按 `workspace_memberships` 校验，拿 A 区 token 会被 403。
+    # S15 要的是"同区第二个贡献者"，所以这里显式给 BOB 补一行 A 区成员关系——
+    # 不放进全局夹具，否则会顺手放大 BOB 在 A 区的权限，把跨区用例变成假通过。
+    await db_session.execute(
+        text(
+            "INSERT INTO workspace_memberships (workspace_id, user_id, role) "
+            "VALUES (:ws, :uid, :role) "
+            "ON CONFLICT (workspace_id, user_id) DO NOTHING"
+        ),
+        {"ws": WORKSPACE_A, "uid": UUID(BOB), "role": "member"},
+    )
+    await db_session.commit()
+
     r2 = await _upload(client, sub=BOB, filename="v.txt", content=b"second")
     assert r2.status_code == 202
     assert r2.json()["document_id"] == doc_id

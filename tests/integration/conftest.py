@@ -43,6 +43,17 @@ KB_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 KB_ID_B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 
+async def _truncate_all(session) -> None:
+    """一条 TRUNCATE 清掉全部表。
+
+    逐表 `TRUNCATE ... CASCADE` 在 Windows 的 docker VM 上每张表都要等一次
+    `DataFileImmediateSync`，17 张表就把单个用例的夹具拖到几秒；全套两百多个
+    用例叠起来能到十几分钟，还额外放大锁竞争（每条 TRUNCATE 都要 ACCESS
+    EXCLUSIVE，句子越多越容易撞超时）。合成一条语句后只 fsync 一次。
+    """
+    await session.execute(text(f"TRUNCATE TABLE {', '.join(TABLES)} CASCADE"))
+
+
 async def _seed_knowledge_bases(session) -> None:
     await session.execute(
         text(
@@ -77,8 +88,7 @@ async def _engine_ready() -> AsyncIterator[None]:
 async def session():
     factory = get_session_factory()
     async with factory() as s:
-        for table in TABLES:
-            await s.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+        await _truncate_all(s)
         await _seed_knowledge_bases(s)
         await s.commit()
         yield s
