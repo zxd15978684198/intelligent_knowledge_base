@@ -202,6 +202,43 @@ async def purge(session: AsyncSession) -> None:
     await session.flush()
 
 
+async def ensure_knowledge_bases(session: AsyncSession, embedder: EmbeddingProvider) -> None:
+    """保证两个 workspace 各有一条种子知识库。
+
+    0002 给 `documents` 加了 `(workspace_id, kb_id) → knowledge_bases` 的复合外键，
+    所以父行必须由本脚本自己建：跑成员3 的人不该先手工建库，也不该被别的测试
+    留下的知识库"刚好长得对"骗过去。配置五字段与 embedder 保持一致，否则
+    `SqlChunkSearchRepo.search_similar` 的维度/模型校验会在检索时才发现不对。
+    """
+    statement = text(
+        "INSERT INTO knowledge_bases ("
+        " kb_id, workspace_id, name, embedding_model_key, embedding_dim,"
+        " chunk_size, chunk_overlap, normalize"
+        ") VALUES ("
+        " :kb_id, :workspace_id, :name, :model_key, :dim, :chunk_size, :chunk_overlap, true"
+        ") ON CONFLICT (workspace_id, kb_id) DO UPDATE SET"
+        " embedding_model_key = EXCLUDED.embedding_model_key,"
+        " embedding_dim = EXCLUDED.embedding_dim,"
+        " chunk_size = EXCLUDED.chunk_size,"
+        " chunk_overlap = EXCLUDED.chunk_overlap,"
+        " normalize = EXCLUDED.normalize,"
+        " updated_at = now()"
+    )
+    for ws_tag, workspace_id in (("a", WORKSPACE_A), ("b", WORKSPACE_B)):
+        await session.execute(
+            statement,
+            {
+                "kb_id": _uuid("kb", ws_tag),
+                "workspace_id": workspace_id,
+                "name": f"种子知识库 {ws_tag.upper()}",
+                "model_key": embedder.model_key,
+                "dim": settings.embedding_dim,
+                "chunk_size": settings.chunk_size,
+                "chunk_overlap": settings.chunk_overlap,
+            },
+        )
+
+
 async def seed_document(
     session: AsyncSession,
     embedder: EmbeddingProvider,
@@ -230,13 +267,30 @@ async def seed_document(
     now = datetime.now(UTC)
     topic = _DOC_TOPICS[doc_index][0]
 
+    # 插入顺序必须显式排。这几张表之间**没有 ORM relationship**，SQLAlchemy 的
+    # unit of work 于是只能按 mapper 名排序（实测顺序是 chunks → document_blobs →
+    # document_versions → documents → index_builds），子行会先于父行撞外键。
+    # 依赖链：knowledge_bases → documents → document_versions → document_blobs，
+    # 另有 documents → index_builds、documents → chunks。每层 flush 完再写下一层。
+
+    # 三个指针必须一起写。只设 active_build_id 而漏掉 active_index_version，
+    # 发布侧的「版本号必须递增」校验会在后续真实摄取时误判。
     session.add(
-        DocumentBlobRow(
+        DocumentRow(
+            document_id=ids.document_id,
             workspace_id=ids.workspace_id,
-            document_version_id=ids.document_version_id,
-            content=raw,
+            kb_id=ids.kb_id,
+            desired_document_version_id=ids.document_version_id,
+            active_document_version_id=ids.document_version_id,
+            active_build_id=ids.build_id,
+            active_index_version=INDEX_VERSION,
+            generation=1,
+            row_version=1,
+            deleted_at=None,
         )
     )
+    await session.flush()  # version / build / chunks 都要引用这一行
+
     session.add(
         DocumentVersionRow(
             document_version_id=ids.document_version_id,
@@ -250,6 +304,17 @@ async def seed_document(
             ingestion_source="seed",
         )
     )
+    await session.flush()  # document_blobs 引用 version
+
+    session.add(
+        DocumentBlobRow(
+            workspace_id=ids.workspace_id,
+            document_version_id=ids.document_version_id,
+            content=raw,
+        )
+    )
+    await session.flush()
+
     session.add(
         IndexBuildRow(
             build_id=ids.build_id,
@@ -267,22 +332,7 @@ async def seed_document(
             activated_at=now,
         )
     )
-    # 三个指针必须一起写。只设 active_build_id 而漏掉 active_index_version，
-    # 发布侧的「版本号必须递增」校验会在后续真实摄取时误判。
-    session.add(
-        DocumentRow(
-            document_id=ids.document_id,
-            workspace_id=ids.workspace_id,
-            kb_id=ids.kb_id,
-            desired_document_version_id=ids.document_version_id,
-            active_document_version_id=ids.document_version_id,
-            active_build_id=ids.build_id,
-            active_index_version=INDEX_VERSION,
-            generation=1,
-            row_version=1,
-            deleted_at=None,
-        )
-    )
+    await session.flush()
 
     cursor = 0
     for ordinal, content in enumerate(texts):
@@ -417,6 +467,7 @@ async def main() -> int:
     try:
         async with session_scope() as session:
             await assert_table_dimension(session)
+            await ensure_knowledge_bases(session, embedder)
             await purge(session)
             for ws_tag, workspace_id in (("a", WORKSPACE_A), ("b", WORKSPACE_B)):
                 for doc_index in range(DOC_COUNT):

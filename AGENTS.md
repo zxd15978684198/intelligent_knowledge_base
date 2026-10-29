@@ -42,10 +42,10 @@
 | Web | FastAPI + pydantic v2；应用工厂 `pyknora.api.main:create_app` |
 | 数据 | PostgreSQL 16 + `pgvector`；SQLAlchemy 2 async + `asyncpg` |
 | 明确**不用** | Redis、Celery、alembic、lxml（队列=PG 表 + `SKIP LOCKED`，迁移=手写数字号段 SQL） |
-| 本地库 | 容器 `pyknora-pg`，宿主端口 **5433**，库名/用户名 `postgres`，密码 `dev` |
+| 本地库 | 容器名与端口以 `.env` 的 `PYKNORA_DB_CONTAINER` / `PYKNORA_DATABASE_URL` 为准；契约默认 `pyknora-pg`，宿主端口 **5433**，库名/用户名 `postgres`，密码 `dev`。**别人的机器上常见 5434 + `pyknora-pg-p0`，先 `docker ps` 再改 `.env`，别改代码默认值** |
 | 库结构 | `migrations/0001_init.sql` 建 **9 张表 + 1 个视图**；ORM 只映射 8 张（`outbox` 走原生 SQL） |
 | 错误码 | `src/pyknora/core/errors.py` 的 **16 个** `ErrorCode`；响应体统一 `{"error":{code,message,retryable,details},"request_id"}` |
-| 测试 | `tests/unit`（不需要数据库）、`tests/integration`（需真 PG）、`tests/api`、`tests/contract`（待建） |
+| 测试 | `tests/unit`（不需要数据库）、`tests/integration`（需真 PG）、`tests/api`（ASGI 打真 PG）、`tests/contract/`（C1/C2 已建，C3 待建） |
 | 本地门禁 | `.githooks/pre-commit` → `scripts/ci.py --stage all`；激活命令 `git config core.hooksPath .githooks`（见 §6.1） |
 
 **两套编号，别混**：`S01–S16` 是实现步骤（计划书），`1–17` 是课件任务编号（进度表/xlsx）。写进度时两个都写清楚。
@@ -166,18 +166,19 @@ feat(m2): S09 解析与切片（任务4）— 3 页 PDF chunk≥3，char_start<c
 # 依赖
 uv sync --extra dev
 
-# 起库（宿主 5433，容器内 5432）
+# 起库（宿主要映射到 .env 里 PYKNORA_DATABASE_URL 写的那个端口）
 docker run -d --name pyknora-pg -p 5433:5432 \
   -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=pyknora pgvector/pgvector:pg16
 
-# 建表 + 造数
+# 建表 + 造数（迁移靠 docker exec，容器名默认 pyknora-pg）
 uv run python scripts/migrate.py
 uv run python scripts/seed_for_m3.py
 
 # 验收（由快到慢）
 uv run ruff check src tests scripts     # 必须 All checks passed
-uv run pytest -q tests/unit             # 27 个，不需要数据库
-uv run pytest -q tests/integration      # 需真 PG（5433）
+uv run pytest -q tests/unit             # 纯函数，不需要数据库
+uv run pytest -q tests/api              # 需真 PG：走 ASGI，不真起 HTTP
+uv run pytest -q tests/integration      # 需真 PG（每例 TRUNCATE）
 uv run pytest -q                        # 全量
 ```
 
@@ -186,6 +187,13 @@ uv run pytest -q                        # 全量
 - `uv run ruff check .` 会因未入库的 `.tmp_ref/` 报 47 个错，**只查 `src tests scripts`**；
 - 本机没有 `psql` 客户端，但迁移脚本依赖 `docker exec`，所以**必须有 docker**；
 - 集成测试连的是 `PYKNORA_DATABASE_URL`（`PYKNORA_` 前缀），不存在 `--psql-url` 参数；
+- **跑测试前先停掉本地 API 与 Worker**：它们和用例共用同一个库，`TRUNCATE ... CASCADE` 要拿
+  `ACCESS EXCLUSIVE`，和 Worker 的 `FOR UPDATE SKIP LOCKED` 撞上会直接 `deadlock detected`，
+  表现为"随机某条用例 ERROR"。这不是用例的 bug；
+- **先 `uv sync --extra dev`**：本地 embedding 走 `sentence-transformers` 时才需要 `--extra local-embed`，
+  测试与 `seed_for_m3.py` 用 `test/hashing`，不下载模型；
+- 控制台输出中文乱码是 cp936 显示问题，不是数据坏了；需要看输出时先
+  `$env:PYTHONIOENCODING='utf-8'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)`；
 - 交付时贴**命令 + 真实输出**，不贴"预期结果"。
 
 ### 6.1 本地门禁（提交时自动跑）
@@ -240,14 +248,19 @@ uv run --with detect-secrets detect-secrets scan --no-verify src scripts migrati
 
 ## 8. 已知坑（摘自结构说明 §7）
 
-1. 直接 `uvicorn` 起服务后上传会 **503**：`api/main.py` 里没有任何 `configure()` 调用，`kb_repo` 为 `None`；
+1. 直接 `uvicorn` 起服务**已经能上传**：`api/deps.py:117-131` 的 `get_kb_repo` 在没注入进程级仓库时回落成 `SqlKnowledgeBaseRepo(session)`。真正的坑是 `/health` 里 `kb_repo: null` —— 那只说明"按请求构造"，不是缺陷，别照旧文档去追 503；
 2. `v_active_chunks` 视图**不校验向量维度**，维度校验在 `SqlChunkSearchRepo.search_similar`；
 3. 切片 `content` 只 strip 首尾、禁止内部空白折叠，否则引用拼不回原文；
 4. `FakeKbRepo` 第一版收下 `Scope` 就丢掉，导致跨区测试**永远通过**——写新 repo 时别重复这个错误；
 5. 集成测试的异步夹具必须是 `function` 作用域，并在结束时 `dispose_engine()`，否则连接数会打爆；
 6. `models/tables.py` 的 docstring 说"七张表"，实际 8 张（历史遗留，别照着数）；
 7. `db/repos/reads.py` 反向依赖 `services.ingest.embedder.EmbeddingDimensionError`（已知违例）；
-8. `pyknora` 命令行目前只打印 `Hello from pyknora!`，不要当入口用。
+8. `pyknora` 命令行目前只打印 `Hello from pyknora!`，不要当入口用；
+9. **流式端点里不许抛 `AppError`**：`StreamingResponse` 一旦开始发就改不了状态码，
+   生成器里抛异常会让 Starlette 撞 `"response already started"`，客户端只看到
+   `httpx.RemoteProtocolError`（连错误体都没有）。失败要降级成 SSE 的 `error` 事件
+   再补 `done` 收尾。参照 `services/rag/answer.py:86-96` 与 `tests/api/test_api_chat.py`；
+   建流**之前**能判的（没配 key、没注入 embedder）必须提前抛成 503，别拖进流里。
 
 ---
 
