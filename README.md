@@ -34,13 +34,19 @@
 前置：Python 3.12、[uv](https://docs.astral.sh/uv/)、Docker。
 
 ```bash
+# 0. 启用仓库自带提交门禁（只做一次；绕过它提交会被评审打回）
+git config core.hooksPath .githooks
+
 # 1. 起一个带 pgvector 的 PostgreSQL（宿主 5433）
 docker run -d --name pyknora-pg -p 5433:5432 \
   -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=pyknora \
   pgvector/pgvector:pg16
 
-# 2. 依赖（注意 --extra dev 才有 pytest/ruff）
-uv sync --extra dev
+# 2. 依赖
+#    --extra dev           → pytest / ruff（跑测试与门禁必需）
+#    --extra local-embed   → sentence-transformers（默认 embedding 后端 local 需要；
+#                            只用 hashing 后端可省，但那样检索是假向量）
+uv sync --extra dev --extra local-embed
 
 # 3. 建表（0001–0005）
 uv run python scripts/migrate.py
@@ -61,14 +67,51 @@ uv run pytest -q tests/unit      # 不需要数据库
 > 不要改代码里的默认值。默认嵌入后端是 `local`（`BAAI/bge-small-zh-v1.5`, dim 512），
 > 无外网时可用 `PYKNORA_EMBEDDING_BACKEND=hashing` 跑通全链路。
 
-常见环境变量（完整清单见 `src/pyknora/core/settings.py`）：
+### 配置
+
+配置入口是 `.env`（复制 `.env.example` 改名）。逐项带注释的完整清单就是 **`.env.example`**；
+下表是同一套变量的索引，方便查默认值。**25 项 = `Settings` 的 24 个字段 + `PYKNORA_JWT_SECRET`
+（后者不在 `Settings` 里，由 `services/auth/jwt.py:37` 直接读环境变量）。全部有默认值，不配也能跑。
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
+| **数据库** | | |
 | `PYKNORA_DATABASE_URL` | `...@127.0.0.1:5433/pyknora` | asyncpg DSN |
-| `PYKNORA_DB_CONTAINER` | `pyknora-pg` | `migrate.py` 用 `docker exec` 时进哪个容器 |
-| `PYKNORA_EMBEDDING_BACKEND` | `local` | `local` / `hashing` |
-| `PYKNORA_CHAT_API_KEY` | 空 | 空则 `/chat` 直接 503（流式端点不抛栈，降级成 SSE `error` 事件） |
+| `PYKNORA_DB_CONTAINER` | `pyknora-pg` | `migrate.py` 走 `docker exec` 时进哪个容器 |
+| **Embedding** | | |
+| `PYKNORA_EMBEDDING_BACKEND` | `local` | `local` / `openai` / `hashing`；写错直接 `INVALID_REQUEST` |
+| `PYKNORA_EMBEDDING_MODEL_KEY` | `BAAI/bge-small-zh-v1.5` | 只有 `local` 后端以它为准 |
+| `PYKNORA_EMBEDDING_DIM` | `512` | **硬约束**：维度不符抛 `EmbeddingDimensionError`，绝不截断 |
+| `PYKNORA_EMBEDDING_BATCH_SIZE` | `8` | 一次编码多少条 |
+| `PYKNORA_EMBEDDING_TIMEOUT_S` | `30` | 单次编码超时 |
+| `PYKNORA_HUGGINGFACE_ENDPOINT` | `https://huggingface.co` | 权重源 |
+| `PYKNORA_HUGGINGFACE_MIRROR` | `https://hf-mirror.com` | 镜像源（国内） |
+| `PYKNORA_OPENAI_BASE_URL` | `https://api.openai.com/v1` | `openai` 后端 |
+| `PYKNORA_OPENAI_API_KEY` | 空 | `openai` 后端必需 |
+| `PYKNORA_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | 注意它是 1536 维，要同步改 `DIM` |
+| **问答（chat）** | | |
+| `PYKNORA_CHAT_BASE_URL` | `https://api.openai.com/v1` | 自动拼 `/chat/completions` |
+| `PYKNORA_CHAT_API_KEY` | 空 | **空则 `/chat` 直接 503**；也是这条链路的开关 |
+| `PYKNORA_CHAT_MODEL` | `gpt-4o-mini` | 原样放进请求体 `model` |
+| `PYKNORA_CHAT_TIMEOUT_S` | `60` | |
+| `PYKNORA_CHAT_MAX_CONTEXT_CHUNKS` | `6` | 拼进提示词的切片条数上限 |
+| **切片与队列** | | |
+| `PYKNORA_CHUNK_SIZE` | `512` | 切片字符数 |
+| `PYKNORA_CHUNK_OVERLAP` | `64` | 相邻切片重叠 |
+| `PYKNORA_MAX_UPLOAD_BYTES` | `52428800` | 单文件 50 MiB |
+| `PYKNORA_LEASE_SECONDS` | `90` | 作业租约；超时未续租可被其他 worker 抢 |
+| `PYKNORA_MAX_ATTEMPTS` | `3` | 作业重试上限 |
+| **分页游标** | | |
+| `PYKNORA_CURSOR_SECRET` | `dev-only-insecure-cursor-secret` | 生产必换；换了旧游标全部失效（410） |
+| `PYKNORA_CURSOR_TTL_SECONDS` | `86400` | 游标有效期 |
+| **鉴权** | | |
+| `PYKNORA_JWT_SECRET` | `dev-only-insecure-secret` | HS256 签名密钥，生产必换；**不在 `Settings` 里** |
+
+> `PYKNORA_JWT_SECRET` 之所以特殊：`jwt.py` 刻意在**调用时**读环境变量（而不是 `import` 时
+> 快照），这样测试能用 `monkeypatch.setenv` 换密钥。代价是它绕过了 `Settings`，所以
+> `settings` 对象上看不到它——这也是它当初没被写进 `.env.example` 的原因。
+> 令牌有效期目前固定 3600 秒（`jwt.py` 的 `DEFAULT_TTL_SECONDS`），尚未做成配置项。
+
 
 ## API 一览
 
@@ -103,6 +146,18 @@ uv run pytest -q tests/unit      # 不需要数据库
 
 > 跑全量测试前先停掉本地 API 与 Worker：它们与用例共用同一个库，
 > 会让 `TRUNCATE` 抢锁，表现为随机某条用例 `deadlock detected`。
+
+### 脚本参数
+
+| 脚本 | 参数 | 用途 |
+| --- | --- | --- |
+| `scripts/migrate.py` | `--database`、`--container` | 建表/补迁移；迁库演练时指向空库 |
+| `scripts/run_worker.py` | `--once`、`--poll-interval`、`--worker-id` | Worker 循环；`--once` 处理一件就退，便于定位 |
+| `scripts/export_metadata.py` | `--dsn`、`--out`、`--workspace` | 导出快照（`.json` + 同名 `.sql`）；只导指定 workspace 时用 `--workspace` |
+| `scripts/replay_metadata.py` | `--dsn`、`--in`、`--on-conflict` | 目标库重放；冲突策略默认 `error` |
+| `scripts/verify_migration.py` | `--source`、`--target`、`--workspace` | 逐项校验；不一致非 0 退出，可直接当门禁用 |
+| `scripts/smoke_e2e.py` | `--base-url`、`--job-timeout`、`--model-key`、`--dim`、`--chunk-size`、`--chunk-overlap`、`--keep` | 端到端 14 项；`--model-key` 必须与 API 的 embedder 一致 |
+| `scripts/ci.py` | `--stage`、`--list`、`--stop-after`、`--json`、`--check`、`--root`、`--timeout`、`--with` | 本地门禁；`--list` 只打印计划不执行 |
 
 ## 迁库（任务17）
 
