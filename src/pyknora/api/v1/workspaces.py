@@ -28,6 +28,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyknora.api.deps import get_scope, get_session, require_permission
@@ -378,3 +379,293 @@ async def delete_role(
     await repo.delete_role(role_key)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------- 成员管理
+#
+# 这一段补的是"成员管理几乎没做"的窟窿：原来只有"改某人角色"，没有加人、移人、
+# 列人、转所有权。四条都遵守上面 docstring 里的三条边界，另外加一条新的语义约定：
+#
+# **移除 owner 的成员行必须被拒（422），要换 owner 只能走 `PUT .../owner`。**
+# 允许直接删 owner 会立刻造出"工作区没有 owner"的坏状态：`workspaces.owner_principal_id`
+# 还指着那个人，但他已不是成员，`owner` 那套权限点从此没有任何人能拿到，
+# 而这个状态**不可恢复**——能恢复的唯一角色被别人握在手里。
+
+
+class MemberAdd(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    user_id: UUID
+    role: str = "member"
+
+
+class MemberPage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    members: list[MembershipDetail]
+
+
+class MemberPermissionView(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    membership_id: UUID
+    user_id: UUID
+    role: str
+    permissions: list[str]
+
+
+class OwnerTransfer(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    owner_principal_id: UUID
+
+
+@router.get(
+    "/workspaces/{ws_id}/members",
+    response_model=MemberPage,
+    summary="成员列表（管理用）",
+    dependencies=[Depends(require_permission(WORKSPACE_MANAGE_MEMBERS))],
+)
+async def list_members(
+    ws_id: UUID,
+    scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> MemberPage:
+    """列出本区成员。需要 `workspace.manage_members`。
+
+    刻意**不**返回 username / email：成员列表要回答的是"谁在这个区、什么角色"。把
+    账号资料也带上，这个接口就变成撞库工具——有 manage_members 的人根本不需要
+    全局用户目录来管理成员。
+    """
+    if ws_id != scope.workspace_id:
+        raise not_found("workspace")
+    rows = await SqlIdentityRepo(session).list_memberships(ws_id)
+    return MemberPage(
+        members=[
+            MembershipDetail(
+                membership_id=row.membership_id,
+                workspace_id=ws_id,
+                user_id=row.user_id,
+                role=row.role,
+            )
+            for row in rows
+        ]
+    )
+
+
+@router.post(
+    "/workspaces/{ws_id}/members",
+    response_model=MembershipDetail,
+    status_code=status.HTTP_201_CREATED,
+    summary="加成员（按已存在的 principal）",
+    dependencies=[Depends(require_permission(WORKSPACE_MANAGE_MEMBERS))],
+)
+async def add_member(
+    ws_id: UUID,
+    payload: MemberAdd,
+    scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> MembershipDetail:
+    """把一个**已存在**的 principal 加进本区。
+
+    没有邀请制：调用方必须已经知道对方的 `principal_id`（对方先注册过）。这样这个
+    接口不会变成"按 email 探测账号是否存在"的枚举面——**不存在的 id 与已停用的 id
+    回同一个 404**，因为区分它们等于对外确认"这个 id 存在过"。
+    """
+    if ws_id != scope.workspace_id:
+        raise not_found("workspace")
+    if payload.role == OWNER_ROLE:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "owner is not assignable; transfer ownership instead",
+            details={"endpoint": f"PUT /api/v1/workspaces/{ws_id}/owner"},
+        )
+
+    repo = SqlIdentityRepo(session)
+    principal = await repo.find_principal(payload.user_id)
+    if principal is None or principal.status != "active":
+        raise not_found("principal")
+    if not await repo.role_exists(payload.role):
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "unknown role",
+            details={"role_key": payload.role},
+        )
+    if await repo.find_membership(ws_id, payload.user_id) is not None:
+        raise AppError(
+            ErrorCode.CONFLICT,
+            "already a member",
+            details={"user_id": str(payload.user_id)},
+        )
+    try:
+        row = await repo.add_member(workspace_id=ws_id, user_id=payload.user_id, role=payload.role)
+    except IntegrityError as exc:
+        # 两个请求同时通过了上面的 SELECT：唯一约束是最后一道闸，把 500 翻译成 409。
+        await session.rollback()
+        raise AppError(
+            ErrorCode.CONFLICT,
+            "already a member",
+            details={"user_id": str(payload.user_id)},
+        ) from exc
+    await session.commit()
+    return MembershipDetail(
+        membership_id=row.membership_id,
+        workspace_id=ws_id,
+        user_id=row.user_id,
+        role=row.role,
+    )
+
+
+@router.delete(
+    "/workspaces/{ws_id}/members/{membership_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="移除成员（自己移除自己 = 主动退出）",
+)
+async def remove_member(
+    ws_id: UUID,
+    membership_id: UUID,
+    scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """移除成员。需要 `workspace.manage_members`。
+
+    - 移除 **owner** 的成员行一律 422：那会让工作区失去 owner 且不可恢复，换人走
+      `PUT .../owner`（那条会把原 owner 降级，不是删除）。
+    - 移除**自己**是允许的（主动退出），前提是权限点够——`member`/`guest` 没有
+      `manage_members`，所以他们退出要靠这条规则的例外：见下面 `_can_leave_self`。
+    """
+    if ws_id != scope.workspace_id:
+        raise not_found("workspace")
+
+    repo = SqlIdentityRepo(session)
+    target = await repo.find_membership_by_id(ws_id, membership_id)
+    if target is None:
+        raise not_found("membership")
+    if target.role == OWNER_ROLE:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "owner membership cannot be removed; transfer ownership first",
+            details={"membership_id": str(membership_id)},
+        )
+
+    if not await _can_remove(session, scope, target.user_id):
+        # 够不着管理权、又不是在删自己，就是越权。404 而不是 403：不承认那行存在。
+        raise not_found("membership")
+
+    if not await repo.delete_membership(workspace_id=ws_id, membership_id=membership_id):
+        raise not_found("membership")
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+async def _can_remove(session: AsyncSession, scope: Scope, target_user_id: UUID) -> bool:
+    """管理权，或"目标就是自己"（主动退出）。
+
+    这两条是**与**关系里的或：有管理权可以删任何人（owner 已在上文拦掉），没有管理权
+    就只能删自己。把"删自己"单独授权，是为了让 member/guest 能退出工作区，而不必让
+    每个角色都背上 `manage_members`。
+    """
+    if target_user_id == scope.principal_id:
+        return True
+    permissions = await load_permissions(
+        session, principal_id=scope.principal_id, workspace_id=scope.workspace_id
+    )
+    return WORKSPACE_MANAGE_MEMBERS in permissions
+
+
+@router.put(
+    "/workspaces/{ws_id}/owner",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="转移工作区所有权",
+    dependencies=[Depends(require_permission(WORKSPACE_MANAGE_MEMBERS))],
+)
+async def transfer_owner(
+    ws_id: UUID,
+    payload: OwnerTransfer,
+    scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """把所有权交给本区的另一个成员。
+
+    三层校验，顺序不能换：
+
+    1. 路径 `ws_id` 必须是自己的区（404）；
+    2. **调用者必须是当前 owner**（403，不是 422——这不是参数错，是没资格）；
+    3. 目标必须已经是本区成员（422）。少了第 3 条，`transfer_ownership` 会把
+       `workspaces.owner_principal_id` 指到一个非成员身上，那是不可恢复的坏状态。
+    """
+    if ws_id != scope.workspace_id:
+        raise not_found("workspace")
+
+    repo = SqlIdentityRepo(session)
+    workspace = await repo.find_workspace(ws_id)
+    if workspace is None:
+        raise not_found("workspace")
+    if workspace.owner_principal_id != scope.principal_id:
+        raise AppError(
+            ErrorCode.FORBIDDEN,
+            "only the current owner can transfer ownership",
+            details={"workspace_id": str(ws_id)},
+        )
+    if payload.owner_principal_id == scope.principal_id:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "already the owner",
+            details={"principal_id": str(scope.principal_id)},
+        )
+    if await repo.find_membership(ws_id, payload.owner_principal_id) is None:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "target is not a member of this workspace",
+            details={"principal_id": str(payload.owner_principal_id)},
+        )
+
+    moved = await repo.transfer_ownership(
+        workspace_id=ws_id,
+        from_principal_id=scope.principal_id,
+        to_principal_id=payload.owner_principal_id,
+    )
+    if not moved:
+        # 三个 UPDATE 已执行过一部分，必须整体回滚；否则留下"改了一半"的状态。
+        await session.rollback()
+        raise AppError(
+            ErrorCode.CONFLICT,
+            "ownership transfer raced with a concurrent change",
+            details={"workspace_id": str(ws_id)},
+        )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/workspaces/{ws_id}/members/{membership_id}/permissions",
+    response_model=MemberPermissionView,
+    summary="某个成员实际持有的权限点（诊断用）",
+    dependencies=[Depends(require_permission(WORKSPACE_MANAGE_MEMBERS))],
+)
+async def member_permissions(
+    ws_id: UUID,
+    membership_id: UUID,
+    scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> MemberPermissionView:
+    """回答"他为什么点不了这个按钮"。
+
+    与 `GET /workspaces/{ws}/permissions` 的区别是那个只看**自己**、且谁都能调；这个
+    能看别人，所以必须 `manage_members`。权限点现算不缓存——`role_grants` 改完下一次
+    请求就变，诊断接口如果读缓存就会给出与真实判权不一致的答案。
+    """
+    if ws_id != scope.workspace_id:
+        raise not_found("workspace")
+
+    repo = SqlIdentityRepo(session)
+    target = await repo.find_membership_by_id(ws_id, membership_id)
+    if target is None:
+        raise not_found("membership")
+    permissions = await load_permissions(session, principal_id=target.user_id, workspace_id=ws_id)
+    return MemberPermissionView(
+        membership_id=target.membership_id,
+        user_id=target.user_id,
+        role=target.role,
+        permissions=sorted(permissions),
+    )

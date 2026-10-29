@@ -1,8 +1,60 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：角色集合从「DDL 枚举」改为「数据」（成员4 域，经用户「补」授权代做）——摘掉 `workspace_memberships.role` 的列举式 `CHECK`，换成格式约束 + 指向 `roles(role_key)` 的外键（`ON UPDATE CASCADE ON DELETE RESTRICT`），新增 `migrations/0008_roles_are_data.sql`、角色 CRUD 两个端点（`POST`/`DELETE /workspaces/{ws}/roles`）、`RoleCatalog` 改由 `roles` 表驱动，全量 **274 passed**，见下方「本轮：角色是数据，不是 DDL 枚举」**；再往前是 `role_grants` 从「预留」变「已接入」（成员4 域，经用户「好吧你落地role_grants」授权代做）——运行期判权链改为 `workspace_memberships.role` → `roles` → `role_grants`，新增 15 个权限点、6 个 `/workspaces/{ws}/roles|permissions` 端点、`api/deps.py` 权限依赖工厂，全量 **263 passed**，见下方「本轮：`role_grants` 落地」**；再往前是 P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：成员管理与权限自省补全（成员4 域，经用户「你写一份成员管理修复计划，然后执行」授权代做）——补上 6 个端点（`GET`/`POST /workspaces/{ws}/members`、`DELETE .../members/{id}`、`PUT /workspaces/{ws}/owner`、`GET .../members/{id}/permissions`、`GET /auth/me`）、2 个 repo 方法（`delete_membership` / `transfer_ownership`）、22 个新用例（其中 5 个是"新端点忘挂权限"的结构守卫），全量 **297 passed / exit 0**，见下方「本轮：成员管理与权限自省补全」**；再往前是中文全文检索从「查不出」修到「能查出」（成员2 域，经用户「现在先不做评测集合，把中文 FTS 修好或砍掉」授权）——`tsvector` 改为 `to_tsvector('simple', pyknora_cjk_bigram(content))`、查询侧改用 `pyknora_cjk_tsquery()` 并做 AND→OR 两级降级、新增 `ChunkRepo.search_keyword` 原语，新增迁移 `migrations/0007_cjk_bigram_fts.sql`（零新扩展、零新镜像），见下方「本轮：中文 FTS 修好」**；紧接其后是「角色是数据，不是 DDL 枚举」（成员4 域，经用户「补」授权代做）——摘掉 `workspace_memberships.role` 的列举式 `CHECK`，换成格式约束 + 指向 `roles(role_key)` 的外键，新增 `migrations/0008_roles_are_data.sql`、角色 CRUD 两个端点、`RoleCatalog` 改由 `roles` 表驱动，见下方「本轮：角色是数据，不是 DDL 枚举」**；再往前是 `role_grants` 从「预留」变「已接入」（成员4 域，经用户「好吧你落地role_grants」授权代做）——运行期判权链改为 `workspace_memberships.role` → `roles` → `role_grants`，新增 15 个权限点、6 个 `/workspaces/{ws}/roles|permissions` 端点、`api/deps.py` 权限依赖工厂，全量 **263 passed**，见下方「本轮：`role_grants` 落地」**；再往前是 P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
 
-## 本轮：角色是数据，不是 DDL 枚举（2026-10-29，lead 代修成员4 域，经用户「补」授权）
+## 本轮：成员管理与权限自省补全（2026-10-29，成员4 域，经用户「你写一份成员管理修复计划，然后执行」授权代做）
+
+- 背景：用户问「目前的权限模块是不是残缺的」。实测遍历 9 个 v1 router 的路由表得 **23 条 API 路由 / 19 条挂 `require_*` 依赖**，缺的不是判权机制（`role_grants` 已接入）而是三块**功能性**能力：① 成员管理几乎没做（只有 `PATCH` 改角色，不能加人/移人）；② 所有权无法转移（`workspaces.owner_principal_id` 只有建区时写一次）；③ 没有任何力量阻止"新端点忘挂权限依赖"。
+- 流程：先落盘计划书 `docs/plans/成员管理修复计划.md`（T1–T7 验收断言 + 三条语义约定 + 明确不做清单），再按 T1→T7 执行。**无新迁移**：成员表、角色表、`role_grants` 已具备所需列与约束，缺的只是端点与仓库方法。
+- 改动（6 文件，均本轮新增/修改）：
+  - `src/pyknora/db/repos/principals.py`：+`delete_membership(session, workspace_id, membership_id) -> bool`、+`transfer_ownership(...)`——后者在**同一事务**里做三条 UPDATE（`workspaces.owner_principal_id`、原 owner 降 `admin`、目标升 `owner`），且升级那条带 `WHERE role <> 'owner'` 守卫，防止把唯一 owner 覆盖成别人。
+  - `src/pyknora/api/v1/workspaces.py`：+`MemberAdd` / `MemberPage` / `MemberPermissions` / `OwnerTransfer` 四个模型；+6 个端点（`GET`/`POST /workspaces/{ws_id}/members`、`DELETE /workspaces/{ws_id}/members/{membership_id}`、`PUT /workspaces/{ws_id}/owner`、`GET /workspaces/{ws_id}/members/{membership_id}/permissions`）；`GET /workspaces/{ws_id}/permissions` 保持"自省不要求管理权"。
+  - `src/pyknora/api/v1/auth.py`：+`MeResponse` + `GET /auth/me`（返回 `principal_id`、`display_name`、当前工作区、`role`、`permissions`），客户端不必再猜自己能干什么。
+  - `tests/api/test_api_members.py`（新增，17 用例 + 1 组 parametrize）：覆盖列人/加人/重复 409/未知 principal 404/owner 不可指派/未知角色 422/guest 越权 403/owner 不可删 422/自己退 204/退别人 404/跨区 404/转移所有权三条写入一致/非 owner 转移 403/转移给非成员 422/`/auth/me` 角色与权限计数/guest 权限数 7 且无写权限。
+  - `tests/unit/test_route_permission_coverage.py`（新增，5 用例）：遍历 9 个 router 的路由，断言除白名单外**全部**挂 `require_*` 依赖；同时断言白名单无幽灵条目、router 全挂上、路由数 ≥20 且挂依赖数 ≥15——后三条是防"测试自己假绿"。
+  - `docs/plans/成员管理修复计划.md`（新增）：计划与验收记录。
+- 三条越权语义（写进代码注释与测试，全仓一致）：
+  1. 路径 `ws_id` ≠ `scope.workspace_id` → **404**（403 等于承认那一行存在）；
+  2. 身份为真但权限点不够 → **403**（`missing permission: <perm>`）；
+  3. 会破坏工作区不变量 → **422**（移除 owner、把 owner 指派给别人、把所有权转给非成员）。
+- 过程中修的两个真缺陷（都是"从没被调用过所以没人发现"）：
+  - `MembershipDetail` 有两个必填字段（`workspace_id` / `user_id`）而在 `/members` 列表处构造时漏传 `workspace_id`、还多传了不存在的 `created_at` —— Pydantic 会直接 `ValidationError`。原先没人调用这条路径，测试一上手才炸。
+  - `DELETE /members/{id}` 一度给整个端点挂了 `require_permission(WORKSPACE_MANAGE_MEMBERS)`，导致 `member`/`guest` **无法主动退出**（他们本来就没有 manage_members）。改成函数体内 `_can_leave_self` 判权：管别人要权限点，退自己只要身份一致。
+- 已执行（真实输出）：
+  - `uv run ruff check src tests` → `All checks passed!`；`uv run ruff format src tests` → `2 files reformatted, 106 files left unchanged`。
+  - `uv run pytest -q tests/unit/test_route_permission_coverage.py tests/api/test_api_members.py` → **22 passed**。
+  - 全量 `uv run pytest -q`（真库 5434，迁移 `0001`–`0006` + `0008` 已应用）→ **297 passed / exit 0**（基线 274 + 本轮 23）。
+- 未验证 / 有意未做：
+  - `GET /workspaces/{ws}/members` **不分页**：假设单区成员数 ≤ 数百（表上有 `workspace_memberships(workspace_id)` 索引支撑）。成员数上千时要改 keyset 分页。
+  - **不做邀请制**：加人要求对方 `principal_id` 已存在（先注册），刻意不做"按 email 邀请"，否则这个接口就成了账号枚举面。
+  - `roles` 仍是**全局表**（无 `workspace_id`），跨租户自定义角色不支持——ADR-0007 的有意取舍，本轮未改。
+  - `/auth/me` 每次请求查一次 membership（未加缓存）：与撤销权限立即生效同向取舍。
+  - 所有权转移后**旧 owner 的 token 不失效**（token 里没存角色，角色是从库里现查的，所以下个请求就按 `admin` 判——这是有意的，但无专门用例断言）。
+- 下一步：无（成员管理这一层收口）。
+
+## 本轮：中文 FTS 修好（2026-10-29，成员2 域，经用户「现在先不做评测集合，把中文 FTS 修好或砍掉」授权）
+
+- 背景：用户问「当前的项目手写实现你觉得怎样」，逐条核查后给出的第一条真问题就是**中文全文检索实际查不出**。证据（本机实跑）：`to_tsvector('simple','银狐锚点报销标准')` 产出 `'银狐锚点报销标准':1`——**整段汉字被当成一个 token**；因此 `@@ plainto_tsquery('simple','银狐')` = `f`，只有把整句话原样输入才 = `t`。后果不是报错而是**静默返回 0 行**，混合检索（`search_hybrid`）里 FTS 那一路等于恒空，RRF 融合效果比纯向量还差。用户给出的两个选项是 A（装 `pg_bigm`/`zhparser`）与 B（承认 FTS 不可用、降级成纯向量并诚实标注），并要求本轮动手、不做评测集。
+- 决策：**选 A 但不装扩展**——自己写 bigram 分词函数，复用现有 `chunks.tsvector` 列与 GIN 索引。理由（实测）：`pg_bigm` 与 `zhparser` **不在 `pg_available_extensions`**，要用得自建 Docker 镜像编译（把一个"改一列口径"变成"所有人生成环境"）；`pg_trgm` 虽可用且 `ILIKE '%银狐%'` 能命中，但它是模糊相似度不是确定性命中、2 字中文查询的三元组索引选择性差。自写 `pyknora_cjk_bigram()` 只需两个 IMMUTABLE SQL 函数，`chunks` 当时 0 行 → 回填成本为零。
+- 关键设计（两处都经实测才定）：
+  - **分词口径**：汉字取相邻 2 字（`银狐 狐锚 锚点 点报 报销 销标 标准`），英文数字整词小写，单字保留，标点/空白当分隔符丢弃。副作用是 `v2.1` 会被切成 `v2` + `1`。
+  - **AND→OR 两级降级**：只用 AND 的话，"一线城市住宿报销上限是多少钱"这种问句 match 不到任何文档（实测 f）；只用 OR 又会把相关性拉平。所以先用 AND（所有 bigram 同时命中，精确），不足 `limit` 才补 OR（宽松）。两级结果按 `chunk_id` 去重并保持 `ts_rank_cd` 降序。实测 `银狐报销标准`（不连续）对文档 `银狐锚点报销标准` 是 AND=f / OR=t，正是这条设计的存在理由。
+  - **注入面**：查询串里的 `& | ! : * (` 在分词阶段被当分隔符丢掉，实测 `a & b | !c :* (d)` → 词元只剩 `a b c d`；tsquery 用绑定参数拼。
+  - **性能**：512 字中文块 × 1000 次 = 10ms（10 微秒/chunk），10 万 chunk 约 1 秒，可忽略。
+- 起始 HEAD：本轮开始时工作区已被并发会话改动（成员4 域），`git status` 非干净；本轮只改下列文件，未触碰并发会话在改的文件。
+- 改动文件（6 改 + 1 新增）：
+  - 新增 `migrations/0007_cjk_bigram_fts.sql`：`pyknora_cjk_bigram(text)`（plpgsql，IMMUTABLE PARALLEL SAFE STRICT）+ `pyknora_cjk_tsquery(text, join_op)`（sql，返回 NULL 而非空串，因为 `to_tsquery('simple','')` 会抛语法错）+ 一条 `WHERE tsvector IS DISTINCT FROM …` 的幂等回填。**号段**：本文件 21:48 落盘，与并发成员的角色改动同时出现 `0007`，按先到先得保留 `0007`，对方让号为 `0008`（见其条目）。
+  - `src/pyknora/db/repos/reads.py`：`search_keyword` 改为两阶段 AND→OR（AND 命中不足 limit 才跑 OR，按 `chunk_id` 去重保序），两条 SQL 用 `_keyword_stmt(join_op)` 缓存成 `TextClause`（`join_op` 白名单 `and`/`or`，避免 f-string 拼 SQL）。
+  - `src/pyknora/workers/ingest_worker.py`、`src/pyknora/services/migration/reindex.py`、`src/pyknora/services/migration/snapshot.py`：三处写 `tsvector` 的 SQL 统一改为 `to_tsvector('simple', pyknora_cjk_bigram(content))`（与 worker 同一句的注释一并更新）。
+  - `scripts/seed_for_m3.py`：造数时同口径；原先注释里"汉字会被切成一个 token，成员3 拿半截词搜会 0 命中"的警告改为"已修"。
+  - `tests/api/test_api_query.py`、`tests/integration/test_search_repo.py`：夹具插入 `tsvector` 的写法同步（原先靠 `_seed_one` 里直接 `UPDATE … to_tsvector('simple', content)` 补列，现在随 INSERT 一次写好）。用例**不是"新增 6 条"**：`tests/integration/test_search_repo.py` 从 5 条扩到 **12** 条，其中关键词 7 条（`matches_full_chinese_token` / `matches_partial_chinese_word` / `falls_back_to_or_for_scattered_terms` / `single_char_does_not_match` / `ignores_tsquery_metacharacters` / `punctuation_only_returns_empty` / `filters_workspace_in_sql`）；`tests/api/test_api_query.py` 仍是 6 条，只是把中文命中断言并进了 `test_query_returns_fused_hits_and_uses_trusted_scope` 与 `test_query_returns_hits_from_real_postgres`。
+  - `docs/plans/m2_contract_draft.md`：升 v2，新增 §3.5 `ChunkRepo.search_keyword` 契约小节，§2 的 `tsvector` 列说明改为新口径，§8 提醒成员3 删掉旧的 `plainto_tsquery` 写法。
+- 已执行：迁移逐文件 `docker exec -i pyknora-pg psql -v ON_ERROR_STOP=1 -f -` → 8 个文件全 `EXIT=0`；`uv run --frozen ruff check src tests scripts` → `All checks passed!`（EXIT=0）；`uv run --frozen pytest -q` → **274 passed / exit 0**（unit 105 / contract 20 / api 96 / integration 53），其中 `tests/integration/test_search_repo.py` 单独跑 **12 passed**。
+- 未验证：① **没有任何评测数据**——本轮确定的是"一个能跑且可解释的默认值"，不是"已证明更优的分词方案"，PRD `:601` 要求的 Recall@5/MRR/NDCG 与 100 条标注问答一条都没做（用户明确本轮不做评测集）；② 单汉字查询返回空（bigram 最短有效长度 2 汉字），要单字召回得再叠 `ILIKE`/`pg_trgm`，未做；③ 纯英文查询的口径（整词匹配，无词干/同义词）未与 BM25 对照；④ `tsvector` 体积变大对写入放大与磁盘的影响未测；⑤ 停用词表未做，「的」「了」也进 bigram 索引。
+- 环境边界（不是仓库缺陷，但会挡住别人）：`docker` 从 **PowerShell 直接调用可以**，从 **Python 子进程**调用被拒（`permission denied while trying to connect to the Docker API at npipe:////./pipe/dockerDesktopLinuxEngine`），试过不捕获 stdout、只捕获 stderr、`subprocess.run` 三种写法都一样 → 所以 `scripts/migrate.py` 在本机跑不通，迁移改用 pwsh 循环逐文件 `docker exec`。已写进下方"未验证"之外的自查记录，未改 `migrate.py` 代码（它设计上就该走 docker CLI）。
+- 下一步：把用户拍板的两条接上——(a) 中文分词口径要不要进 `docs/tdd/06` 的正式决策（现在只在本状态文件与本轮迁移注释里）；(b) 评测集仍欠着，等做的时候这条 FTS 是第一个被量化的对象。另：`search_vector` 仍是死代码、`top_k` 仍无上限、`candidate_k` 仍从不传、citation 校验仍缺失——本轮都没动。
+
+
 
 - 背景：用户连问「`role_grants` 空壳、`is_public` 死字段是干什么的」→「实现路径文件里面是怎么定的」→「那等于说表的逻辑从开始已经错了对吗」→「说人话」→「补」。逐条拆解后的结论是：**表没建错，能跑**；五处口径问题里只有一处是建表时就该避免的（`is_public` 列），而**最实质的一处是「角色集合被定义了三遍」**：`0003` 的 `CHECK (role IN ('owner','admin','member','guest'))`、`roles.role_key`、`workspaces.py` 的 `AssignableRole = Literal[...]`。用户回「补」= 授权修这一条。
 - 决策：**角色改为数据驱动**，详见 ADR-0007（提议状态）。`workspace_memberships.role` 摘掉列举式 `CHECK`，换成格式约束 `CHECK (role ~ '^[a-z][a-z0-9_]{0,63}$')` + 外键 `→ roles(role_key) ON UPDATE CASCADE ON DELETE RESTRICT`。`roles` 成为唯一真相源；`permissions.py` 的 `ROLE_KEYS` 改名 `BUILTIN_ROLES`，语义从"角色闭集"收窄为"内置角色"；新增 `OWNER_ROLE`。

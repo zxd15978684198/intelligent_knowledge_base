@@ -23,12 +23,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pyknora.api.deps import get_session
+from pyknora.api.deps import get_scope, get_session
 from pyknora.core.errors import AppError, ErrorCode
+from pyknora.core.scope import Scope
 from pyknora.db.repos.principals import SqlIdentityRepo
 from pyknora.services.auth.jwt import DEFAULT_TTL_SECONDS, issue_token
 from pyknora.services.auth.membership import (
     create_default_workspace_for,
+    load_permissions,
     resolve_default_workspace,
 )
 from pyknora.services.auth.passwords import (
@@ -177,4 +179,57 @@ async def login(
         principal_id=principal.principal_id,
         workspace_id=workspace_id,
         display_name=principal.display_name,
+    )
+
+
+class MeResponse(BaseModel):
+    """当前身份自省：前端登录后据此决定显示哪些入口。
+
+    只带 `display_name`，**不带 email**：email 是账号资料而不是判权依据，自省接口越少
+    暴露资料，越不容易被当成"这个邮箱是否注册过"的查询面。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    principal_id: UUID
+    display_name: str | None
+    workspace_id: UUID
+    role: str
+    permissions: list[str]
+
+
+@router.get("/auth/me", response_model=MeResponse, summary="当前身份、角色与权限点")
+async def me(
+    scope: Annotated[Scope, Depends(get_scope)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> MeResponse:
+    """回答"我在这个空间能做什么"。
+
+    权限点**现算不缓存**，且与 `require_permission` 共用 `load_permissions`：两处若
+    各算一套，前端就会出现"按钮显示得出来、点下去 403"的自相矛盾。
+
+    三种失败分开报，因为调用方的处置完全不同：令牌无效/过期（`get_scope` → 401，
+    去重登）、主体被停用（401，别重登了，找管理员）、不是本区成员（403，切空间）。
+    """
+    repo = SqlIdentityRepo(session)
+    principal = await repo.find_principal(scope.principal_id)
+    if principal is None or principal.status != "active":
+        # 与"令牌签发后才被停用"同口径：401，且不区分"不存在"与"已停用"。
+        raise AppError(ErrorCode.UNAUTHENTICATED, "principal is not active")
+    membership = await repo.find_membership(scope.workspace_id, scope.principal_id)
+    if membership is None:
+        raise AppError(
+            ErrorCode.FORBIDDEN,
+            "not a member of this workspace",
+            details={"workspace_id": str(scope.workspace_id)},
+        )
+    permissions = await load_permissions(
+        session, principal_id=scope.principal_id, workspace_id=scope.workspace_id
+    )
+    return MeResponse(
+        principal_id=principal.principal_id,
+        display_name=principal.display_name,
+        workspace_id=scope.workspace_id,
+        role=membership.role,
+        permissions=sorted(permissions),
     )

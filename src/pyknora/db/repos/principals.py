@@ -303,3 +303,67 @@ class SqlIdentityRepo:
             .where(WorkspaceMembershipRow.role == role_key)
         )
         return int((await self._session.execute(stmt)).scalar_one())
+
+    # ---------------------------------------------------------------- 成员的增与删
+    # `add_member` / `list_memberships` / `find_membership_by_id` 已在上面；这里只补
+    # 管理端点真正新增的两个写操作。
+
+    async def delete_membership(self, *, workspace_id: UUID, membership_id: UUID) -> bool:
+        """移除成员。返回是否真的删到了行（0 行 = 不存在或跨区，调用方报 404）。
+
+        刻意**不**碰 `workspaces.owner_principal_id`：删掉 owner 的成员行会让工作区
+        失去所有者，所以"不能删 owner"这条由调用方先拦，SQL 不替它做决定。
+        """
+        result = await self._session.execute(
+            delete(WorkspaceMembershipRow).where(
+                WorkspaceMembershipRow.workspace_id == workspace_id,
+                WorkspaceMembershipRow.membership_id == membership_id,
+            )
+        )
+        return result.rowcount > 0
+
+    async def transfer_ownership(
+        self,
+        *,
+        workspace_id: UUID,
+        from_principal_id: UUID,
+        to_principal_id: UUID,
+        demote_to: str = "admin",
+    ) -> bool:
+        """把所有权从一个人交给另一个人，返回是否三处都真的改到了。
+
+        必须一起改三处，漏一处就会留下坏状态：
+        ① `workspaces.owner_principal_id`（对外唯一的"谁是 owner"）；
+        ② 目标成员 `role = 'owner'`（否则他拿不到 owner 的权限点）；
+        ③ 原 owner 降为 `demote_to`（默认 admin，不是 member——交接之后人通常还在）。
+
+        返回 False 表示有一步没命中（目标不是成员、或并发删掉了行）。调用方必须
+        回滚并报错：三个 update 已在同一事务里执行过，不回滚就是"改了一半"。
+        """
+        displaced = await self._session.execute(
+            update(WorkspaceMembershipRow)
+            .where(
+                WorkspaceMembershipRow.workspace_id == workspace_id,
+                WorkspaceMembershipRow.user_id == from_principal_id,
+            )
+            .values(role=demote_to)
+        )
+        promoted = await self._session.execute(
+            update(WorkspaceMembershipRow)
+            .where(
+                WorkspaceMembershipRow.workspace_id == workspace_id,
+                WorkspaceMembershipRow.user_id == to_principal_id,
+            )
+            .values(role="owner")
+        )
+        moved = await self._session.execute(
+            update(WorkspaceRow)
+            .where(
+                WorkspaceRow.workspace_id == workspace_id,
+                # 乐观并发：只有"还是那个人是 owner"时才改。两人同时转移时，后到的
+                # 那个请求 0 行命中并回滚，不会把工作区指到一个没人预期的 owner 上。
+                WorkspaceRow.owner_principal_id == from_principal_id,
+            )
+            .values(owner_principal_id=to_principal_id)
+        )
+        return displaced.rowcount > 0 and promoted.rowcount > 0 and moved.rowcount > 0
