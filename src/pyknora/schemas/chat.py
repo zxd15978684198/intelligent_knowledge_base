@@ -32,3 +32,16 @@ class TokenEvent(BaseModel):
 class DoneEvent(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+
+
+class StreamErrorEvent(BaseModel):
+    """流建立**之后**才发生的失败。
+
+    这时 HTTP 状态码已经发出去了（通常是 200），改不了；再抛异常只会把连接掐断，
+    客户端看到的是"网络错误"而不是"上游模型调用失败"。所以错误必须以事件形式
+    送出去，且后面必须紧跟一个 done 事件收尾，否则前端解析器会一直等。
+    """
+
+    code: str
+    message: str
+    retryable: bool = False

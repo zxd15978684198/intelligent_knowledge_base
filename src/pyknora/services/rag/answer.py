@@ -83,5 +83,17 @@ async def stream_answer(
                     if text:
                         yield "token", text
             yield "usage", usage
-    except httpx.HTTPError as exc:
-        raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "chat model request failed") from exc
+    except httpx.HTTPError:
+        # 这里**不能抛**：生成器是在响应已经开始之后才跑的，抛出 AppError 会让
+        # Starlette 撞上 "response already started"，客户端只看到连接被掐断
+        # （httpx.RemoteProtocolError），拿不到任何可读的错误。
+        # 所以把失败降级成一个 error 事件，由调用方发完再收尾。
+        yield (
+            "error",
+            {
+                "code": ErrorCode.DEPENDENCY_UNAVAILABLE,
+                "message": "chat model request failed",
+                "retryable": True,
+            },
+        )
+        yield "usage", {}

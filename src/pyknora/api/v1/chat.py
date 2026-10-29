@@ -16,7 +16,14 @@ from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
 from pyknora.core.settings import settings
 from pyknora.db.repos.reads import SqlChunkSearchRepo
-from pyknora.schemas.chat import ChatRequest, Citation, DoneEvent, RetrievalEvent, TokenEvent
+from pyknora.schemas.chat import (
+    ChatRequest,
+    Citation,
+    DoneEvent,
+    RetrievalEvent,
+    StreamErrorEvent,
+    TokenEvent,
+)
 from pyknora.services.rag.answer import stream_answer
 from pyknora.services.retrieval.search import search_hybrid
 
@@ -42,6 +49,12 @@ async def chat(
     state = get_app_state()
     if state.embedder is None:
         raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "embedding provider not configured")
+    # 必须在构造 StreamingResponse **之前**校验：流一旦开始，状态码已经发出去，
+    # 再抛错只能表现为连接被掐断，客户端会把"没配模型"误读成网络故障。
+    # 真正的检查在 services/rag/answer.py 的生成器里（那里是最后一道），
+    # 这里是把错误提前成可读的 503。
+    if not settings.chat_api_key:
+        raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "chat model is not configured")
     chunks = await search_hybrid(
         scope, kb_id, body.query, embedder=state.embedder, repo=repo, top_k=body.top_k
     )
@@ -60,6 +73,12 @@ async def chat(
         async for kind, value in stream_answer(body.query, chunks, settings=settings):
             if kind == "token":
                 yield _sse("token", TokenEvent(text=value).model_dump())
+            elif kind == "error":
+                # 流已开始，状态码改不了：错误作为事件发出去，再补一个 done 收尾，
+                # 前端的解析器才不会一直挂着等下一块。
+                yield _sse("error", StreamErrorEvent(**value).model_dump())
+                yield _sse("done", DoneEvent().model_dump())
+                return
             else:
                 yield _sse("done", DoneEvent(**value).model_dump())
 
