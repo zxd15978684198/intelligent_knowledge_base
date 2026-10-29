@@ -154,6 +154,7 @@ def create_app() -> FastAPI:
             "embedder": getattr(state.embedder, "model_key", None),
         }
 
+    from pyknora.api.v1 import admin as admin_router
     from pyknora.api.v1 import auth as auth_router
     from pyknora.api.v1 import chat as chat_router
     from pyknora.api.v1 import documents as documents_router
@@ -173,6 +174,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router.router, prefix="/api/v1")
     app.include_router(knowledge_bases_router.router, prefix="/api/v1")
     app.include_router(lineage_router.router, prefix="/api/v1")
+    app.include_router(admin_router.router, prefix="/api/v1")
 
     return app
 
