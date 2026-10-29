@@ -10,13 +10,16 @@
 #   uv run python scripts/ci.py --stage all     # 跑全部阶段
 #   uv run python scripts/ci.py --stage lint,test
 #
-# 相对插件默认模板改了三处，理由写在 AGENTS.md §6：
+# 相对插件默认模板改了四处，理由写在 AGENTS.md §6：
 #   1. ruff 只查 src tests scripts —— `.tmp_ref/` 是未入库的对标源码，全仓查会报 47 个历史错误；
 #   2. pytest 只跑 tests/unit 且不设覆盖率门槛 —— 提交流程要快（<5s），
 #      集成层需要真 PG；覆盖率门禁留给后续 CI，不在这里冒充通过；
 #   3. `--stage all` **不含 security** —— pip-audit 要联网比对 OSV，
 #      放进提交门禁等于让网络抖动决定你能不能提交。security 用 `--stage security`
 #      显式跑（本地手动 + CI），不进 pre-commit。
+#   4. `uv run <tool>` 优先直连 `.venv` 里的可执行文件（见 _resolve_venv_argv）——
+#      本机 `.venv` 带 Low 完整性标签，嵌套出来的第二层 uv 写不了工作区外的
+#      `D:\uv-cache`，会以 exit 2 在工具启动前就退出，让门禁报出一种从未发生的失败。
 #
 # Standard library only: Python 3.11+ on Linux, macOS and Windows.
 from __future__ import annotations
@@ -162,20 +165,49 @@ def _select(stage_arg: str) -> list[dict]:
     return [by_id[name] for name in seen]
 
 
-def _print_plan(stages: list[dict]) -> None:
+def _print_plan(stages: list[dict], root: str) -> None:
     print(f"plan for {PROJECT_NAME}:")
     for index, stage in enumerate(stages, start=1):
         print(f"{index}. {stage['title']} ({stage['id']})")
         for step in stage["steps"]:
-            print(f"   $ {step['run']}")
+            print(f"   $ {_render(_resolve_venv_argv(step['argv'], root))}")
+
+
+def _resolve_venv_argv(argv: list[str], root: str) -> list[str]:
+    """Prefer the `.venv` entry point over nesting `uv run`.
+
+    `uv run <tool>` started from a `.venv`-resident Python spawns a *second* uv.
+    On Windows, when `.venv` carries a lower mandatory integrity label than the
+    uv cache directory, that inner uv cannot initialize its cache and exits 2
+    before the tool ever runs — the gate then reports a check failure that never
+    happened. Steps carrying uv flags (`--with`, `--python`, …) are left alone:
+    the tool they name is not necessarily installed in the project venv.
+    """
+    if len(argv) < 3 or argv[0] != "uv" or argv[1] != "run" or argv[2].startswith("-"):
+        return argv
+    tool = argv[2]
+    bindir = os.path.join(root, ".venv", "Scripts" if os.name == "nt" else "bin")
+    for name in (f"{tool}.exe", tool):
+        candidate = os.path.join(bindir, name)
+        if os.path.isfile(candidate):
+            return [candidate, *argv[3:]]
+    return argv
+
+
+def _render(argv: list[str]) -> str:
+    """Show the command the way the shell would, not raw list repr."""
+    if os.name == "nt":
+        return subprocess.list2cmdline(argv)
+    return " ".join(argv)
 
 
 def _run_step(step: dict, root: str, timeout: float) -> tuple[bool, float, int]:
-    print(f"\n==> {step['label']}\n    $ {step['run']}", flush=True)
+    argv = _resolve_venv_argv(step["argv"], root)
+    print(f"\n==> {step['label']}\n    $ {_render(argv)}", flush=True)
     started = time.monotonic()
     try:
         completed = subprocess.run(
-            step["argv"],
+            argv,
             cwd=root,
             timeout=timeout,
             check=False,
@@ -186,7 +218,7 @@ def _run_step(step: dict, root: str, timeout: float) -> tuple[bool, float, int]:
         )
         code = completed.returncode
     except FileNotFoundError:
-        print(f"    command not found: {step['argv'][0]}", file=sys.stderr)
+        print(f"    command not found: {argv[0]}", file=sys.stderr)
         code = 127
     except subprocess.TimeoutExpired:
         print(f"    timed out after {timeout:.0f}s", file=sys.stderr)
@@ -216,11 +248,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     stages = _select(args.stage)
+    root = os.path.abspath(args.root)
     if args.list:
-        _print_plan(stages)
+        _print_plan(stages, root)
         return 0
 
-    root = os.path.abspath(args.root)
     results: list[dict] = []
     overall = 0
     total = 0.0

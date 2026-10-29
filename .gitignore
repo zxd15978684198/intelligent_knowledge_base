@@ -12,3 +12,31 @@ references/**
 
 # 对标源码切片（只读参考，不入库；不忽略的话 ruff 全仓扫描会报 47 个历史错误）
 .tmp_ref/
+
+# IDE（.idea 只有 workspace.xml 在自带 .gitignore 里，其余文件仍会污染 git status）
+.idea/
+*.iml
+.vscode/
+
+# 测试与类型检查缓存（pytest/ruff 目录内自带 .gitignore，这里显式兜底）
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+
+# 覆盖率产物（pytest-cov 在 dev 依赖里）
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# 本地配置与密钥（数据库连接串等 PYKNORA_* 环境变量不入库）
+.env
+.env.*
+!.env.example
+
+# 日志与操作系统噪音
+*.log
+logs/
+.DS_Store
+Thumbs.db
