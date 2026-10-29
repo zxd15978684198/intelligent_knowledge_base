@@ -1,6 +1,71 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：合并远端 chat 分支 + 修 `index_migrations` 主键口径，见下方「本轮：合并 chat 分支」**；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：任务 16 重建索引 `/admin/reindex` 完成（成员5 实现 / lead 复核），见下方「本轮：任务 16 重建索引」**；再往前是 B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+
+## 本轮：任务 16 重建索引 `/admin/reindex`（2026-10-29，成员5 实现 / lead 复核）
+
+- 任务：进度表任务 **16** ↔ 修复计划 **F8**；起始 HEAD `145fb87`（工作区仍为本轮未提交改动）。
+- 改动文件：
+  - `src/pyknora/db/repos/index_migrations.py`（新，154 行）`SqlIndexMigrationRepo`：`create/get/list_for_kb/finish/find_succeeded_by_idempotency_key`，全部 SQL 带 `workspace_id` 谓词。
+  - `src/pyknora/services/migration/reindex.py`（新，566 行）`reindex_knowledge_base()`：**重建 = 按 KB 现有 profile 对「已发布 build 的切片正文」重算向量 → 新 `index_version` 的 staging build → 走既有 `publish()` 激活**；不重解析、不重切片、不改 `publish` 语义、不加表/列/迁移。
+  - `src/pyknora/api/v1/admin.py`（新，113 行）`POST /api/v1/admin/reindex` → **202**；`ReindexRequest{kb_id,mode,idempotency_key}`、`ReindexResponse{migration_id,kb_id,mode,state,documents,chunks,skipped,failed,replayed}`。
+  - `src/pyknora/api/main.py`：**仅 +2 行**（一条 import、一条 `include_router`）。
+  - `tests/api/test_api_admin.py`（新，438 行，**11 条用例**）。
+- 已执行（真实输出）：
+  - `uv run ruff check src tests scripts` → `All checks passed!`
+  - `uv run ruff format --check src tests scripts` → `104 files already formatted`
+  - `$env:PYKNORA_DATABASE_URL='postgresql+asyncpg://postgres:dev@127.0.0.1:5434/pyknora'; uv run pytest tests/api` → **80 passed in 110.73s**，exit=0
+  - `uv run pytest tests/api/test_api_admin.py` → **11 passed**；`uv run pytest tests/unit` → **76 passed**
+- 终验（同日收尾后，lead 独立复核；三条同时成立才算"跑通"）：
+  - 全量：`PYKNORA_DATABASE_URL=…5434/pyknora uv run pytest -q tests/unit tests/contract tests/api tests/integration` → **224 passed**，exit 0（unit 76 + contract 20 + api 80 + integration 48）。
+  - 门禁：`uv run python scripts/ci.py --stage all` → `PASS lint/ruff-check 0.1s`、`PASS lint/ruff-format 0.0s`、`PASS test/pytest 7.5s`，total 7.6s。
+  - 端到端：真起三进程（假 OpenAI 兼容服务 8011 + 真 API 8010 + 真 Worker）后 `uv run python scripts/smoke_e2e.py --base-url http://127.0.0.1:8010` → **14/14 通过**，exit 0（A1 健康、A2 注册/登录/错密码 401、A3 建库 201+同区重名 409 `CONFLICT`、A4 上传 202→job `succeeded`、A5 `char_start<char_end`、A6 检索命中、A7 `retrieval→token*→done`、A8 lineage 创建者与来源、A9 他人 KB 检索空/直读 404）。
+  - 口径注：本章上方的 **213 passed** 是 B0/B2 收尾时那次实跑（当时 `tests/api` 69 条），**224 是终验数**（任务 16 的 11 条 admin 用例落地后 `tests/api` 为 80 条）；两者时点不同，均保留原样。证据汇总见 `docs/plans/项目修复计划.md` §10。
+- 11 条用例锁住的四条硬断言：① 新 build active、旧 build retired、`active_index_version` 严格 +1；② 重建前后 `content` + `chunk_ordinal` 逐项相同（重建不重写正文）；③ 他人 workspace 的 kb → **404**（不是 403 / 202）；④ 连调两次每文档仍恰一个 active build，同 `idempotency_key` 重放不刷版本。另含 `mode=export` → 422 且不落记账行、空 KB → 202 且 `documents=0`。
+- 未实现：`mode=export`、`mode=replay` **明确返回 422 `INVALID_REQUEST`**，不静默降级。
+- 未验证：① 真实大 KB（数百文档）的耗时与连接占用；② reindex 下 `EmbeddingDimensionError` 路径未单独构造用例；③ 并发两个 admin 请求同 KB 的行为。
+- 已知风险 5 条：① `job_type='reindex'` 依赖 `ingestion_jobs.job_type` 无 CHECK 约束（将来加枚举需同步）；② 并发无锁，可能撞 `index_builds` 唯一约束表现为 500；③ 整库在一个事务里跑完才回 202，大库会顶网关超时；④ 只要求 `require_kb_access`（读权限即可触发全量重建，成本敏感）；⑤ 每次重建每文档会在 `ingestion_jobs`/`job_attempts` 留一行审计记录，无清理策略。
+- 测试口径偏差（记录以免误读）：`knowledge_bases.kb_id` 在库里是**全局主键**，「同一 kb_id 登记两区」只存在于 `FakeKbRepo`；跨区用例实际测的是「B 区自己的 kb_id + `workspace_id` 谓词」这条防线。
+- 下一步：任务 **17**（迁库保留索引信息 ↔ F9）；本轮未提交，由 lead 统一提交。
+
+## 本轮：B0 环境对账 + B2 主链路烟测（2026-10-29，lead）
+
+- 任务：**无新任务号**——按 `docs/plans/项目修复计划.md` §4 收尾 **B0 环境对账 + B2 主链路烟测**，并把进度表拉回代码现状。起始 HEAD `145fb87`（`fix(m2): 0005 主键改复合 + lineage 用例补成员关系 + 夹具单条 TRUNCATE`）；本轮改动**未提交**，开工时 `git status --short` 为 **6 M + 4 ??**。
+- 改动文件：
+  - 脚本：`scripts/seed_for_m3.py`（修 2 个 bug，+70/−19）、`scripts/smoke_e2e.py`（新增，端到端烟测）。
+  - 业务（3 个真 bug）：`src/pyknora/services/kb/service.py`、`src/pyknora/services/rag/answer.py`、`src/pyknora/schemas/chat.py`、`src/pyknora/api/v1/chat.py`。
+  - 测试（新增）：`tests/api/test_api_chat.py`（4 条）、`tests/unit/test_rag_answer.py`（3 条）。
+  - 流程/记录：`AGENTS.md`（4 处，理由见下）、`docs/plans/成员任务进度表.md`（v1.0）、`docs/IMPLEMENTATION_STATUS.md`（本节）、`docs/plans/项目修复计划.md`（F1/F3/F4/F6 打勾 + B0 新发现）。
+- B0 环境对账（真实输出）：
+  - `migrations/0001–0005` 五条全部 **rc=0**；`information_schema.tables`（public）计数 **17 = 16 表 + `v_active_chunks`**。
+  - `scripts/seed_for_m3.py` 修两个 bug 后才跑通（都不是新增需求，是脚本自身缺陷）：
+    1. 三张表（`documents`/`index_builds`/`chunks`）之间 **ORM 没有 relationship**，SQLAlchemy unit of work 只按 mapper 名排序，结果 `chunks` 先于 `documents` 插入（外键必然失败）→ 改为按依赖序逐层 `flush()`。
+    2. `migrations/0002` 给 `documents` 加了复合外键 `doc_kb_fk → knowledge_bases(workspace_id, kb_id)`，而 seed 的 `kb_id` 是 uuid5 算出来的、父行从未插入 → 新增 `ensure_knowledge_bases()` 先插父行。
+  - 修后输出：`seed ok: 30 chunks, workspaces=2, docs=6, builds=6, per_workspace=15, model=test/hashing, dim=512`。
+- B2 主链路烟测（真实输出）：
+  - 新增 `scripts/smoke_e2e.py`：只用 HTTP、不 import 应用、不碰数据库会话，按修复计划 §0 的 **A1–A9 共 14 项断言**逐条打印 OK/FAIL；真起 API + Worker（`hashing` embedding + 假 OpenAI 兼容服务）→ **14/14 通过，退出码 0**。
+  - 顺带修 3 个真 bug（都是烟测/用例逼出来的，不是猜的）：
+    1. `services/kb/service.py`：同名建库返回 `IDEMPOTENCY_CONFLICT`（该码的语义是"同一个幂等键换了 payload"），改为 `CONFLICT`——与 `core/errors.py:17-20` 对注册撞唯一键已定的口径一致。
+    2. `services/rag/answer.py`：生成器内抛 `AppError` 时 `StreamingResponse` 已经开始发，Starlette 撞 `"response already started"`，客户端只看到 `httpx.RemoteProtocolError`；改为把 `httpx.HTTPError` 降级成 SSE `error` 事件、再补 `usage` 收尾，`schemas/chat.py` 新增 `StreamErrorEvent`，`api/v1/chat.py` 处理 `error` 分支并补 `done`。
+    3. `api/v1/chat.py`：在构造 `StreamingResponse` **之前**校验 `settings.chat_api_key`，缺 key 直接 503，不再拖进流里。
+  - `uv run python scripts/ci.py --stage all` → `PASS lint/ruff-check 0.0s` / `PASS lint/ruff-format 0.0s` / `PASS test/pytest 9.1s`，exit 0。
+  - `uv run pytest -q tests/unit tests/contract tests/api tests/integration` → **213 passed**，exit 0。
+- 为什么改 `AGENTS.md`（§9 要求流程基线修改在当轮记录理由）——4 处都是"照旧文档会跑错"的事实纠偏，没有改任何流程条款：
+  1. §2 本地库：改为"容器名与端口以 `.env` 的 `PYKNORA_DB_CONTAINER`/`PYKNORA_DATABASE_URL` 为准"，并注明别人机器上常见 `5434` + `pyknora-pg-p0`（先 `docker ps` 再改 `.env`，别改代码默认值）。
+  2. §2 测试：`tests/contract/` 从"待建"改为"C1/C2 已建、C3 待建"，`tests/api` 注明"ASGI 打真 PG"。
+  3. §6 注意事项：新增"跑测试前先停本地 API 与 Worker"（共用同一个库，`TRUNCATE ... CASCADE` 与 Worker 的 `FOR UPDATE SKIP LOCKED` 相撞会 `deadlock detected`，表现为"随机某条用例 ERROR"）、`uv sync --extra dev` 与 cp936 乱码说明。
+  4. §8：坑 1 改写（`get_kb_repo` 未注入时会回落 `SqlKnowledgeBaseRepo(session)`，"直接 uvicorn 上传 503"已过期；`/health` 的 `kb_repo: null` 只是按请求构造）+ 新增坑 9（流式端点里不许抛 `AppError`，降级成 SSE `error` 再补 `done`；建流前能判的提前 503）。
+- 进度表口径修正（本轮唯一改状态的地方，详见 `docs/plans/成员任务进度表.md` §9 v1.0）：
+  - 任务 **7/13/14/8**：`未开始/0%` → `已完成/100%`。依据是代码与用例早已落地（`services/retrieval/`、`services/rag/`、`services/lineage/`、`api/v1/{query,chat,lineage}.py`，`tests/api/test_api_{query,chat,lineage}.py`、`tests/unit/test_{retrieval_search,rag_answer,lineage}.py`），进度表落后于代码（修复计划 F10），本轮**不是新增交付**；A6/A7/A8 由烟测实跑覆盖。
+  - 任务 **10**：曾一度由 `已完成/100%` 下调为 `进行中/50%`（理由：`migrations/0003` 已建 `roles`/`role_grants` 表、`models/tables.py` 有映射，但零读写代码）；**同日经用户裁决走方案 C，恢复 `已完成/100%`**——保留 `role_grants` 为**预留权限点表**（`RoleGrantRow` 映射保留），**不提供 grant/revoke 读写接口**，角色授权以 `workspace_memberships.role` 为准、不做部门模型。判据是计划书 `docs/plans/全员模块实现路径.md:627` 对该任务的完成标准「只建表与一个默认角色，不做多角色」，依据另见 `docs/adr/0006_Identity_Roles_RLS.md:15`。留痕：旧口径未删除，见进度表 §3 口径说明与 §9。
+  - 任务 **16/17** 保持 `未开始/0%`（F8/F9，P2，本轮未动）。
+- 未验证 / 未做：
+  - **`role_grants` 与 `RoleGrantRow` 是预留权限点表，不是已实现的细粒度权限**：本期**没有** `/role-grants` 之类任何 grant/revoke 读写接口（全仓零读写代码），接口层也没有按 `role_grants` 判权的路径；实际授权与可见性只按 `workspace_memberships.role`（owner/editor/viewer）判定，无部门模型、无多角色树、无 RLS 策略挂接。若后续要做细粒度权限，属于新增工作，不是"修 bug"。依据：`docs/adr/0006_Identity_Roles_RLS.md:15`、`docs/plans/全员模块实现路径.md:627`（方案 C，2026-10-29 用户裁决）。
+  - **`scripts/migrate.py` 的原生路径在 DSH 沙箱内仍未跑通**：脚本靠 Python 子进程调 docker CLI，沙箱下报 `permission denied ... npipe:////./pipe/dockerDesktopLinuxEngine`。本轮迁移是**绕开脚本**、用 pwsh 管道把 SQL 喂给 `psql` 逐条验证的（0001–0005 全 rc=0）——"脚本自身端到端"仍是未验证项；普通终端不受影响。
+  - 烟测用的是 `hashing` embedding + 假 OpenAI 兼容服务；真实 embedder（`BAAI/bge-small-zh-v1.5`）与真实 LLM 的端到端仍未跑（同前几轮）。
+  - 未跑 security 阶段（需联网）；未改 4 份 xlsx（进度表以 xlsx 为准，本轮只改汇总视图，**两处口径暂时不一致**）；五份 ADR 仍为"提议"。
+  - 未 `git add` / `commit` / `push`（由 lead 统一提交）。
+- 下一步：**B1 提交收尾**（`0005` 已随 `145fb87` 入库；剩 F2：`scripts/migrate.py` 的 `--container/--user/--db/--dry-run` 与容器存在性预检未做）→ **B3**（F7 剩余断言、F10 文档纠偏；`docs/项目结构说明.md` 另有工单）→ **B4** 功能补齐（F8 任务 16 `/admin/reindex`、F9 任务 17；F11 任务 10 已裁决为方案 C = 保留预留表、无需施工）。
 
 ## 本轮：合并远端 chat 分支 + 修 0005 主键口径（2026-10-29，成员2）
 
