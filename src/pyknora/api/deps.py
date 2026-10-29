@@ -10,20 +10,17 @@
 3. 解析失败一律 401 `UNAUTHENTICATED`，不区分"没带 token / token 过期 / 签名错"
    ——区分了就是在给攻击者做 oracle。
 
-**成员4 尚未交付**：这里的 `decode_token` 是一个**明确的占位实现**，只做 HS256
-验签 + `exp` 校验，没有用户表、没有成员关系表。等成员4 的 `/auth` 落地后，
-唯一需要改的是 `_load_membership` 这个函数——`Scope` 的构造方式不要动。
+**成员4 已交付**：`load_membership` 现在是真查询（见 `services/auth/membership.py`），
+不再是 `return True` 的占位。JWT 的签发/校验在 `services/auth/jwt.py`，这里只消费。
+
+一个容易踩的点：`get_scope` 依赖 `get_session` 有两个目的——查成员关系要连接；
+顺手把 `app.workspace_id` 写进事务给 RLS 兜底。FastAPI 的依赖缓存保证同一个请求里
+路由拿到的 session 与这里 `SET LOCAL` 用的 session 是**同一个对象**；如果改成
+在这里自己 `session_scope()`，就会是一条新连接、新事务，RLS 上下文立刻失效。
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
-import hashlib
-import hmac
-import json
-import os
-import time
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 from uuid import UUID
@@ -31,7 +28,7 @@ from uuid import UUID
 from fastapi import Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pyknora.core.errors import AppError, ErrorCode
+from pyknora.core.errors import AppError, ErrorCode, not_found
 from pyknora.core.scope import Scope
 from pyknora.core.settings import settings
 from pyknora.db.repos.knowledge_bases import SqlKnowledgeBaseRepo
@@ -42,67 +39,19 @@ from pyknora.db.repos.reads import (
     SqlIndexBuildRepo,
 )
 from pyknora.db.session import session_scope
-
-# 开发期默认密钥。生产必须由 PYKNORA_JWT_SECRET 覆盖。
-_DEFAULT_SECRET = "dev-only-insecure-secret"
-
-
-def _b64url_decode(segment: str) -> bytes:
-    """JWT 段是 base64url 且**去掉 padding**，必须补齐才能解。"""
-    padding = "=" * (-len(segment) % 4)
-    return base64.urlsafe_b64decode(segment + padding)
+from pyknora.services.auth.jwt import decode_token
+from pyknora.services.auth.membership import load_membership, set_workspace_context
 
 
-def _sign(message: bytes, secret: str) -> bytes:
-    return hmac.new(secret.encode(), message, hashlib.sha256).digest()
-
-
-def decode_token(token: str, secret: str | None = None) -> dict[str, Any]:
-    """最小 JWT (HS256) 校验。
-
-    只实现到"能被验证"为止：算法固定 HS256（**不接受 token 头部自报的 alg**，
-    否则 `alg: none` 就是一次伪造），验签用 `hmac.compare_digest` 防时序侧信道。
-    """
-    secret = secret or os.environ.get("PYKNORA_JWT_SECRET", _DEFAULT_SECRET)
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise AppError(ErrorCode.UNAUTHENTICATED, "malformed token")
-
-    header_seg, payload_seg, sig_seg = parts
-    try:
-        header = json.loads(_b64url_decode(header_seg))
-        payload = json.loads(_b64url_decode(payload_seg))
-        signature = _b64url_decode(sig_seg)
-    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
-        raise AppError(ErrorCode.UNAUTHENTICATED, "malformed token") from exc
-
-    # 关键：不看 header["alg"] 决定用什么算法，只拒绝非 HS256。
-    if header.get("alg") != "HS256":
-        raise AppError(ErrorCode.UNAUTHENTICATED, "unsupported alg")
-
-    expected = _sign(f"{header_seg}.{payload_seg}".encode(), secret)
-    if not hmac.compare_digest(expected, signature):
-        raise AppError(ErrorCode.UNAUTHENTICATED, "bad signature")
-
-    exp = payload.get("exp")
-    if exp is not None and float(exp) <= time.time():
-        raise AppError(ErrorCode.UNAUTHENTICATED, "token expired")
-
-    return payload
-
-
-async def _load_membership(principal_id: UUID, workspace_id: UUID) -> bool:
-    """该 principal 是否属于该 workspace。
-
-    成员4 交付前：占位为 True —— **这是本轮唯一的授权空洞，且已显式记录在
-    `docs/plans/成员2执行计划.md` §9 的未验证清单里**。它不掩盖问题：真实实现
-    落地时这个函数体换掉，调用它的三处路由一行都不用动。
-    """
-    return True
+async def get_session() -> AsyncIterator[AsyncSession]:
+    """每请求一个 session，正常退出提交、异常回滚。"""
+    async with session_scope() as session:
+        yield session
 
 
 async def get_scope(
     request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
     authorization: str | None = Header(default=None),
     x_workspace_id: str | None = Header(default=None, alias="X-Workspace-ID"),
 ) -> Scope:
@@ -128,20 +77,17 @@ async def get_scope(
     except ValueError as exc:
         raise AppError(ErrorCode.FORBIDDEN, "invalid workspace id") from exc
 
-    if not await _load_membership(principal_id, workspace_id):
+    if not await load_membership(session, principal_id, workspace_id):
         # 不属于该空间，与"空间不存在"同一响应，避免枚举。
         raise AppError(ErrorCode.FORBIDDEN, "not a member of this workspace")
+
+    # RLS 兜底开关：只在同一事务内有效，且仅对非 owner 角色有实际作用。
+    await set_workspace_context(session, workspace_id)
 
     scope = Scope(workspace_id=workspace_id, principal_id=principal_id)
     # 记到 request.state，异常处理器与日志要读，不必再解一次 token。
     request.state.scope = scope
     return scope
-
-
-async def get_session() -> AsyncIterator[AsyncSession]:
-    """每请求一个 session，正常退出提交、异常回滚。"""
-    async with session_scope() as session:
-        yield session
 
 
 def get_document_repo(
@@ -183,6 +129,30 @@ def get_kb_repo(
     if state.extra.get("kb_repo_configured"):
         return state.kb_repo
     return SqlKnowledgeBaseRepo(session)
+
+
+async def require_kb_access(
+    kb_id: UUID,
+    scope: Annotated[Scope, Depends(get_scope)],
+    kb_repo: Annotated[Any, Depends(get_kb_repo)],
+) -> Any:
+    """知识库访问校验（任务15）：他人的 kb_id 返回 **404 而不是 403**。
+
+    刻意不自己写 `SELECT knowledge_bases`：判定权收在拥有数据的成员1 模块里，
+    通过 C1 契约 `kb_repo.get(scope, kb_id)` 取一次。这样即使 KB 的可见性规则
+    将来变复杂（公开库、共享链接），改的也只有成员1 的那一处，
+    不会出现"两个模块各有一套可见性判断、结论不一致"的分家局面。
+
+    返回值直接是 KB 对象，路由可以省掉第二次查询：
+
+        kb: Annotated[Any, Depends(require_kb_access)]
+
+    404 与"不存在"同码，不给攻击者用状态码探测 kb_id 是否存在。
+    """
+    kb = await kb_repo.get(scope, kb_id)
+    if kb is None:
+        raise not_found("knowledge base")
+    return kb
 
 
 def get_max_upload_bytes() -> int:
