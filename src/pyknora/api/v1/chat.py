@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Annotated
 from uuid import UUID
@@ -35,6 +36,8 @@ from pyknora.services.retrieval.search import search_hybrid
 
 router = APIRouter(tags=["chat"], dependencies=[Depends(require_permission(CHAT_RUN))])
 
+logger = logging.getLogger(__name__)
+
 
 def _sse(event: str, payload: object) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -62,9 +65,14 @@ async def chat(
     # 这里是把错误提前成可读的 503。
     if not settings.chat_api_key:
         raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "chat model is not configured")
-    chunks = await search_hybrid(
+    outcome = await search_hybrid(
         scope, kb_id, body.query, embedder=state.embedder, repo=repo, top_k=body.top_k
     )
+    chunks = outcome.hits
+    if outcome.degraded:
+        # 检索降级后仍会作答，但这必须让客户端知道：只靠一路召回时答案的
+        # 覆盖面明显更窄，用户据此下结论前应当看得见（见 schemas/query.py）。
+        logger.warning("chat retrieval degraded: %s", outcome.degraded)
     citations = [
         Citation(
             chunk_id=chunk.chunk_id,

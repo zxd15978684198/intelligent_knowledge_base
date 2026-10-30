@@ -18,6 +18,7 @@ import pytest
 from pyknora.api.v1 import chat as chat_routes
 from pyknora.core.settings import settings
 from pyknora.schemas.query import RetrievedChunk
+from pyknora.services.retrieval.search import HybridSearchResult
 from tests.api.tokens import KB_ID, bearer
 
 CHAT_URL = f"/api/v1/knowledge-bases/{KB_ID}/chat"
@@ -64,8 +65,8 @@ def fake_retrieval(monkeypatch: pytest.MonkeyPatch) -> list[RetrievedChunk]:
     """把检索替换成固定结果：本文件要测的是 SSE 组帧，不是检索算法。"""
     chunks = [_chunk()]
 
-    async def _search(*args: Any, **kwargs: Any) -> list[RetrievedChunk]:
-        return chunks
+    async def _search(*args: Any, **kwargs: Any) -> HybridSearchResult:
+        return HybridSearchResult(hits=chunks)
 
     monkeypatch.setattr(chat_routes, "search_hybrid", _search)
     return chunks

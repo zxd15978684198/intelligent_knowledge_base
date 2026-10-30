@@ -35,9 +35,14 @@ class FakeSearchRepo:
         self,
         results: Sequence[ScoredChunk] = (),
         keyword_results: Sequence[ActiveChunk] = (),
+        *,
+        vector_error: Exception | None = None,
+        keyword_error: Exception | None = None,
     ) -> None:
         self.results = results
         self.keyword_results = keyword_results
+        self.vector_error = vector_error
+        self.keyword_error = keyword_error
         self.received: tuple[Scope, UUID, list[float], int] | None = None
         self.keyword_received: tuple[Scope, UUID, str, int] | None = None
 
@@ -51,12 +56,16 @@ class FakeSearchRepo:
         document_id: UUID | None = None,
     ) -> Sequence[ScoredChunk]:
         assert document_id is None
+        if self.vector_error is not None:
+            raise self.vector_error
         self.received = (scope, kb_id, list(query_vector), limit)
         return self.results
 
     async def search_keyword(
         self, scope: Scope, kb_id: UUID, query_text: str, *, limit: int = 10
     ) -> Sequence[ActiveChunk]:
+        if self.keyword_error is not None:
+            raise self.keyword_error
         self.keyword_received = (scope, kb_id, query_text, limit)
         return self.keyword_results
 
@@ -127,7 +136,7 @@ async def test_search_hybrid_queries_both_channels_with_same_scope(scope: Scope)
     embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
     repo = FakeSearchRepo()
 
-    hits = await search_hybrid(
+    outcome = await search_hybrid(
         scope,
         KB_ID,
         "  关键词查询  ",
@@ -137,7 +146,8 @@ async def test_search_hybrid_queries_both_channels_with_same_scope(scope: Scope)
         candidate_k=8,
     )
 
-    assert hits == []
+    assert outcome.hits == []
+    assert outcome.degraded == {}
     assert embedder.received_texts == ["关键词查询"]
     assert repo.received == (scope, KB_ID, [0.1, 0.2, 0.3], 8)
     assert repo.keyword_received == (scope, KB_ID, "关键词查询", 8)
@@ -226,7 +236,7 @@ async def test_search_hybrid_routes_keyword_to_second_repo(scope: Scope) -> None
         keyword_results=[_active_chunk("22222222-2222-2222-2222-222222222222", "关键词命中")]
     )
 
-    fused = await search_hybrid(
+    outcome = await search_hybrid(
         scope,
         KB_ID,
         "开放时间",
@@ -239,7 +249,8 @@ async def test_search_hybrid_routes_keyword_to_second_repo(scope: Scope) -> None
     assert vector_repo.received is not None
     assert vector_repo.keyword_received is None, "关键词查询不该落到向量仓库上"
     assert keyword_repo.keyword_received is not None
-    assert {hit.chunk_id for hit in fused} == {
+    assert outcome.degraded == {}
+    assert {hit.chunk_id for hit in outcome.hits} == {
         UUID("11111111-1111-1111-1111-111111111111"),
         UUID("22222222-2222-2222-2222-222222222222"),
     }
@@ -281,3 +292,66 @@ async def test_hybrid_rejects_over_max_candidate_k(scope: Scope) -> None:
     assert exc.value.code == ErrorCode.INVALID_REQUEST
     assert "candidate_k" in str(exc.value.message)
     assert embedder.received_texts is None
+
+
+async def test_hybrid_degrades_to_keyword_when_vector_branch_fails(scope: Scope) -> None:
+    """向量路挂了（如 embedding 服务不可用）不该整请求 500：关键词路照样能答。
+
+    但降级必须**可见**——`degraded` 里要写明哪一路挂了、错误码是什么。
+    """
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo(
+        keyword_results=[_active_chunk("22222222-2222-2222-2222-222222222222", "关键词命中")],
+        vector_error=AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "embedding down"),
+    )
+
+    outcome = await search_hybrid(scope, KB_ID, "开放时间", embedder=embedder, repo=repo, top_k=2)
+
+    assert [hit.chunk_id for hit in outcome.hits] == [UUID("22222222-2222-2222-2222-222222222222")]
+    assert outcome.degraded == {"vector": "DEPENDENCY_UNAVAILABLE"}
+
+
+async def test_hybrid_degrades_to_vector_when_keyword_branch_fails(scope: Scope) -> None:
+    """关键词路挂了（如迁移没跑、函数不存在）同样只降级，并报出分支与错误类型。"""
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo(
+        results=[_scored_chunk("11111111-1111-1111-1111-111111111111", "向量命中")],
+        keyword_error=RuntimeError("pyknora_cjk_tsquery does not exist"),
+    )
+
+    outcome = await search_hybrid(scope, KB_ID, "开放时间", embedder=embedder, repo=repo, top_k=2)
+
+    assert [hit.chunk_id for hit in outcome.hits] == [UUID("11111111-1111-1111-1111-111111111111")]
+    assert outcome.degraded == {"keyword": "RuntimeError"}
+
+
+async def test_hybrid_raises_when_both_branches_fail(scope: Scope) -> None:
+    """两路都挂时不能返回空列表：那等于谎称「库里没有匹配」。"""
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo(
+        vector_error=AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "embedding down"),
+        keyword_error=AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "keyword down"),
+    )
+
+    with pytest.raises(AppError) as exc:
+        await search_hybrid(scope, KB_ID, "开放时间", embedder=embedder, repo=repo, top_k=2)
+
+    assert exc.value.code == ErrorCode.DEPENDENCY_UNAVAILABLE
+    assert exc.value.message == "embedding down"
+
+
+async def test_hybrid_does_not_degrade_on_invalid_request(scope: Scope) -> None:
+    """`INVALID_REQUEST` 不降级：请求本身不合法时，另一路返回什么都是错的。
+
+    降级会把它伪装成「搜得少」，调用方永远修不好参数。
+    """
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo(
+        keyword_results=[_active_chunk("22222222-2222-2222-2222-222222222222", "关键词命中")],
+        vector_error=AppError(ErrorCode.INVALID_REQUEST, "bad request"),
+    )
+
+    with pytest.raises(AppError) as exc:
+        await search_hybrid(scope, KB_ID, "开放时间", embedder=embedder, repo=repo, top_k=2)
+
+    assert exc.value.code == ErrorCode.INVALID_REQUEST

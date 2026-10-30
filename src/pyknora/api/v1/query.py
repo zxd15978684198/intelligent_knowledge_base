@@ -41,7 +41,7 @@ async def query_knowledge_base(
     if embedder is None:
         raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "embedding provider not configured")
 
-    results = await search_hybrid(
+    outcome = await search_hybrid(
         scope,
         kb_id,
         body.query,
@@ -50,4 +50,6 @@ async def query_knowledge_base(
         keyword_repo=keyword_repo,
         top_k=body.top_k,
     )
-    return QueryResponse(query=body.query, results=list(results))
+    # `degraded` 必须原样透出：单路失败时结果依然返回，但客户端要能分辨
+    # 「库里只有这些」和「一路挂了只剩一路」（见 schemas/query.py 的字段说明）。
+    return QueryResponse(query=body.query, results=outcome.hits, degraded=outcome.degraded)

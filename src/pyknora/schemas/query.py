@@ -78,3 +78,12 @@ class QueryResponse(BaseModel):
 
     query: str
     results: list[RetrievedChunk]
+    degraded: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "降级实情：空对象表示两路（向量 / 关键词）都成功。"
+            "非空时键是失败的分支名、值是该分支的错误码。"
+            "**必须透出给调用方**——本项目踩过「FTS 一路静默恒空」的坑："
+            "少了这个字段，客户端无法区分「库里只有这些」和「一路挂了只剩一路」。"
+        ),
+    )
