@@ -38,8 +38,8 @@ from pyknora.db.repos.principals import SqlIdentityRepo
 from pyknora.services.auth.membership import load_permissions
 from pyknora.services.auth.permissions import (
     OWNER_ROLE,
+    PLATFORM_MANAGE_ROLES,
     WORKSPACE_MANAGE_MEMBERS,
-    WORKSPACE_MANAGE_ROLES,
     is_known_permission,
 )
 
@@ -229,7 +229,7 @@ async def list_role_catalog(
     "/workspaces/{ws_id}/roles/{role_key}/permissions",
     response_model=RolePermissionView,
     summary="整组替换某个角色的权限点",
-    dependencies=[Depends(require_permission(WORKSPACE_MANAGE_ROLES))],
+    dependencies=[Depends(require_permission(PLATFORM_MANAGE_ROLES))],
 )
 async def replace_role_permissions(
     ws_id: UUID,
@@ -239,6 +239,10 @@ async def replace_role_permissions(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> RolePermissionView:
     """**整组替换**，而不是 grant/revoke 两条路径。
+
+    **平台级**：`roles` / `role_grants` 是全局表（没有 workspace_id），一个租户改一次
+    所有租户的判权都变。所以闸门是 `PLATFORM_MANAGE_ROLES`，而它没有任何角色持有
+    ——任何租户调这个接口都是 403。`ws_id` 仍保留在路径上只为不改调用方形状。
 
     理由与 `update_member_role` 一致：一组权限的终态是唯一的，用"替换"表达就不会出现
     "发了两条 revoke、只成功一条"的中间态，调用方也不必先读后写。表上仍是逐行增删。
@@ -286,7 +290,7 @@ class RoleCreate(BaseModel):
     response_model=RolePermissionView,
     status_code=status.HTTP_201_CREATED,
     summary="新建角色（角色集合是数据，不是 DDL）",
-    dependencies=[Depends(require_permission(WORKSPACE_MANAGE_ROLES))],
+    dependencies=[Depends(require_permission(PLATFORM_MANAGE_ROLES))],
 )
 async def create_role(
     ws_id: UUID,
@@ -295,6 +299,9 @@ async def create_role(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> RolePermissionView:
     """建角色 = 往 `roles` 插一行 + 往 `role_grants` 插若干行，**不改代码、不加迁移**。
+
+    **平台级**：`roles` 是全局表，新建的角色对所有租户可见，所以闸门是
+    `PLATFORM_MANAGE_ROLES`（无角色持有 → 租户侧恒 403）。
 
     这是这次改造的目的本身：`0008_roles_are_data.sql` 给成员表加了
     `role → roles(role_key)` 外键，所以新角色一旦建成，立刻可以被成员使用；
@@ -344,7 +351,7 @@ async def create_role(
     "/workspaces/{ws_id}/roles/{role_key}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="删除角色（仍有成员在用时拒绝）",
-    dependencies=[Depends(require_permission(WORKSPACE_MANAGE_ROLES))],
+    dependencies=[Depends(require_permission(PLATFORM_MANAGE_ROLES))],
 )
 async def delete_role(
     ws_id: UUID,
@@ -353,6 +360,9 @@ async def delete_role(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
     """删角色。`role_grants` 随角色级联删除，但成员表是 `ON DELETE RESTRICT`：
+
+    **平台级**：删掉的是全局角色，所有租户的同名角色一起消失（闸门
+    `PLATFORM_MANAGE_ROLES`，无角色持有 → 租户侧恒 403）。
 
     还有人在用这个角色时删不掉——先给这些人换角色再删。让数据库拦，比在应用层
     "先 count 再删"可靠：中间那一下仍可能有人被加进这个角色。

@@ -43,6 +43,20 @@ INDEX_REBUILD: Final = "index.rebuild"
 WORKSPACE_MANAGE_MEMBERS: Final = "workspace.manage_members"
 WORKSPACE_MANAGE_ROLES: Final = "workspace.manage_roles"
 
+# ---------------------------------------------------------------- 平台面
+# 角色目录（`roles` / `role_grants`）是**全局表**：schema 里没有 workspace_id。
+# 任何租户的 owner 改一次，所有租户的判权结果都跟着变——既能给自己扩权，也能把
+# 别的租户的能力清零。所以"写角色目录"不是工作区管理动作，而是平台级动作，必须
+# 和租户权限分开成一个独立命名空间。
+#
+# 当前**没有任何角色持有它**（`SEED` 里没有，见 `tests/unit/test_permissions.py`
+# 的 `test_platform_permissions_are_held_by_nobody`）：这三条写端点就此变成
+# "只有平台运维直接用 SQL 改库"。将来真要做平台管理后台，再单独发一个平台角色，
+# 不要往 workspace 角色矩阵里塞——那正是这次要关掉的口子。
+PLATFORM_MANAGE_ROLES: Final = "platform.manage_roles"
+
+PLATFORM_PERMISSIONS: Final[frozenset[str]] = frozenset({PLATFORM_MANAGE_ROLES})
+
 ALL_PERMISSIONS: Final[frozenset[str]] = frozenset(
     {
         KNOWLEDGE_BASE_READ,
@@ -106,5 +120,9 @@ OWNER_ROLE: Final = "owner"
 
 
 def is_known_permission(permission: str) -> bool:
-    """该字符串是不是合法权限点。给管理端点做前置校验用（非法值 422 而不是静默写入）。"""
-    return permission in ALL_PERMISSIONS
+    """该字符串是不是已声明的权限点（工作区面 `ALL_PERMISSIONS` + 平台面）。
+
+    给管理端点做前置校验用（非法值 422 而不是静默写入）。**"已声明"不等于
+    "可被租户授予"**：平台面权限没有任何角色持有，写路径本身就用它当闸。
+    """
+    return permission in ALL_PERMISSIONS or permission in PLATFORM_PERMISSIONS
