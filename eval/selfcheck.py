@@ -171,10 +171,14 @@ TEST_TARGETS = (
     ),
     TestTarget(
         logical="tests/test_citations.py",
-        mapped=(),
+        mapped=("tests/unit/test_citations.py",),
         basis=(
-            "计划 §9:643「✔ 新建」、§6.3 要求 CIT-01/02/03；本仓没有 test_citations.py，"
-            "docs/Day03/06 §6 已登记「CIT-02 无用例、CIT-03 端到端用例未写」"
+            "计划 §9:643「✔ 新建」、§6.3 要求 CIT-01/02/03；本轮已落 tests/unit/test_citations.py"
+            "（7 例：CIT-01 序号层 + CIT-02 不塞入 + CIT-03 数据面 共 4 例通过，"
+            "chunk_id 级校验 / 引用二次授权 / 版本失效判定 共 3 例"
+            " xfail(strict=True) 标为待实现）。"
+            "**该文件的 3 个 xfail 是真实实现缺口**，已登记在 docs/IMPLEMENTATION_STATUS.md"
+            "「本轮：Day03 DAG」的未验证第 ⑦ 条与 docs/Day03/06 §6"
         ),
         partial=(
             "tests/unit/test_eval_harness.py（audit_citations 引用核验）",
