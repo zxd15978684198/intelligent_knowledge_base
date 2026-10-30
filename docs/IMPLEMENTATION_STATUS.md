@@ -2,6 +2,49 @@
 
 更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：审查三条缺陷收口（经用户「要，一并处理审查」授权）——`services/queue/jobs.py` 的 `claim()` 增加 `job_types` 过滤并由 `workers/ingest_worker.py` 显式声明 `SUPPORTED_JOB_TYPES=("ingest","purge")`（原先任何 Worker 都可能领走不认识的类型、判 unknown 后作业直接丢）、`services/auth/jwt.py` 强制 `exp`（原先缺 `exp` 即放行 = 永久令牌，fail-open）、`api/v1/documents.py` 抽出 `_read_bounded()` 按 1MiB 分块读到上限即断（原先整包读进内存才判断 50MB），新增 5 条用例，全量 **308 passed / exit 0**，见下方「本轮：审查三条缺陷收口」**；紧接其后是检索两路真并行（成员3 域，经用户「5要并行」授权）——`services/retrieval/search.py` 的 `search_hybrid` 原先 docstring 写「并行」实则两串行 `await`，改为 `asyncio.gather` 两路；因 `AsyncSession` 不支持并发语句，新增独立 session 依赖 `get_keyword_search_repo()`，`query.py`/`chat.py` 注入透传，另加 1 条「关键词必须走第二个仓库」的单元断言，全量 **303 passed / exit 0**，见下方「本轮：检索两路真并行」**；紧接其后是成员管理与权限自省补全（成员4 域，经用户「你写一份成员管理修复计划，然后执行」授权代做）——补上 6 个端点（`GET`/`POST /workspaces/{ws}/members`、`DELETE .../members/{id}`、`PUT /workspaces/{ws}/owner`、`GET .../members/{id}/permissions`、`GET /auth/me`）、2 个 repo 方法（`delete_membership` / `transfer_ownership`）、22 个新用例（其中 5 个是"新端点忘挂权限"的结构守卫），全量 **297 passed / exit 0**，见下方「本轮：成员管理与权限自省补全」**；再往前是中文全文检索从「查不出」修到「能查出」（成员2 域，经用户「现在先不做评测集合，把中文 FTS 修好或砍掉」授权）——`tsvector` 改为 `to_tsvector('simple', pyknora_cjk_bigram(content))`、查询侧改用 `pyknora_cjk_tsquery()` 并做 AND→OR 两级降级、新增 `ChunkRepo.search_keyword` 原语，新增迁移 `migrations/0007_cjk_bigram_fts.sql`（零新扩展、零新镜像），见下方「本轮：中文 FTS 修好」**；紧接其后是「角色是数据，不是 DDL 枚举」（成员4 域，经用户「补」授权代做）——摘掉 `workspace_memberships.role` 的列举式 `CHECK`，换成格式约束 + 指向 `roles(role_key)` 的外键，新增 `migrations/0008_roles_are_data.sql`、角色 CRUD 两个端点、`RoleCatalog` 改由 `roles` 表驱动，见下方「本轮：角色是数据，不是 DDL 枚举」**；再往前是 `role_grants` 从「预留」变「已接入」（成员4 域，经用户「好吧你落地role_grants」授权代做）——运行期判权链改为 `workspace_memberships.role` → `roles` → `role_grants`，新增 15 个权限点、6 个 `/workspaces/{ws}/roles|permissions` 端点、`api/deps.py` 权限依赖工厂，全量 **263 passed**，见下方「本轮：`role_grants` 落地」**；再往前是 P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
 
+## 本轮：RLS 生效性验证 + 作业表索引（2026-10-30，经用户「先做 a b」授权）
+
+- 任务：缺陷审查遗留的两条基础设施问题——① RLS 从未在非特权角色下验证过；②
+  `ingestion_jobs (workspace_id, document_id)` 是外键首列的热路径却无索引。
+- **先说一处自我纠正**：我先前判断"RLS 从未在非特权角色下验证过"，**这是错的**。
+  `tests/integration/test_rls.py`（成员4，提交 `44f9af3`，6 条用例）早已用独立登录角色
+  `pyknora_app`（非 owner / 非 superuser / 非 bypassrls，密码见 `0003_identity_acl.sql`）
+  验证了跨租户隔离、未设 `app.workspace_id` 时 fail-closed、越界写入被拒、以及视图
+  `v_active_chunks` 的 `security_invoker`。我按 `pg_class.relrowsecurity` 和 conftest 的
+  superuser 连接做判断，没查现有测试文件就下了结论——属于核查不充分，本轮实测这 6 条
+  **全绿**（`6 passed`）。因此原计划新增的 `test_rls_effective.py` 是重复造轮子，**不建**。
+- 真实缺口只有一个：`ingestion_jobs` 上有复合外键
+  `ingestion_jobs_workspace_id_document_id_fkey (workspace_id, document_id)`，但该列序上
+  没有索引（PG 不为 referencing 端自动建索引）。代价落在"删文档时的级联检查"和
+  "这份文档有哪些作业"两条路径上。
+- 改动：`migrations/0009_ingestion_jobs_doc_idx.sql`（新建）——补
+  `(workspace_id, document_id, created_at DESC)` 复合索引，`IF NOT EXISTS` 幂等，列序对齐外键；
+  尾部 `created_at DESC` 让"最新一次作业"省一次 sort。不用 `CONCURRENTLY`：本仓库迁移是
+  单事务逐文件执行，CONCURRENTLY 不允许出现在事务块内。
+- 已执行（真实输出）：`psql -f migrations/0009_...` → `CREATE INDEX` / `COMMENT`；
+  `pg_indexes` 查询 → `ingestion_jobs_ws_doc_idx | CREATE INDEX ... (workspace_id, document_id, created_at DESC)`；
+  `pytest -q tests/integration/test_rls.py` → **6 passed**；`ruff check src tests scripts`
+  → `All checks passed!`。
+- 未验证：索引**收益**未做 EXPLAIN 前后对比（开发库数据量太小，planner 不会选它，只验证了存在性；
+  真实收益需在有量级的库上跑）；`0009` 无回滚脚本（I4 迁移只追加）。
+- 下一步：c（RLS 覆盖守卫测试：新增业务表漏挂 RLS 时自动红）用户明确暂不做；
+  `workspaces` / `workspace_memberships` 两张身份表仍不开 RLS（登录链路必须先读它们，属 ADR-0006 口径）。
+
+## 本轮：citation 校验——citations 必须是模型真读过的那些 + 越界引用可见（2026-10-30，成员3 域）
+
+- 任务：审查清单第 2 条。原问题一句话概括：**`retrieval` 事件里的 `citations` 装的是"检索结果"，不是"答案的依据"**，且没人检查模型正文里的 `[资料 N]` 是否有效。
+- 两个具体缺陷（都可复现，不是理论风险）：
+  1. **幻影引用**：`ChatRequest.top_k` 上限 20，而上下文只取 `chat_max_context_chunks=6`；`api/v1/chat.py` 却拿**全部** `chunks` 去建 citations。传 `top_k=20` 就有 14 条 chunk 没进过模型的 prompt，却作为"答案引用"发给客户端。
+  2. **零校验**：system prompt 要求模型用 `[资料 N]` 标注依据，但代码里没有任何地方解析这些标注。模型写 `[资料 9]`（上下文只有 6 条）或 `[资料 0]`，服务端照单全收，客户端看到的是一段"有出处"的答案。
+- 改动：
+  - `services/rag/answer.py`：新增三个纯函数——`select_context_chunks()`（上下文上限的唯一取值点）、`cited_indices()`（正则 `\[资料\s*(\d+)\]`）、`invalid_cited_indices()`（越界序号）。`stream_answer` 内部改为调用 `select_context_chunks`，不再自己写 `chunks[:N]`。
+  - `api/v1/chat.py`：`context_chunks = select_context_chunks(...)`，**citations 与 prompt 用同一个切片**；新增 `_done()`，在发出 `done` 前统计越界引用并 `logger.warning`。
+  - `schemas/chat.py`：`DoneEvent` 新增 `invalid_citations: int = 0`（默认 0，向后兼容）。
+- **边界（有意不做的）**：不改正文。token 是流式逐块发出的，回头改会让客户端看到的内容与"模型实际说了什么"不一致，排查时无法复原；越界只做"计数 + 日志 + 事件字段"。也不按 `chunk_id` 校验——模型看不到 UUID，没法可靠复述，真正的落点只能是序号。
+- 新增用例 5 条：`test_select_context_chunks_caps_at_setting`、`test_cited_indices_parses_markers`、`test_invalid_cited_indices_flags_out_of_range`（单测）；`test_chat_citations_match_what_the_model_actually_read`（检索 8 条 → citations 6 条、且 `stream_answer` 收到 6 条）、`test_chat_reports_citations_outside_context`（`[资料 9]` → `done.invalid_citations == 1`）。两条 API 用例在旧代码上必红（旧代码发 8 条 citations、且 `done` 无该字段）。
+- 已执行：`ruff check` → All checks passed；`ruff format --check` → 119 files already formatted；定向两文件 → 12 passed；全量 → 见下。
+- 未验证：真实模型的引用合规率（没有模型 key，测试用脚本桩，只能证明"解析与上报"这条链路对，不能证明 `gpt-4o-mini` 实际会不会越界）。
+
 ## 本轮：检索单路降级 + 降级可见（2026-10-30，经小组长授权，成员3 域）
 
 - 任务：审查清单第 1 条——`search_hybrid` 原先"两路并行但零容错"：`asyncio.gather` 任一分支抛异常整请求 500，而另一路明明能答。起始 `HEAD=3557751`。
