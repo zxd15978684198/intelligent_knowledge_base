@@ -49,7 +49,9 @@ class FakeSearchRepo:
         document_id: UUID | None = None,
     ) -> Sequence[ScoredChunk]:
         assert kb_id == KB_ID
-        assert limit == 3
+        # 请求 top_k=3，但两路各取 `top_k * 2 = 6` 条候选再融合（候选池必须比返回宽，
+        # 否则 RRF 只能重排它看到的 top_k 条，混合检索等于白做）。
+        assert limit == 6
         assert document_id is None
         self.scope = scope
         self.query_vector = list(query_vector)
@@ -59,7 +61,7 @@ class FakeSearchRepo:
         self, scope: Scope, kb_id: UUID, query_text: str, *, limit: int = 10
     ) -> Sequence[ActiveChunk]:
         assert kb_id == KB_ID
-        assert limit == 3
+        assert limit == 6
         self.scope = scope
         self.query_text = query_text
         return []
@@ -191,8 +193,8 @@ def test_query_accepts_top_k_at_exactly_max() -> None:
     """边界值本身要放行（不放行就等于上限只有 49）。
 
     这里只验 schema：用 `QueryRequest` 直接构造，不经过检索链路——
-    本文件的 `FakeSearchRepo.search_similar` 把 `limit == 3` 写死了，
-    走 HTTP 会让"上限放行"这件事被夹具的硬期望干扰成假失败。
+    本文件的 `FakeSearchRepo` 把候选条数写死成 6（`top_k * 2`），走 HTTP 时
+    `top_k=50` 会变成候选 50（封顶）并让"上限放行"这件事被夹具的硬期望干扰成假失败。
     """
     assert QueryRequest(query="问题", top_k=MAX_TOP_K).top_k == MAX_TOP_K
 

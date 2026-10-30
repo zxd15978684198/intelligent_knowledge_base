@@ -294,6 +294,48 @@ async def test_hybrid_rejects_over_max_candidate_k(scope: Scope) -> None:
     assert embedder.received_texts is None
 
 
+async def test_hybrid_default_candidate_pool_is_wider_than_top_k(scope: Scope) -> None:
+    """默认候选池必须比最终返回更宽，否则 RRF 基本白做。
+
+    两路各只取 `top_k` 条时，某一路排第 `top_k + 1`、另一路没命中的片段永远浮不上来，
+    而"两路互补"正是混合检索相对单路唯一的价值。这里钉住默认倍数（top_k * 2）。
+    """
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    await search_hybrid(scope, KB_ID, "问题", embedder=embedder, repo=repo, top_k=3)
+
+    assert repo.received == (scope, KB_ID, [0.1, 0.2, 0.3], 6)
+    assert repo.keyword_received == (scope, KB_ID, "问题", 6)
+
+
+async def test_hybrid_default_candidate_pool_never_exceeds_max_top_k(scope: Scope) -> None:
+    """默认放大不能突破资源边界：`top_k = MAX_TOP_K` 时仍取 `MAX_TOP_K`，不是 100。"""
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    await search_hybrid(scope, KB_ID, "问题", embedder=embedder, repo=repo, top_k=MAX_TOP_K)
+
+    assert repo.received is not None
+    assert repo.received[3] == MAX_TOP_K
+
+
+async def test_hybrid_rejects_candidate_k_below_top_k(scope: Scope) -> None:
+    """候选池比返回数还窄属于自相矛盾，要在调模型和打库之前拒掉。"""
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    with pytest.raises(AppError) as exc:
+        await search_hybrid(
+            scope, KB_ID, "问题", embedder=embedder, repo=repo, top_k=10, candidate_k=5
+        )
+
+    assert exc.value.code == ErrorCode.INVALID_REQUEST
+    assert exc.value.details == {"candidate_k": 5, "top_k": 10}
+    assert embedder.received_texts is None
+    assert repo.received is None
+
+
 async def test_hybrid_degrades_to_keyword_when_vector_branch_fails(scope: Scope) -> None:
     """向量路挂了（如 embedding 服务不可用）不该整请求 500：关键词路照样能答。
 

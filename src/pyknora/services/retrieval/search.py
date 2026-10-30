@@ -54,6 +54,30 @@ def _require_bounded_limit(value: int, *, name: str) -> None:
         )
 
 
+def _candidate_limit(*, top_k: int, candidate_k: int | None) -> int:
+    """算出两路各自该取多少候选。
+
+    默认取 `top_k * 2`（封顶 `MAX_TOP_K`）而不是 `top_k`：**RRF 只能重排它看到的候选**。
+    两路各只取 `top_k` 条时，融合池一共就 `2 * top_k` 条，而某一路排在第 `top_k + 1`、
+    另一路完全没命中的片段永远浮不上来——那正是混合检索相对单路唯一的价值所在。
+    也就是说 `candidate_k == top_k` 时融合不是"更保守"，而是**基本白做**：它只是把
+    两份长度相同的列表交错一下。
+
+    这是结构约束（候选池必须宽于返回数），不是调参：倍数取 2 是为了让两条排序各
+    多出一倍余量，同时不让 SQL 扫描翻倍再多。真正的取值要靠评测集定，本轮没有评测集。
+    """
+    if candidate_k is None:
+        return min(top_k * 2, MAX_TOP_K)
+    _require_bounded_limit(candidate_k, name="candidate_k")
+    if candidate_k < top_k:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "candidate_k must not be less than top_k",
+            details={"candidate_k": candidate_k, "top_k": top_k},
+        )
+    return candidate_k
+
+
 async def search_vector(
     scope: Scope,
     kb_id: UUID,
@@ -115,6 +139,9 @@ async def search_hybrid(
     顺序执行，结果与并行版一致——单元测试和脚本走这条，不用为了测一个函数的
     融合逻辑去开真连接。
 
+    `candidate_k` 是**两路各自**取多少候选（默认 `top_k * 2`，封顶 `MAX_TOP_K`）；
+    它必须不小于 `top_k`，否则候选池比返回值还窄，融合没有意义。见 `_candidate_limit`。
+
     降级规则（本函数是唯一判定处）：
 
     - 单路抛出 `INVALID_REQUEST` → **不降级**，原样上抛。请求本身不合法时，
@@ -128,8 +155,7 @@ async def search_hybrid(
         raise AppError(ErrorCode.INVALID_REQUEST, "query must not be empty")
     _require_bounded_limit(top_k, name="top_k")
 
-    candidate_limit = candidate_k if candidate_k is not None else top_k
-    _require_bounded_limit(candidate_limit, name="candidate_k")
+    candidate_limit = _candidate_limit(top_k=top_k, candidate_k=candidate_k)
     if rrf_k < 1:
         raise AppError(ErrorCode.INVALID_REQUEST, "rrf_k must be greater than zero")
 
