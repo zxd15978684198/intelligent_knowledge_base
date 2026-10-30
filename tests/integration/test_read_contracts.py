@@ -5,7 +5,8 @@
 1. `get_chunks` 只认**当前活动** build 的切片——retired 的 id 必须缺席；
 2. `list_chunks_by_build` 读得到 retired build（I1 的受控例外）；
 3. 历史读取仍然受**工作区隔离**与**文档删除**约束；
-4. `list_builds` 倒序、`get_version` 跨区返回 None。
+4. `list_builds` 倒序、`get_version` 跨区返回 None；
+5. **知识库软删**同样使切片整体不可见（视图与受控例外两条路都要，S1 的回归）。
 """
 
 from __future__ import annotations
@@ -195,6 +196,33 @@ async def test_list_chunks_by_build_hides_deleted_document(session, scope_a, kb_
 
     assert await repo.list_chunks_by_build(scope_a, ids["old_build"]) == []
     assert await repo.list_chunks_by_build(scope_a, ids["new_build"]) == []
+
+
+async def test_soft_deleted_kb_hides_chunks_everywhere(session, scope_a, kb_id) -> None:
+    """知识库软删 → 活动视图与历史读取都必须读不到（S1 的回归）。
+
+    原先 `v_active_chunks` 只过滤 `documents.deleted_at`、不 join `knowledge_bases`，
+    而 `soft_delete` 只写 KB 那一行（文档、build、chunk 原样留着）——于是删库之后
+    文档列表变空、检索却照样命中，同一个库在两处有不同答案。
+    """
+    ids = await _seed_two_builds(session, scope_a, kb_id)
+    repo = SqlChunkRepo(session)
+
+    assert await repo.list_active_chunks(scope_a, ids["doc"])
+    assert await repo.get_chunks(scope_a, ids["new_chunks"])
+    assert await repo.list_chunks_by_build(scope_a, ids["new_build"])
+
+    await session.execute(
+        text("UPDATE knowledge_bases SET deleted_at = now() WHERE kb_id = :kb"), {"kb": kb_id}
+    )
+    await session.commit()
+
+    # 活动视图两个入口（成员3 检索与 C2 契约都打这里）
+    assert await repo.list_active_chunks(scope_a, ids["doc"]) == []
+    assert await repo.get_chunks(scope_a, ids["new_chunks"]) == []
+    # I1 的受控例外不能变成旁路：历史 build 也要跟着不可见
+    assert await repo.list_chunks_by_build(scope_a, ids["new_build"]) == []
+    assert await repo.list_chunks_by_build(scope_a, ids["old_build"]) == []
 
 
 async def test_list_builds_is_newest_first_and_includes_retired(session, scope_a, kb_id) -> None:

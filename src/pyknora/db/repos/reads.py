@@ -213,12 +213,16 @@ class SqlChunkRepo:
         build，而成员5 的引用追溯要看"当时的版本"，那个 build 早已 retired，
         视图里根本不存在，不开这个口就永远读不到历史。
 
-        例外成立的前提是三重谓词，缺一不可：
+        例外成立的前提是四重谓词，缺一不可：
         1. `c.workspace_id = :workspace_id` —— 跨区读不到（R3）。
         2. `JOIN index_builds ON (workspace_id, build_id)` —— 拿别的 workspace 的
            build_id 进来 join 不上，返回空而不是读到别人的切片。
         3. `JOIN documents ... AND d.deleted_at IS NULL` —— 文档删了就整体不可见，
            历史版本不能成为绕过删除的旁路。
+        4. `JOIN knowledge_bases ... AND k.deleted_at IS NULL` —— 知识库软删同理。
+           少了这条，删库之后再走历史追溯就能把切片读回来，与视图里的修复
+           （`migrations/0012_v_active_chunks_skip_deleted_kb.sql`）自相矛盾；
+           文档的删除早就这么做了，知识库没有理由更宽松。
         """
         stmt = text(
             f"""
@@ -228,9 +232,12 @@ class SqlChunkRepo:
               ON d.workspace_id = c.workspace_id AND d.document_id = c.document_id
             JOIN index_builds AS b
               ON b.workspace_id = c.workspace_id AND b.build_id = c.build_id
+            JOIN knowledge_bases AS k
+              ON k.workspace_id = d.workspace_id AND k.kb_id = d.kb_id
             WHERE c.workspace_id = :workspace_id
               AND c.build_id = :build_id
               AND d.deleted_at IS NULL
+              AND k.deleted_at IS NULL
             ORDER BY c.chunk_ordinal
             LIMIT :limit OFFSET :offset
             """
