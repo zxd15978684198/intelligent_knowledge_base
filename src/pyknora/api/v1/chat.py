@@ -107,7 +107,12 @@ async def chat(
         return DoneEvent(**(usage or {}), invalid_citations=len(invalid))
 
     async def events() -> AsyncIterator[str]:
-        yield _sse("retrieval", RetrievalEvent(citations=citations).model_dump(mode="json"))
+        # `degraded` 必须搭第一个事件出去：流开始后状态码就固定了，之后没有任何
+        # 地方能表达"这次只召回了一路"。只写日志等于让流式调用方永远看不到降级。
+        yield _sse(
+            "retrieval",
+            RetrievalEvent(citations=citations, degraded=outcome.degraded).model_dump(mode="json"),
+        )
         answer: list[str] = []
         async for kind, value in stream_answer(body.query, context_chunks, settings=settings):
             if kind == "token":

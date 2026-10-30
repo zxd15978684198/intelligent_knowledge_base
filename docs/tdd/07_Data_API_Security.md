@@ -262,3 +262,8 @@ Approval 与审计见 02：审批参数、主体、工具版本、scope、有效
 
 **7.4 未随本轮解决的已知缺口**：查询向量与索引维度不符时的护栏在 `ChunkSearchRepo.search_similar`（因为 `v_active_chunks` 视图不校验维度）；单汉字查询无召回（bigram 最短有效长度 2 汉字）；停用词表未做；没有任何召回率/排序质量评测数据。
 
+**7.5 删除语义补齐：purge 级联与删库级联（2026-10-30）**：本文 §5 只写了「删除是软删 + 202 入队」，没写 `purge` 作业到底删到哪一层，实现期因此只删了 `chunks`。现在的口径：**`purge` 删 `chunks` → `document_blobs` → `document_versions`，`index_builds` 只置 `retired`，`documents` 行保留为墓碑**（三者的 `ON DELETE RESTRICT` 决定顺序，不可换）；同一事务把墓碑的 `desired_document_version_id` / `active_document_version_id` / `active_build_id` 置空。**删除知识库**时在同一事务内级联：把该库未删的文档一起软删（`deleted_at` + `active_build_id = NULL` + `generation`/`row_version` 递增）并逐篇入队 `purge`。**为什么这算契约变更**：「已删除」以前只意味着「看不见」，现在意味着「看得见的都清掉、剩下的清不掉是墓碑」。影响面：`services/ingest/documents.py`、`services/kb/service.py`、`workers/ingest_worker.py` 的 purge 分支（返回 `PurgeReport(chunks, blobs, versions)`，`ProcessResult.chunk_count` 现在是三类之和）。**代价明写**：删库对超大库是一次 `FOR UPDATE` 全取、没有分批，会长时间持锁。
+
+**7.6 发件箱派发器落地（2026-10-30）**：§3 的 `outbox` 表早已有 DDL 与「事务登记、至少一次派发」的说明，但实现期没有任何代码读过它（`dispatched_at` 永远 NULL）。现在 `src/pyknora/services/outbox/dispatcher.py` 提供 `dispatch_pending(session, *, deliver=None, limit=100)`：`WHERE dispatched_at IS NULL ORDER BY created_at, event_id FOR UPDATE SKIP LOCKED LIMIT :limit`，**先调订阅者、成功再写 `dispatched_at`**（至少一次：崩溃只会重复投递，消费方须幂等；反过来会丢事件），单行失败不中断整批。默认订阅者 `log_delivery` 只写日志——仓里没有第二个订阅者，不假装已投递。挂载点在 `scripts/run_worker.py` 的 `_tick`：**不能放在 `run_once` 里**，因为队列空时 `run_once` 提前返回，空闲 Worker 上发布事件将永远等不到派发。
+
+

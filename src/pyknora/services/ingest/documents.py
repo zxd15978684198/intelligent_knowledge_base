@@ -43,6 +43,19 @@ class UploadResult:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class PurgeReport:
+    """purge 真正删掉的行数。三类分别计数，否则"删了 0 行"看不出漏在哪一层。"""
+
+    chunks: int = 0
+    blobs: int = 0
+    versions: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.chunks + self.blobs + self.versions
+
+
 def compute_content_hash(data: bytes) -> str:
     """SHA-256。流式算与一次性算结果相同，这里数据已在内存，直接算。"""
     return hashlib.sha256(data).hexdigest()
@@ -290,23 +303,68 @@ async def delete_document(
     return job.job_id
 
 
-async def purge_document_chunks(session: AsyncSession, *, scope: Scope, document_id: UUID) -> int:
-    """purge 任务本体：真正删掉 chunk 与 build 行。
+async def purge_document(session: AsyncSession, *, scope: Scope, document_id: UUID) -> PurgeReport:
+    """purge 任务本体：删 chunk、删版本快照与 blob 字节，最后退休 build。
 
     此时可见性已经由 `deleted_at` 切断，所以这里慢一点不影响正确性。
+
+    **删除顺序由外键决定，不可换**：
+
+        chunks → document_blobs → document_versions →（index_builds 只退休）
+
+    `document_blobs.document_version_id` 是 `ON DELETE RESTRICT`，blob 必须先于版本删；
+    `document_versions.document_id` 同样是 RESTRICT，所以 `documents` 行只能留成墓碑
+    （软删行本身是审计与幂等重传的依据，不在这里清）。
+
+    先前的实现只删 chunk 就返回，于是每删一篇文档都会留下：一条 blob（原始字节，
+    与 `byte_size` 同量级）+ 一条版本快照 + 一行退休 build。这些行没有任何读路径
+    能看见（视图要 join 活动的 documents），只能靠翻库发现——磁盘只增不减，
+    而且 `documents.desired_document_version_id` 会指向已经不存在的版本。
+    所以同一事务里把三个指针一并置空，让墓碑不再假装指向某份内容。
     """
-    deleted = await session.execute(
-        text("DELETE FROM chunks WHERE workspace_id = :ws AND document_id = :doc"),
-        {"ws": scope.workspace_id, "doc": document_id},
+    workspace_id = scope.workspace_id
+    params = {"ws": workspace_id, "doc": document_id}
+
+    chunks = (
+        await session.execute(
+            text("DELETE FROM chunks WHERE workspace_id = :ws AND document_id = :doc"),
+            params,
+        )
+    ).rowcount
+    blobs = (
+        await session.execute(
+            text(
+                "DELETE FROM document_blobs WHERE workspace_id = :ws AND document_version_id IN ("
+                "  SELECT document_version_id FROM document_versions"
+                "  WHERE workspace_id = :ws AND document_id = :doc)"
+            ),
+            params,
+        )
+    ).rowcount
+    versions = (
+        await session.execute(
+            text("DELETE FROM document_versions WHERE workspace_id = :ws AND document_id = :doc"),
+            params,
+        )
+    ).rowcount
+    # 只在墓碑上清指针：还在用的文档不该被 purge 顺手改坏（purge 只由删除入队，
+    # 但作业是异步的，绝不能靠"调用方一定先删过"来保证这个前提）。
+    await session.execute(
+        text(
+            "UPDATE documents SET desired_document_version_id = NULL, "
+            "active_document_version_id = NULL, active_build_id = NULL "
+            "WHERE workspace_id = :ws AND document_id = :doc AND deleted_at IS NOT NULL"
+        ),
+        params,
     )
     await session.execute(
         text(
             "UPDATE index_builds SET state = 'retired', retired_at = :now "
             "WHERE workspace_id = :ws AND document_id = :doc AND state <> 'retired'"
         ),
-        {"now": datetime.now(UTC), "ws": scope.workspace_id, "doc": document_id},
+        {"now": datetime.now(UTC), **params},
     )
-    return deleted.rowcount
+    return PurgeReport(chunks=chunks, blobs=blobs, versions=versions)
 
 
 async def count_chunks(session: AsyncSession, *, workspace_id: UUID, document_id: UUID) -> int:

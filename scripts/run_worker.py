@@ -34,24 +34,33 @@ from pyknora.core.settings import settings  # noqa: E402
 from pyknora.db.repos.knowledge_bases import SqlKnowledgeBaseRepo  # noqa: E402
 from pyknora.db.session import dispose_engine, session_scope  # noqa: E402
 from pyknora.services.ingest.embedder import EmbeddingProvider, build_embedder  # noqa: E402
+from pyknora.services.outbox.dispatcher import DispatchReport, dispatch_pending  # noqa: E402
 from pyknora.workers.ingest_worker import ProcessResult, run_once  # noqa: E402
 
 logger = logging.getLogger("pyknora.worker")
 
 
-async def _tick(*, worker_id: str, embedder: EmbeddingProvider) -> ProcessResult | None:
-    """一轮 = 一个短事务。返回 None 表示队列空。
+async def _tick(
+    *, worker_id: str, embedder: EmbeddingProvider
+) -> tuple[ProcessResult | None, DispatchReport]:
+    """一轮 = 一个短事务：跑一件作业 + 派发一批发件箱事件。
 
     不要再在外面包事务：`run_once` 内部已经用 SAVEPOINT 把作业体隔开
-    （`workers/ingest_worker.py:260`），外面再包一层会破坏它设计的失败回滚语义。
+    （`workers/ingest_worker.py:291`），外面再包一层会破坏它设计的失败回滚语义。
+
+    发件箱派发放在**这里**而不是 `run_once` 里面：队列空时 `run_once` 提前返回，
+    于是发布事务写下的 `document.index_published` 在空闲 Worker 上永远等不到派发
+    （见 `services/outbox/dispatcher.py` 的模块注释）。
     """
     async with session_scope() as session:
-        return await run_once(
+        result = await run_once(
             session,
             worker_id=worker_id,
             kb_repo=SqlKnowledgeBaseRepo(session),
             embedder=embedder,
         )
+        report = await dispatch_pending(session)
+        return result, report
 
 
 async def main() -> int:
@@ -81,7 +90,7 @@ async def main() -> int:
     try:
         while not stop.is_set():
             try:
-                result = await _tick(worker_id=worker_id, embedder=embedder)
+                result, report = await _tick(worker_id=worker_id, embedder=embedder)
             except Exception:  # noqa: BLE001
                 # 作业级错误已由 run_once 回写；这里兜住的是装配/连接级异常。
                 # 不能退出：一条坏作业不该让整个 worker 下线（lease 到期会重新可抢）。
@@ -90,6 +99,11 @@ async def main() -> int:
                     return 1
                 await asyncio.sleep(5.0)
                 continue
+
+            if report.total:
+                logger.info(
+                    "outbox 派发：dispatched=%s failed=%s", report.dispatched, report.failed
+                )
 
             if result is None:
                 if args.once:

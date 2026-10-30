@@ -230,3 +230,41 @@ async def test_chat_requires_embedder(client: Any, monkeypatch: pytest.MonkeyPat
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+
+
+async def test_chat_surfaces_retrieval_degradation(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """检索降级必须随第一个事件出去，不能只留服务端日志。
+
+    同一次检索，`/query` 的调用方拿得到 `QueryResponse.degraded`，流式调用方
+    此前拿不到——它只能从"答案比平时窄"里猜。降级是关键信息（只召回了一路），
+    SSE 一旦开始就改不了状态码，所以唯一的出口就是 `retrieval` 事件。
+    """
+    monkeypatch.setattr(settings, "chat_api_key", "test-key")
+
+    async def _degraded_search(*args: Any, **kwargs: Any) -> HybridSearchResult:
+        return HybridSearchResult(hits=[_chunk()], degraded={"vector": "DEPENDENCY_UNAVAILABLE"})
+
+    monkeypatch.setattr(chat_routes, "search_hybrid", _degraded_search)
+    _patch_answer(monkeypatch, [("usage", {})])
+
+    response = await client.post(CHAT_URL, headers=bearer(), json={"query": "问题"})
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert events[0][0] == "retrieval"
+    assert json.loads(events[0][1])["degraded"] == {"vector": "DEPENDENCY_UNAVAILABLE"}
+
+
+async def test_chat_retrieval_event_is_not_degraded_by_default(
+    client: Any, fake_retrieval: list[RetrievedChunk], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正常检索时 `degraded` 是空对象——调用方按 `degraded == {}` 判断"这次是全的"。"""
+    monkeypatch.setattr(settings, "chat_api_key", "test-key")
+    _patch_answer(monkeypatch, [("usage", {})])
+
+    response = await client.post(CHAT_URL, headers=bearer(), json={"query": "问题"})
+
+    events = _parse_sse(response.text)
+    assert json.loads(events[0][1])["degraded"] == {}

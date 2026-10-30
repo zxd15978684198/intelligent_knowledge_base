@@ -131,9 +131,9 @@ async def process_job(
     scope = Scope(workspace_id=job.workspace_id, principal_id=actor_id)
 
     if job.job_type == "purge":
-        from pyknora.services.ingest.documents import purge_document_chunks
+        from pyknora.services.ingest.documents import purge_document
 
-        removed = await purge_document_chunks(session, scope=scope, document_id=job.document_id)
+        report = await purge_document(session, scope=scope, document_id=job.document_id)
         await session.execute(
             text(
                 "UPDATE ingestion_jobs SET status = 'succeeded', updated_at = now(), "
@@ -142,8 +142,14 @@ async def process_job(
             {"job_id": job.job_id, "epoch": job.lease_epoch},
         )
         await queue.finish_attempt(session, attempt_id=job.attempt_id, outcome="succeeded")
-        logger.info("purge removed %s chunks for %s", removed, job.document_id)
-        return ProcessResult(job_id=job.job_id, status="succeeded", chunk_count=removed)
+        logger.info(
+            "purge %s: chunks=%d blobs=%d versions=%d",
+            job.document_id,
+            report.chunks,
+            report.blobs,
+            report.versions,
+        )
+        return ProcessResult(job_id=job.job_id, status="succeeded", chunk_count=report.total)
 
     if job.job_type != "ingest":
         raise AppError(ErrorCode.INVALID_REQUEST, f"unknown job type {job.job_type}")

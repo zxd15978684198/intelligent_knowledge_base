@@ -23,6 +23,14 @@ class Citation(BaseModel):
 
 class RetrievalEvent(BaseModel):
     citations: list[Citation]
+    degraded: dict[str, str] = Field(default_factory=dict)
+    """检索降级情况：键=分支名（`vector`/`keyword`），值=错误码。
+
+    非空意味着这次回答**只用到了一路召回**（向量或关键词之一失败）。`/query`
+    接口早就把这个信息放在 `QueryResponse.degraded` 里，但流式接口先前只把它
+    写进服务端日志——同一次检索，非流式调用方看得见降级、流式调用方看不见。
+    流一旦开始就不能改状态码，所以它必须随第一个 `retrieval` 事件一起发出去。
+    """
 
 
 class TokenEvent(BaseModel):
