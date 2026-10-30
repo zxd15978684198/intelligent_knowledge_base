@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 from sqlalchemy import text
 
-from pyknora.api.deps import get_chunk_search_repo, get_keyword_search_repo
+from pyknora.api.deps import get_chunk_search_repo, get_kb_repo, get_keyword_search_repo
 from pyknora.api.main import (
     _lifespan,
     configure,
@@ -86,12 +86,27 @@ def _scored_chunk() -> ScoredChunk:
     )
 
 
+class _KbRepoGrantingA:
+    """只回答"KB_ID 属于 A 区且未删"，其余一律 None。
+
+    本文件测的是检索编排，不是可见性规则；但 `/query` 现在会先做一次
+    `require_kb_access`。若这里不 override，依赖会拿到进程级状态里的 `None`
+    并回 503，用例就会因为"没配仓库"而不是"检索结果不对"失败。
+    """
+
+    async def get(self, scope: Scope, kb_id: UUID) -> object | None:
+        if kb_id == KB_ID and scope.workspace_id == WORKSPACE_A:
+            return object()
+        return None
+
+
 def _client(repo: FakeSearchRepo) -> tuple[FastAPI, httpx.AsyncClient]:
     app = create_app()
     # 两路检索现在各有一个 session 依赖：只 override 第一条的话，关键词那一路
     # 会真的去连库并返回空集，融合结果就和用例声明的 fake 数据对不上。
     app.dependency_overrides[get_chunk_search_repo] = lambda: repo
     app.dependency_overrides[get_keyword_search_repo] = lambda: repo
+    app.dependency_overrides[get_kb_repo] = _KbRepoGrantingA
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
     return app, httpx.AsyncClient(transport=transport, base_url="http://test")
 
@@ -117,6 +132,30 @@ async def test_query_returns_fused_hits_and_uses_trusted_scope() -> None:
     assert repo.scope == Scope(workspace_id=WORKSPACE_A, principal_id=WORKSPACE_A)
     assert repo.query_text == "周末开放时间？"
     assert len(repo.query_vector or []) == 512
+
+
+async def test_query_on_foreign_or_missing_kb_is_404() -> None:
+    """别人的 / 不存在的 kb_id 一律 404，不能回 200 + 空 results。
+
+    回归：此前 `/query` 不做可见性判定，直接带着 Scope 去检索，跨租户 kb_id 命中
+    0 行 → 200 `{"results": []}`。同一件事在文档路径是 404，两处口径相反时，
+    客户端会把"无权"误读成"库是空的"。
+    """
+    repo = FakeSearchRepo()
+    configure(embedder=HashingEmbedder(dim=512))
+    _app, client = _client(repo)
+    foreign_kb = UUID("99999999-9999-9999-9999-999999999999")
+
+    async with client:
+        response = await client.post(
+            f"/api/v1/knowledge-bases/{foreign_kb}/query",
+            headers=bearer(),
+            json={"query": "问题"},
+        )
+
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+    assert repo.query_vector is None, "可见性判定必须在打检索之前"
 
 
 async def test_query_requires_authentication() -> None:

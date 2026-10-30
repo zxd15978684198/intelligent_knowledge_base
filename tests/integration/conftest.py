@@ -18,6 +18,7 @@ from pyknora.db.repos.reads import FakeKbRepo
 from pyknora.db.session import dispose_engine, get_session_factory
 from pyknora.schemas.kb import EmbeddingProfile
 from pyknora.services.ingest.embedder import HashingEmbedder
+from tests.role_catalog import seed_role_catalog
 
 TABLES = (
     # 成员4 的身份表：不在清单里就 TRUNCATE 不到，上一个用例的成员关系会漏给下一个。
@@ -89,6 +90,10 @@ async def session():
     factory = get_session_factory()
     async with factory() as s:
         await _truncate_all(s)
+        # 清场必须与补种成对：`roles` / `role_grants` 是迁移种下的**参考数据**，
+        # 清掉不补会让开发库在跑完测试后角色表为空——此后任何新用户注册都会撞
+        # `workspace_memberships_role_fkey`（曾表现为 409 "account already exists"）。
+        await seed_role_catalog(s)
         await _seed_knowledge_bases(s)
         await s.commit()
         yield s

@@ -117,6 +117,9 @@ class ChunkRow(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     page_no: Mapped[int | None] = mapped_column(Integer)
+    # 末字符所在页（P2-D2）：跨页切片 page_no < page_end_no，单页切片两者相等。
+    # 保持可空——null 表示"这份文档没有页码概念"（txt/md），与"第 1 页到第 1 页"不同。
+    page_end_no: Mapped[int | None] = mapped_column(Integer)
     heading_path: Mapped[str | None] = mapped_column(Text)
     char_start: Mapped[int | None] = mapped_column(Integer)
     char_end: Mapped[int | None] = mapped_column(Integer)

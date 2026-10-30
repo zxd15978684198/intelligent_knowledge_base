@@ -64,6 +64,10 @@ class RetrievedChunk(BaseModel):
     chunk_ordinal: int
     content: str
     page_no: int | None = None
+    page_end_no: int | None = Field(
+        default=None,
+        description="末字符所在页；跨页片段 page_no < page_end_no。用于让引用回指一整个范围。",
+    )
     heading_path: str | None = None
     locator_ref: str | None = None
     rrf_score: float

@@ -156,6 +156,39 @@ async def test_register_rejects_malformed_input_with_422(
     assert r.status_code == 422, r.text
 
 
+async def test_provisioning_fk_violation_is_not_reported_as_account_conflict(
+    client: httpx.AsyncClient, clean_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """建默认工作区撞外键 → 500，且**不能**说"账号已存在"。
+
+    真实事故：`roles` 参考表被清空后，任何新用户注册都在
+    `workspace_memberships_role_fkey` 上违约，但旧代码把**所有** IntegrityError
+    都翻译成 409 "account already exists"。用户于是换个用户名反复重试，
+    排障的人也去查前端和唯一索引——真实原因在服务端参考数据。
+    """
+
+    class _Orig(Exception):
+        constraint_name = "workspace_memberships_role_fkey"
+
+    from sqlalchemy.exc import IntegrityError
+
+    from pyknora.api.v1 import auth as auth_mod
+
+    async def _boom(session: Any, principal: Any) -> Any:
+        raise IntegrityError("INSERT INTO workspace_memberships ...", {}, _Orig())
+
+    monkeypatch.setattr(auth_mod, "create_default_workspace_for", _boom)
+
+    r = await client.post(REGISTER, json=_payload("grace"))
+
+    assert r.status_code == 500, r.text
+    body = r.json()
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+    assert "already exists" not in body["error"]["message"]
+    # 约束名要回给运维：没有它只能靠翻服务端日志猜。
+    assert body["error"]["details"]["constraint"] == "workspace_memberships_role_fkey"
+
+
 # ---------------------------------------------------------------- 登录
 
 

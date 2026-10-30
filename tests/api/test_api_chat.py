@@ -216,10 +216,12 @@ async def test_chat_reports_citations_outside_context(
     assert done["invalid_citations"] == 1
 
 
-async def test_chat_requires_embedder(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_requires_embedder(client: Any, kb_repo: Any) -> None:
+    """这条测的是"没配 embedder"，所以 KB 仓库必须配好——否则先撞上的是
+    `require_kb_access` 的 503，用例会以绿的形式失去它本该守住的东西。"""
     from pyknora.api.main import configure
 
-    configure(kb_repo=None, embedder=None)
+    configure(kb_repo=kb_repo, embedder=None)
     try:
         response = await client.post(CHAT_URL, headers=bearer(), json={"query": "问题"})
     finally:
@@ -230,6 +232,20 @@ async def test_chat_requires_embedder(client: Any, monkeypatch: pytest.MonkeyPat
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert "embedding" in response.json()["error"]["message"]
+
+
+async def test_chat_on_foreign_kb_is_404(client: Any) -> None:
+    """跨租户/不存在的 kb 在**建流之前**回 404：流一旦开始就改不了状态码。"""
+    response = await client.post(
+        f"/api/v1/knowledge-bases/{UUID('99999999-9999-9999-9999-999999999999')}/chat",
+        headers=bearer(),
+        json={"query": "问题"},
+    )
+
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+    assert "event-stream" not in response.headers.get("content-type", "")
 
 
 async def test_chat_surfaces_retrieval_degradation(

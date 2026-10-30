@@ -58,8 +58,17 @@ _NO_RETRY = frozenset(
         ErrorCode.VERSION_SUPERSEDED,
         ErrorCode.UNSUPPORTED_FORMAT,
         ErrorCode.IDEMPOTENCY_CONFLICT,
+        # 坏文件是**确定性**失败：同一份字节重试多少次都还是坏文件。
+        # 以前它不在这个集合里，于是一个截断的 PDF 会占满 3 次重试、并常驻队头
+        # 挡住后面所有上传（实测：队列 3 分钟没有任何作业被认领）。
+        ErrorCode.PARSE_FAILED,
     }
 )
+
+# 只有这两类才算"被更新的构建取代"。其余 `_NO_RETRY` 是**业务失败**，
+# 终态必须是 `failed`：一份解析不了的文件被记成 `superseded`，会让审计看到
+# "它被新版本替换了"——事实是它从来没成功过。
+_SUPERSEDE_CODES = frozenset({ErrorCode.STALE_ATTEMPT, ErrorCode.VERSION_SUPERSEDED})
 
 
 @dataclass(slots=True)
@@ -246,6 +255,7 @@ async def process_job(
                 content=chunk.content,
                 content_hash=digest_content(chunk.content),
                 page_no=chunk.page_no,
+                page_end_no=chunk.page_end_no,
                 heading_path=chunk.heading_path,
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
@@ -325,15 +335,31 @@ async def run_once(
         logger.warning("job %s failed with %s: %s", job.job_id, exc.code, exc.message)
         return ProcessResult(job_id=job.job_id, status="failed", error_code=exc.code)
     except Exception:
-        await _record_failure(session, job=job, code=ErrorCode.INTERNAL_ERROR)
-        raise
+        # **不许把异常再抛出去**。调用方（`scripts/run_worker.py::_tick`）包在
+        # `session_scope()` 里，异常穿出去会让整个事务回滚，下面 `_record_failure`
+        # 写进去的 attempt 与状态**一起消失**：作业保持 pending、attempt 停在 0，
+        # 于是同一个作业被无限重领（队列按 created_at 认领，它会一直坐在队头），
+        # 后面所有上传都进不来。实测复现：截断的 PDF 让队列 3 分钟零吞吐。
+        logger.exception("job %s crashed with an unexpected error", job.job_id)
+        try:
+            await _record_failure(session, job=job, code=ErrorCode.INTERNAL_ERROR)
+        except Exception:
+            # 连失败都记不上，说明事务/连接本身已经不可用——这才该往上抛，
+            # 让进程退出、租约过期后由别的 Worker 重领。
+            logger.exception("job %s 的失败记录也无法写入，向上抛出", job.job_id)
+            raise
+        return ProcessResult(
+            job_id=job.job_id,
+            status="failed",
+            error_code=ErrorCode.INTERNAL_ERROR,
+        )
 
 
 async def _record_failure(session: AsyncSession, *, job: ClaimedJob, code: str) -> None:
     """把失败记进 attempts 与 jobs。必须在保存点回滚之后调用。"""
     await queue.finish_attempt(session, attempt_id=job.attempt_id, outcome="failed")
-    if code in _NO_RETRY:
-        # 重试也不会好，直接终结，不再占队列
+    if code in _SUPERSEDE_CODES:
+        # 被更新的构建取代：不是本次输入的问题，也不该再跑，但也不能算"失败"。
         await session.execute(
             text(
                 "UPDATE ingestion_jobs SET status = 'superseded', error_code = :code, "
@@ -342,6 +368,10 @@ async def _record_failure(session: AsyncSession, *, job: ClaimedJob, code: str) 
             ),
             {"code": code, "job_id": job.job_id, "epoch": job.lease_epoch},
         )
+    elif code in _NO_RETRY:
+        # 确定性失败（坏文件、格式不支持）：一次就终结成 failed，不留重试窗口。
+        # `max_attempts=1` 让 `mark_failed` 立即判终态，与"重试也白搭"的语义一致。
+        await queue.mark_failed(session, job=job, error_code=code, max_attempts=1)
     else:
         await queue.mark_failed(
             session, job=job, error_code=code, max_attempts=settings.max_attempts

@@ -15,6 +15,7 @@ SQL 里 `workspace_id` 谓词的唯一来源，路由里没有任何一处从请
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from pyknora.api.deps import (
     get_kb_repo,
     get_scope,
     get_session,
+    require_kb_access,
     require_permission,
 )
 from pyknora.core.errors import AppError, ErrorCode, not_found
@@ -114,6 +116,33 @@ class ChunkPage(BaseModel):
     total: int
 
 
+class DocumentSummary(BaseModel):
+    """文档列表里的一行。是 `DocumentDetail` 的真子集，指针字段一一对应。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    document_id: UUID
+    kb_id: UUID
+    active_document_version_id: UUID | None
+    active_build_id: UUID | None
+    active_index_version: int | None
+    generation: int
+    row_version: int
+    # 判据与详情页**必须一致**（build.state == "active"），否则同一篇文档在两个
+    # 接口里一个说可搜、一个说不可搜，前端无从判断该信哪个。
+    searchable: bool
+    created_at: datetime
+
+
+class DocumentPage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    items: list[DocumentSummary]
+    limit: int
+    offset: int
+    total: int
+
+
 def _suffix_of(filename: str) -> str:
     idx = filename.rfind(".")
     return filename[idx:].lower() if idx >= 0 else ""
@@ -173,6 +202,56 @@ async def upload(
         document_version_id=result.document_version_id,
         status=result.status,
     )
+
+
+@router.get(
+    "/knowledge-bases/{kb_id}/documents",
+    response_model=DocumentPage,
+    summary="知识库下的文档列表",
+    dependencies=[Depends(require_permission(DOCUMENT_READ))],
+)
+async def list_documents(
+    kb_id: UUID,
+    scope: Annotated[Scope, Depends(get_scope)],
+    doc_repo: Annotated[SqlDocumentRepo, Depends(get_document_repo)],
+    build_repo: Annotated[SqlIndexBuildRepo, Depends(get_build_repo)],
+    _kb: Annotated[Any, Depends(require_kb_access)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> DocumentPage:
+    """列出一个知识库里仍在册的文档。
+
+    没有这个接口时，客户端只能靠上传时记下的 `document_id` 反查详情——重启一次前端
+    就再也找不回自己传过什么，`document_id` 无法枚举等于文档列表不可用。
+
+    `total` 是**全量计数**，不是本页条数：列表要能显示分页器。切片列表那边
+    `ChunkPage.total` 目前是页内条数（历史口径），两者语义不同，别互相套用。
+    """
+    docs = await doc_repo.list_for_kb(scope, kb_id, limit=limit, offset=offset)
+    # 一次批量取构建状态，避免每行一次查询（列表页最多 500 行）。
+    builds = await build_repo.get_many(
+        scope, [doc.active_build_id for doc in docs if doc.active_build_id is not None]
+    )
+
+    items: list[DocumentSummary] = []
+    for doc in docs:
+        build = builds.get(doc.active_build_id) if doc.active_build_id is not None else None
+        items.append(
+            DocumentSummary(
+                document_id=doc.document_id,
+                kb_id=doc.kb_id,
+                active_document_version_id=doc.active_document_version_id,
+                active_build_id=doc.active_build_id,
+                active_index_version=doc.active_index_version,
+                generation=doc.generation,
+                row_version=doc.row_version,
+                searchable=build is not None and build.state == "active",
+                created_at=doc.created_at,
+            )
+        )
+
+    total = await doc_repo.count_for_kb(scope, kb_id)
+    return DocumentPage(items=items, limit=limit, offset=offset, total=total)
 
 
 @router.get(

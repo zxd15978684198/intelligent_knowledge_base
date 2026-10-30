@@ -4,7 +4,9 @@
 - char_start / char_end 是**整篇正文**内的字符偏移，不是块内偏移，
   否则来源定位（citations）拼不回原文。
 - overlap 在切分点回退，保证跨块语义不被硬切。
-- page_no 继承自起始段落的页码，用于来源追踪。
+- page_no / page_end_no 是**起止页**：一块横跨两页时，只记起始页会让引用
+  "看起来对、翻过去找不到后半段"（P2-D2 实测：4 页 PDF 有一块跨 3–4 页）。
+  这里不做"按页切断"——那会把跨页的句子劈成两块，用引用精度换召回质量。
 """
 
 from __future__ import annotations
@@ -89,16 +91,20 @@ def chunk_parsed(
             # 回原文，一旦在这里做内部空白折叠，偏移就拼不回原样了（真实踩过的坑）。
             content = stripped
             start = pos + leading
+            end_offset = start + len(stripped)
             chunks.append(
                 Chunk(
                     ordinal=ordinal,
                     content=content,
                     page_no=page_at(start),
+                    # 末字符所在页：用 `end - 1` 而不是 `end`，因为 char_end 是
+                    # 开区间端点，恰好落在页首时 `page_at(end)` 会指向下一页。
+                    page_end_no=page_at(end_offset - 1),
                     heading_path=heading_at(start),
                     char_start=start,
-                    char_end=start + len(stripped),
+                    char_end=end_offset,
                     token_count=max(1, len(stripped) // 2),
-                    locator_ref=f"offsets:{start}-{start + len(stripped)}",
+                    locator_ref=f"offsets:{start}-{end_offset}",
                 )
             )
             ordinal += 1

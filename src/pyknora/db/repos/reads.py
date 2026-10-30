@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import TextClause
 
@@ -28,7 +28,7 @@ from pyknora.services.ingest.embedder import EmbeddingDimensionError
 # 按文档列 chunk 时取的列。不含 embedding/tsvector：见 ActiveChunk 的 docstring。
 _CHUNK_COLUMNS = """
     chunk_id, workspace_id, kb_id, document_id, build_id, index_version,
-    attempt_id, chunk_ordinal, content, page_no, heading_path,
+    attempt_id, chunk_ordinal, content, page_no, page_end_no, heading_path,
     char_start, char_end, token_count, locator_ref,
     embedding_model_key, embedding_dim, chunk_size,
     active_document_version_id
@@ -41,7 +41,7 @@ _CHUNK_COLUMNS = """
 _CHUNK_COLUMNS_BY_BUILD = """
     c.chunk_id, c.workspace_id, d.kb_id, c.document_id, c.build_id,
     c.index_version, c.attempt_id, c.chunk_ordinal, c.content,
-    c.page_no, c.heading_path, c.char_start, c.char_end,
+    c.page_no, c.page_end_no, c.heading_path, c.char_start, c.char_end,
     c.token_count, c.locator_ref,
     b.embedding_model_key, b.embedding_dim, b.chunk_size,
     d.active_document_version_id
@@ -93,6 +93,25 @@ def _keyword_stmt(join_op: str) -> TextClause:
     return stmt
 
 
+def _active_document(row: DocumentRow) -> ActiveDocument:
+    """把 `documents` 行映射成只读快照。
+
+    单独抽出来是因为"详情"和"列表"必须给出**同一个形状**：两处各写一遍的话，
+    迟早有一处漏掉新加的指针列，前端就会看到有的接口有、有的接口没有。
+    """
+    return ActiveDocument(
+        document_id=row.document_id,
+        workspace_id=row.workspace_id,
+        kb_id=row.kb_id,
+        active_document_version_id=row.active_document_version_id,
+        active_build_id=row.active_build_id,
+        active_index_version=row.active_index_version,
+        generation=row.generation,
+        row_version=row.row_version,
+        created_at=row.created_at,
+    )
+
+
 class SqlDocumentRepo:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -106,17 +125,42 @@ class SqlDocumentRepo:
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         if row is None:
             return None
-        return ActiveDocument(
-            document_id=row.document_id,
-            workspace_id=row.workspace_id,
-            kb_id=row.kb_id,
-            active_document_version_id=row.active_document_version_id,
-            active_build_id=row.active_build_id,
-            active_index_version=row.active_index_version,
-            generation=row.generation,
-            row_version=row.row_version,
-            created_at=row.created_at,
+        return _active_document(row)
+
+    async def list_for_kb(
+        self, scope: Scope, kb_id: UUID, *, limit: int = 50, offset: int = 0
+    ) -> list[ActiveDocument]:
+        """知识库下的文档列表（不含已软删的）。
+
+        排序带 `document_id` 兜底：`created_at` 是 `now()`，同一事务里连续插入的几篇
+        会拿到**完全相同**的时间戳，只按时间排的话翻页会出现重复/漏行。
+        """
+        stmt = (
+            select(DocumentRow)
+            .where(
+                DocumentRow.workspace_id == scope.workspace_id,
+                DocumentRow.kb_id == kb_id,
+                DocumentRow.deleted_at.is_(None),
+            )
+            .order_by(DocumentRow.created_at.desc(), DocumentRow.document_id.desc())
+            .limit(limit)
+            .offset(offset)
         )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_active_document(row) for row in rows]
+
+    async def count_for_kb(self, scope: Scope, kb_id: UUID) -> int:
+        """知识库下仍在册的文档数，供列表接口回 `total`。"""
+        stmt = (
+            select(func.count())
+            .select_from(DocumentRow)
+            .where(
+                DocumentRow.workspace_id == scope.workspace_id,
+                DocumentRow.kb_id == kb_id,
+                DocumentRow.deleted_at.is_(None),
+            )
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
 
     async def get_version(self, scope: Scope, version_id: UUID) -> DocumentVersionInfo | None:
         """取不可变版本快照的元数据。
@@ -406,6 +450,21 @@ class SqlIndexBuildRepo:
             return None
         return _to_index_build(row)
 
+    async def get_many(self, scope: Scope, build_ids: Sequence[UUID]) -> dict[UUID, IndexBuild]:
+        """按 id 批量取构建记录（一次查询）。
+
+        文档列表要每行给一个 `searchable`，逐个 `get` 就是 N+1；列表页最多 500 行，
+        那一轮就是 500 次往返，还会把连接池排队时间算进接口延迟。
+        """
+        if not build_ids:
+            return {}
+        stmt = select(IndexBuildRow).where(
+            IndexBuildRow.workspace_id == scope.workspace_id,
+            IndexBuildRow.build_id.in_(list(build_ids)),
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {row.build_id: _to_index_build(row) for row in rows}
+
     async def list_builds(
         self, scope: Scope, document_id: UUID, *, limit: int = 50, offset: int = 0
     ) -> list[IndexBuild]:
@@ -540,6 +599,7 @@ def _to_active_chunk(row) -> ActiveChunk:
         chunk_ordinal=row.chunk_ordinal,
         content=row.content,
         page_no=row.page_no,
+        page_end_no=row.page_end_no,
         heading_path=row.heading_path,
         char_start=row.char_start,
         char_end=row.char_end,
@@ -564,6 +624,7 @@ def _to_scored_chunk(row) -> ScoredChunk:
         chunk_ordinal=row.chunk_ordinal,
         content=row.content,
         page_no=row.page_no,
+        page_end_no=row.page_end_no,
         heading_path=row.heading_path,
         locator_ref=row.locator_ref,
         embedding_model_key=row.embedding_model_key,

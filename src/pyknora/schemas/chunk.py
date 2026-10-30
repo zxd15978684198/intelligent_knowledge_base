@@ -13,6 +13,10 @@ class Chunk(BaseModel):
     ordinal: int = Field(ge=0, description="文档内顺序，从 0 开始")
     content: str = Field(min_length=1)
     page_no: int | None = None
+    page_end_no: int | None = Field(
+        default=None,
+        description="末字符所在页。跨页切片 page_no < page_end_no；单页切片两者相等。",
+    )
     heading_path: str | None = None
     char_start: int = Field(ge=0)
     char_end: int = Field(ge=0)
@@ -25,6 +29,16 @@ class Chunk(BaseModel):
         if not self.char_start < self.char_end:
             raise ValueError(
                 f"char_start({self.char_start}) must be < char_end({self.char_end}) "
+                f"for chunk ordinal {self.ordinal}"
+            )
+        # 页码版 R2：结束页不能小于起始页，否则引用范围反向。
+        if (
+            self.page_end_no is not None
+            and self.page_no is not None
+            and self.page_end_no < self.page_no
+        ):
+            raise ValueError(
+                f"page_end_no({self.page_end_no}) 不能小于 page_no({self.page_no}) "
                 f"for chunk ordinal {self.ordinal}"
             )
         return self

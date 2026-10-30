@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -11,6 +11,7 @@ from pyknora.api.deps import (
     get_chunk_search_repo,
     get_keyword_search_repo,
     get_scope,
+    require_kb_access,
     require_permission,
 )
 from pyknora.api.main import get_app_state
@@ -35,8 +36,14 @@ async def query_knowledge_base(
     scope: Annotated[Scope, Depends(get_scope)],
     repo: Annotated[SqlChunkSearchRepo, Depends(get_chunk_search_repo)],
     keyword_repo: Annotated[SqlChunkSearchRepo, Depends(get_keyword_search_repo)],
+    _kb: Annotated[Any, Depends(require_kb_access)],
 ) -> QueryResponse:
-    """使用可信 Scope 检索并返回融合排名后的片段。"""
+    """使用可信 Scope 检索并返回融合排名后的片段。
+
+    `require_kb_access` 是"先判可见性、再谈检索结果"的那一步：别人的 kb_id
+    一律 404（与文档、血缘路径同码），而不是 200 + 空 results——后者会让客户端
+    以为"库是空的"，而真相是"你根本没权限，连它存不存在都不该知道"。
+    """
     embedder = get_app_state().embedder
     if embedder is None:
         raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "embedding provider not configured")

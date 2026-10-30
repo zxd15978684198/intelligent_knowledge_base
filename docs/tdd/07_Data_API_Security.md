@@ -266,4 +266,24 @@ Approval 与审计见 02：审批参数、主体、工具版本、scope、有效
 
 **7.6 发件箱派发器落地（2026-10-30）**：§3 的 `outbox` 表早已有 DDL 与「事务登记、至少一次派发」的说明，但实现期没有任何代码读过它（`dispatched_at` 永远 NULL）。现在 `src/pyknora/services/outbox/dispatcher.py` 提供 `dispatch_pending(session, *, deliver=None, limit=100)`：`WHERE dispatched_at IS NULL ORDER BY created_at, event_id FOR UPDATE SKIP LOCKED LIMIT :limit`，**先调订阅者、成功再写 `dispatched_at`**（至少一次：崩溃只会重复投递，消费方须幂等；反过来会丢事件），单行失败不中断整批。默认订阅者 `log_delivery` 只写日志——仓里没有第二个订阅者，不假装已投递。挂载点在 `scripts/run_worker.py` 的 `_tick`：**不能放在 `run_once` 里**，因为队列空时 `run_once` 提前返回，空闲 Worker 上发布事件将永远等不到派发。
 
+**7.7 错误体收归一套（2026-10-30）**：§7 定义了稳定错误码与 `{"error":{…},"request_id":…}`
+的响应体，但实现期有两类路径绕开了它——pydantic 的 `RequestValidationError` 回
+`422 {"detail":[…]}`、Starlette 的未知路由回 `404 {"detail":"Not Found"}`，两者都不带
+`request_id`。客户端按统一体解析就会在这里炸，而这两类恰恰是最常被触发的（参数写错、路径
+写错）。现在 `api/main.py` 用两个 handler 把它们收进同一形状：业务码按状态码映射
+（400/405/422 → `INVALID_REQUEST`、404 → `RESOURCE_NOT_FOUND`、401/403/409 各归各位），
+HTTP 状态码保留原值。**两条口径要记住**：① 422 的 `details.errors` 只保留
+`{loc,type,msg}` 三元组，**不回显 `input`/`ctx`**——请求体原文里有密码；② 校验错误最多
+保留 20 条，避免把整个请求体镜像进响应。**为什么这算契约变更**：它是「所有错误一个形状」
+这个承诺的兑现，之前只是文档里的承诺。
+
+**7.8 `chunks.page_end_no` 与跨页引用（2026-10-30）**：§3 的 `chunks` 只有 `page_no`，
+它存的是**块首字符所在页**；一块横跨两页时（切片的断点可以落在后一页的句读上），引用只能
+回指起始页。新增 `migrations/0013_chunk_page_span.sql` 加 `page_end_no`（可空：`null` 表示
+这份载体没有页码概念，txt/md 就是这种，与「第 1 页到第 1 页」不是一回事）。
+`splitter` 用 `page_at(char_end - 1)` 取末字符所在页——`char_end` 是开区间端点，不 −1 就会
+把落在下一页的行错记成跨页。**连带义务**：`services/migration/snapshot.py` 的 `TABLES` 必须
+把新列列进去，否则迁库/恢复之后引用又只剩起始页——这正是加这一列要修的问题，而且是**静默
+的**（行数、校验项都一致，只是信息丢了）。`schemas/chunk.py` 增加「`page_end_no` 不得小于
+`page_no`」的模型校验：引用范围反对比缺信息更糟。
 

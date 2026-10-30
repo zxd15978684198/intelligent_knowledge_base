@@ -75,6 +75,7 @@ def _to_retrieved_chunk(
         chunk_ordinal=chunk.chunk_ordinal,
         content=chunk.content,
         page_no=chunk.page_no,
+        page_end_no=chunk.page_end_no,
         heading_path=chunk.heading_path,
         locator_ref=chunk.locator_ref,
         rrf_score=rrf_score,

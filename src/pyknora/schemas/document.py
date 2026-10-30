@@ -47,7 +47,7 @@ class IndexBuild(BaseModel):
 class ActiveChunk(BaseModel):
     """视图 v_active_chunks 的一行，**但刻意不含 `tsvector` 与 `embedding`**。
 
-    视图共 21 列，本模型 19 个字段，差集正好是这两列。原因不是遗漏：
+    视图共 22 列，本模型 20 个字段，差集正好是 `tsvector` 与 `embedding` 两列。原因不是遗漏：
 
     - 向量是 512 个 float，一个文档 100 块就是 5 万个数字。用在"按文档取正文"
       这个场景上白白撑爆响应体，而调用方要的只是文字与位置。
@@ -55,6 +55,10 @@ class ActiveChunk(BaseModel):
       由它自己在 SQL 里用 `embedding`，返回值同样不含向量。
 
     所以成员3 不要写"逐列对应"的假设，也不要指望从这里拿到向量去自己算距离。
+
+    注：`page_end_no` 是 0013 追加在视图**末尾**的列（`CREATE OR REPLACE VIEW`
+    不允许中途插列），因此本模型的字段顺序与视图列顺序并不一致——读点用的是
+    显式列清单，不依赖位置。
     """
 
     model_config = ConfigDict(frozen=True)
@@ -69,6 +73,7 @@ class ActiveChunk(BaseModel):
     chunk_ordinal: int
     content: str
     page_no: int | None = None
+    page_end_no: int | None = None
     heading_path: str | None = None
     char_start: int | None = None
     char_end: int | None = None
@@ -100,6 +105,7 @@ class ScoredChunk(BaseModel):
     chunk_ordinal: int
     content: str
     page_no: int | None = None
+    page_end_no: int | None = None
     heading_path: str | None = None
     locator_ref: str | None = None
     embedding_model_key: str

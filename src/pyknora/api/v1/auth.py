@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated
 from uuid import UUID
 
@@ -104,6 +105,21 @@ def _duplicate() -> AppError:
     return AppError(ErrorCode.CONFLICT, "account already exists")
 
 
+# 只有这两个唯一键才代表"账号已存在"。`workspace_memberships_role_fkey` 之类的
+# 违约是**环境数据坏了**（例如 `roles` 参考表被清空），不是账号冲突。
+_DUPLICATE_CONSTRAINTS = frozenset({"principals_username_key", "principals_email_key"})
+
+
+def _constraint_name(exc: IntegrityError) -> str | None:
+    """从 SQLAlchemy/asyncpg 的异常里取约束名，取不到就退回消息里的 `constraint "x"`。"""
+    orig = getattr(exc, "orig", None)
+    name = getattr(orig, "constraint_name", None)
+    if isinstance(name, str):
+        return name
+    match = re.search(r'constraint "([^"]+)"', str(orig or exc))
+    return match.group(1) if match else None
+
+
 @router.post(
     "/auth/register",
     status_code=status.HTTP_201_CREATED,
@@ -137,6 +153,17 @@ async def register(
     except IntegrityError as exc:
         # 并发注册同名：两个请求都通过了"先查"，第二个在这里撞唯一键。
         await session.rollback()
+        constraint = _constraint_name(exc)
+        if constraint not in _DUPLICATE_CONSTRAINTS:
+            # **不是**账号冲突，而是建默认工作区时撞了别的完整性约束（典型：角色
+            # 参考表被清空 → `workspace_memberships_role_fkey` 违约）。报 409
+            # "account already exists" 会让用户以为换个用户名再试就好，也会让排障的
+            # 人往前端/数据库连接上找——真实原因在服务端数据，必须显式报出去。
+            raise AppError(
+                ErrorCode.INTERNAL_ERROR,
+                "account provisioning failed",
+                details={"constraint": constraint or "unknown"},
+            ) from exc
         raise _duplicate() from exc
 
     return TokenResponse(

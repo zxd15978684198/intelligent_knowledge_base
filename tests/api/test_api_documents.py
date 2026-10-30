@@ -482,3 +482,71 @@ async def test_openapi_schema_is_valid_json(client: httpx.AsyncClient) -> None:
 def test_kb_id_is_uuid() -> None:
     """夹具里的 KB_ID 必须真的是 UUID，防止改常量时手滑。"""
     assert isinstance(KB_ID, UUID)
+
+
+# ---------------------------------------------------------------- 文档列表（GET 集合）
+
+
+async def test_list_documents_shows_uploaded_rows(
+    client: httpx.AsyncClient, clean_db: None
+) -> None:
+    """上传后能在 KB 下枚举到自己 —— 没有它，客户端只能靠上传时记下的 id 反查。"""
+    first = (await _upload(client, filename="a.txt", content=b"row a")).json()["document_id"]
+    second = (await _upload(client, filename="b.txt", content=b"row b")).json()["document_id"]
+
+    r = await client.get(f"/api/v1/knowledge-bases/{KB_ID}/documents", headers=bearer())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 2
+    assert {item["document_id"] for item in body["items"]} == {first, second}
+    # 刚上传、还没跑 Worker：不能自称可检索。
+    assert all(item["searchable"] is False for item in body["items"])
+
+
+async def test_list_documents_paginates(client: httpx.AsyncClient, clean_db: None) -> None:
+    """`limit`/`offset` 真的生效，且 `total` 是全量而不是页内条数。"""
+    for index in range(3):
+        await _upload(client, filename=f"p{index}.txt", content=f"page {index}".encode())
+
+    page = (
+        await client.get(
+            f"/api/v1/knowledge-bases/{KB_ID}/documents",
+            headers=bearer(),
+            params={"limit": 2, "offset": 1},
+        )
+    ).json()
+    assert page["limit"] == 2
+    assert page["offset"] == 1
+    assert len(page["items"]) == 2
+    assert page["total"] == 3, "total 必须是全量计数，否则分页器算不出页数"
+
+
+async def test_list_documents_excludes_deleted(client: httpx.AsyncClient, clean_db: None) -> None:
+    """软删后立即从列表消失（purge 是异步的，可见性不能等它）。"""
+    doc_id = (await _upload(client, filename="gone.txt", content=b"bye")).json()["document_id"]
+    assert (await client.delete(f"/api/v1/documents/{doc_id}", headers=bearer())).status_code == 202
+
+    body = (await client.get(f"/api/v1/knowledge-bases/{KB_ID}/documents", headers=bearer())).json()
+    assert body["items"] == []
+    assert body["total"] == 0
+
+
+async def test_list_documents_on_foreign_kb_is_404(
+    client: httpx.AsyncClient, clean_db: None
+) -> None:
+    """别人的 KB 一律 404：列表接口同样不能靠"空列表"泄露存在性。"""
+    r = await client.get(f"/api/v1/knowledge-bases/{MISSING_ID}/documents", headers=bearer())
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+
+
+async def test_list_documents_rejects_bad_paging(client: httpx.AsyncClient) -> None:
+    """越界分页参数在 schema 层挡掉，不落到 SQL。"""
+    too_big = await client.get(
+        f"/api/v1/knowledge-bases/{KB_ID}/documents", headers=bearer(), params={"limit": 501}
+    )
+    negative = await client.get(
+        f"/api/v1/knowledge-bases/{KB_ID}/documents", headers=bearer(), params={"offset": -1}
+    )
+    assert too_big.status_code == 422
+    assert negative.status_code == 422

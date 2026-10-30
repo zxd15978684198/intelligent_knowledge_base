@@ -162,6 +162,80 @@ def test_empty_parse_result_raises_parse_incomplete() -> None:
     assert exc.value.code == ErrorCode.PARSE_FAILED
 
 
+def test_corrupt_pdf_becomes_parse_failed_not_a_crash() -> None:
+    """截断的 PDF 必须变成 `PARSE_FAILED`，不能把 pypdf 的异常原样漏出去。
+
+    原样漏出的后果不是这一份文件解析失败，而是 Worker 的整个取件事务被回滚：
+    失败记录消失、作业常驻队头、队列停摆（见 tests/integration/test_ingest_poison.py）。
+    这里把边界钉在解析器上——它是有能力把"库的异常"翻译成"我们的错误码"的那一层。
+    """
+    truncated = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    with pytest.raises(AppError) as exc:
+        parse(truncated, "broken.pdf")
+
+    assert exc.value.code == ErrorCode.PARSE_FAILED
+    # details 只放异常类型名，不放消息：pypdf 的消息里可能夹着文件字节片段。
+    assert set(exc.value.details) == {"reason"}
+    assert exc.value.details["reason"].endswith("Error")
+    assert "EOF marker" not in str(exc.value.details)
+
+
+def test_chunks_record_page_span_when_crossing_pages() -> None:
+    """跨页切片必须记下结束页（P2-D2）。
+
+    真实症状：4 页 PDF 里一块横跨第 3、4 页，`page_no` 只能存一个值 → 记 3。
+    用户从引用跳过去，后半段在第 4 页，界面上却只提示第 3 页。
+
+    这里构造两个不同页的块：块 A 占 60 字符（第 1 页），块 B 第 2 页且内部有句读。
+    chunk_size=80 时断点会落在第 2 页的句号之后 → 这一块真的跨页（1 → 2）。
+    注意块之间的 `\n\n` 也是断点候选，所以第 2 页必须自带句读，否则会正好断在页边界上。
+    """
+    parsed = ParsedText(
+        blocks=[
+            Block(text="A" * 60, page_no=1),
+            Block(text="B" * 5 + "。" + "C" * 100, page_no=2),
+        ],
+        parser="test",
+    )
+    chunks = chunk_parsed(parsed, chunk_size=80, chunk_overlap=0)
+
+    crossing = [c for c in chunks if c.page_no != c.page_end_no]
+    assert crossing, "没有跨页切片，这个用例就白写了"
+    first = crossing[0]
+    assert (first.page_no, first.page_end_no) == (1, 2)
+    # 结束页必须覆盖到末字符所在页：char_end 是开区间端点（页边界在 62）。
+    assert first.char_end > 62, "char_end 没越过第 1 页末尾，块其实没跨页"
+
+
+def test_single_page_chunks_have_equal_page_span() -> None:
+    """单页切片的起止页相同；没有页码的文档两者都为空。"""
+    parsed = ParsedText(
+        blocks=[Block(text="x" * 40, page_no=1), Block(text="y" * 40, page_no=1)],
+        parser="test",
+    )
+    for chunk in chunk_parsed(parsed, chunk_size=20, chunk_overlap=0):
+        assert chunk.page_no == 1
+        assert chunk.page_end_no == 1
+
+    no_pages = chunk_parsed(ParsedText(blocks=[Block(text="z" * 30)], parser="test"))
+    assert [(c.page_no, c.page_end_no) for c in no_pages] == [(None, None)]
+
+
+def test_chunk_rejects_inverted_page_span() -> None:
+    """起止页反向必须被模型校验挡住（引用范围反向比缺信息更糟）。"""
+    from pyknora.schemas.chunk import Chunk
+
+    with pytest.raises(ValueError, match="page_end_no"):
+        Chunk(
+            ordinal=0,
+            content="abc",
+            page_no=3,
+            page_end_no=2,
+            char_start=0,
+            char_end=3,
+        )
+
+
 def test_chunk_rejects_inverted_offsets() -> None:
     from pyknora.schemas.chunk import Chunk
 

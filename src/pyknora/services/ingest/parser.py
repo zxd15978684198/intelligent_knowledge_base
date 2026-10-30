@@ -78,14 +78,28 @@ def _parse_pdf(data: bytes) -> ParsedText:
     except ImportError as exc:  # pragma: no cover
         raise AppError(ErrorCode.INTERNAL_ERROR, "pypdf 未安装") from exc
 
-    reader = PdfReader(io.BytesIO(data))
-    blocks: list[Block] = []
-    for page_index, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        for para in re.split(r"\n\s*\n", text):
-            cleaned = para.strip()
-            if cleaned:
-                blocks.append(Block(text=cleaned, page_no=page_index + 1))
+    # **底层异常必须包成 AppError**：`PdfReader` / `extract_text` 遇到截断、损坏、
+    # 加密的文件会抛 `PdfStreamError` / `FileNotDecryptedError` 之类的库内异常。
+    # 这些异常一旦裸奔到 Worker，只会被当成"未知错误"反复重试，而且用户拿不到
+    # `PARSE_FAILED` 这个可诊断的码——文件本身坏了，重试一百次也不会变好。
+    # 异常消息（可能夹着二进制碎片）不进 details，只留类型名。
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        blocks: list[Block] = []
+        for page_index, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            for para in re.split(r"\n\s*\n", text):
+                cleaned = para.strip()
+                if cleaned:
+                    blocks.append(Block(text=cleaned, page_no=page_index + 1))
+    except AppError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 库内异常类型随版本变化，按类名记录即可
+        raise AppError(
+            ErrorCode.PARSE_FAILED,
+            "PDF 解析失败（文件损坏、截断或加密）",
+            details={"reason": type(exc).__name__},
+        ) from exc
     if not blocks:
         raise AppError(ErrorCode.PARSE_FAILED, "PDF 未提取到任何文本（可能是扫描件）")
     return ParsedText(blocks=blocks, parser="pypdf")
@@ -97,20 +111,29 @@ def _parse_docx(data: bytes) -> ParsedText:
     except ImportError as exc:  # pragma: no cover
         raise AppError(ErrorCode.INTERNAL_ERROR, "python-docx 未安装") from exc
 
-    document = docx.Document(io.BytesIO(data))
-    blocks: list[Block] = []
-    heading_stack: list[str] = []
-    for para in document.paragraphs:
-        text = para.text.strip()
-        if not text:
-            continue
-        style = (para.style.name or "").lower()
-        if style.startswith("heading"):
-            level = int(style.replace("heading", "").strip() or 1)
-            heading_stack = heading_stack[: level - 1] + [text]
-            blocks.append(Block(text=text, heading_path=" / ".join(heading_stack)))
-        else:
-            blocks.append(Block(text=text, heading_path=" / ".join(heading_stack) or None))
+    # 同 PDF：损坏的 zip（.docx 本质是 zip）会抛 `BadZipFile`/`KeyError`，
+    # 必须转成 `PARSE_FAILED` 才能在作业层终止而不是无限重试。
+    try:
+        document = docx.Document(io.BytesIO(data))
+        blocks: list[Block] = []
+        heading_stack: list[str] = []
+        for para in document.paragraphs:
+            text = para.text.strip()
+            if not text:
+                continue
+            style = (para.style.name or "").lower()
+            if style.startswith("heading"):
+                level = int(style.replace("heading", "").strip() or 1)
+                heading_stack = heading_stack[: level - 1] + [text]
+                blocks.append(Block(text=text, heading_path=" / ".join(heading_stack)))
+            else:
+                blocks.append(Block(text=text, heading_path=" / ".join(heading_stack) or None))
+    except Exception as exc:  # noqa: BLE001 — 同上，按类名记录
+        raise AppError(
+            ErrorCode.PARSE_FAILED,
+            "DOCX 解析失败（文件损坏或不是有效的 docx）",
+            details={"reason": type(exc).__name__},
+        ) from exc
     if not blocks:
         raise AppError(ErrorCode.PARSE_FAILED, "DOCX 未提取到任何段落")
     return ParsedText(blocks=blocks, parser="python-docx")

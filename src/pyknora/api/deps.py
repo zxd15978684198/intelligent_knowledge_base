@@ -171,6 +171,9 @@ async def require_kb_access(
 
     404 与"不存在"同码，不给攻击者用状态码探测 kb_id 是否存在。
     """
+    if kb_repo is None:
+        # 与上传端点同一个兜底：仓库没注入是部署问题，不是"库不存在"。
+        raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "knowledge base repo not configured")
     kb = await kb_repo.get(scope, kb_id)
     if kb is None:
         raise not_found("knowledge base")

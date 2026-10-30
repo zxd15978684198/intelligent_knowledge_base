@@ -18,6 +18,12 @@ class Citation(BaseModel):
     chunk_id: UUID
     document_id: UUID
     page_no: int | None = None
+    page_end_no: int | None = None
+    """末字符所在页（P2-D2）。跨页片段 `page_no < page_end_no`。
+
+    只给起始页时，前端跳到"第 3 页"却找不到引用的后半段——那段在第 4 页。
+    两个字段都可能为 None：txt/md 类文档没有"页"这个概念，编一个 1 出来更糟。
+    """
     snippet: str
 
 

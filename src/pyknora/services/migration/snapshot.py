@@ -174,6 +174,9 @@ TABLES: tuple[TableSpec, ...] = (
             "content",
             "content_hash",
             "page_no",
+            # 0013 新增（P2-D2）：跨页切片的结束页。漏掉它的话，迁库/恢复之后
+            # 引用只能回指起始页——这正是加这一列要修的问题，不能在这里丢。
+            "page_end_no",
             "heading_path",
             "char_start",
             "char_end",

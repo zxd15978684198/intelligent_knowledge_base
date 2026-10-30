@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -15,6 +15,7 @@ from pyknora.api.deps import (
     get_chunk_search_repo,
     get_keyword_search_repo,
     get_scope,
+    require_kb_access,
     require_permission,
 )
 from pyknora.api.main import get_app_state
@@ -58,6 +59,7 @@ async def chat(
     kb_id: UUID,
     repo: Annotated[SqlChunkSearchRepo, Depends(get_chunk_search_repo)],
     keyword_repo: Annotated[SqlChunkSearchRepo, Depends(get_keyword_search_repo)],
+    _kb: Annotated[Any, Depends(require_kb_access)],
 ) -> StreamingResponse:
     """SSE 顺序固定为 retrieval、token*、done；检索沿用可信 Scope。"""
     state = get_app_state()
@@ -85,6 +87,7 @@ async def chat(
             chunk_id=chunk.chunk_id,
             document_id=chunk.document_id,
             page_no=chunk.page_no,
+            page_end_no=chunk.page_end_no,
             snippet=chunk.content[:500],
         ).model_dump(mode="json")
         for chunk in context_chunks

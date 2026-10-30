@@ -23,7 +23,6 @@ from pyknora.core.scope import WORKSPACE_A, WORKSPACE_B, Scope
 from pyknora.db.repos.reads import FakeKbRepo
 from pyknora.db.session import dispose_engine, get_session_factory
 from pyknora.schemas.kb import EmbeddingProfile
-from pyknora.services.auth.permissions import SEED
 from pyknora.services.ingest.embedder import HashingEmbedder
 from tests.api.tokens import JWT_SECRET, KB_ID
 
@@ -49,68 +48,8 @@ TABLES = (
 )
 
 
-async def seed_role_catalog(session) -> None:
-    """补齐 `roles` / `role_grants`：清场会把迁移种下的角色一起 TRUNCATE 掉。
-
-    权限判定自本轮起查 `role_grants`（fail-closed：没权限点就是拒），所以清场后不补种，
-    每个走 HTTP 的用例都会 403 —— 现象像业务 bug，其实是夹具少了一层。
-
-    用一条 `VALUES` 列表写完（4 角色 × 至多 15 权限点）：逐个 `INSERT` 是 50+ 次
-    round-trip，会让每个用例平白多出几十毫秒的固定成本。
-    """
-    # 内置四个角色不能整表删掉再重灌：`0008_roles_are_data.sql` 给
-    # `workspace_memberships.role` 加了指向 `roles(role_key)` 的外键（`ON DELETE
-    # RESTRICT`），而 `seed_test_identity` 在调用本函数前已经造了 owner 成员。
-    # 所以按"引用方向"清理：
-    #   1. 删测试自建的角色（内置的不动），它们的授权行随 `ON DELETE CASCADE` 走；
-    #   2. 清空全部授权行（含内置角色的，矩阵要重灌）；
-    #   3. 把内置角色 upsert 回去，描述以 `permissions.SEED` 为准。
-    builtin = ", ".join(f"'{role_key}'" for role_key in SEED)
-
-    # 夹具自愈：若能进到这里还留着"挂在自建角色上的成员"，说明上一轮清场没覆盖到它。
-    # 外键是 `ON DELETE RESTRICT`，不先退回 `member`，下面删自建角色就会 ForeignKeyViolation。
-    # 退回内置角色是安全的——内置角色必定存在，且本意就是"每个用例自己搭的自建角色
-    # 不应该跨用例继续被引用"。
-    await session.execute(
-        text(f"UPDATE workspace_memberships SET role = 'member' WHERE role NOT IN ({builtin})")
-    )
-    await session.execute(text(f"DELETE FROM roles WHERE role_key NOT IN ({builtin})"))
-    await session.execute(text("DELETE FROM role_grants"))
-
-    role_values: list[str] = []
-    role_params: dict[str, str] = {}
-    for index, role_key in enumerate(SEED):
-        role_params[f"k{index}"] = role_key
-        role_params[f"d{index}"] = f"test seed: {role_key}"
-        role_values.append(f"(CAST(:k{index} AS text), CAST(:d{index} AS text))")
-    await session.execute(
-        text(
-            f"INSERT INTO roles (role_key, description) VALUES {', '.join(role_values)} "
-            "ON CONFLICT (role_key) DO UPDATE SET description = EXCLUDED.description"
-        ),
-        role_params,
-    )
-
-    pairs = [
-        (role_key, permission)
-        for role_key, permissions in SEED.items()
-        for permission in sorted(permissions)
-    ]
-    grant_values: list[str] = []
-    grant_params: dict[str, str] = {}
-    for index, (role_key, permission) in enumerate(pairs):
-        grant_params[f"k{index}"] = role_key
-        grant_params[f"p{index}"] = permission
-        grant_values.append(f"(CAST(:k{index} AS text), CAST(:p{index} AS text))")
-    await session.execute(
-        text(
-            "INSERT INTO role_grants (role_id, permission) "
-            "SELECT r.role_id, v.permission FROM (VALUES "
-            f"{', '.join(grant_values)}"
-            ") AS v(role_key, permission) JOIN roles AS r ON r.role_key = v.role_key"
-        ),
-        grant_params,
-    )
+# 补种逻辑只写一份：`tests/role_catalog.py`。这里保留同名入口，既有调用点不用改。
+from tests.role_catalog import seed_role_catalog  # noqa: E402  (导入顺序：紧随常量定义)
 
 
 async def seed_test_identity(session) -> None:

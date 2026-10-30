@@ -25,7 +25,9 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.settings import settings
@@ -86,6 +88,41 @@ def _error_response(exc: AppError, request: Request) -> JSONResponse:
         content=exc.to_body(rid),
         headers={"X-Request-ID": rid},
     )
+
+
+# 状态码 → 业务错误码。Starlette / FastAPI 自己抛的异常（未知路由 404、方法不允许 405、
+# 请求体校验失败 422）不带业务码，必须在这里折算，否则同一个客户端要写两套错误解析。
+_HTTP_CODE_BY_STATUS: dict[int, str] = {
+    400: ErrorCode.INVALID_REQUEST,
+    401: ErrorCode.UNAUTHENTICATED,
+    403: ErrorCode.FORBIDDEN,
+    404: ErrorCode.RESOURCE_NOT_FOUND,
+    405: ErrorCode.INVALID_REQUEST,
+    409: ErrorCode.CONFLICT,
+    422: ErrorCode.INVALID_REQUEST,
+    429: ErrorCode.INVALID_REQUEST,
+}
+
+# 请求体校验失败时最多回 20 条：批量传参的用例可能一次错几十处，全量回没有信息增量。
+_MAX_VALIDATION_ERRORS = 20
+
+
+def _unified_error_response(
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    details: dict[str, Any],
+    request: Request,
+) -> JSONResponse:
+    """按统一错误体回响应；HTTP 状态码与业务码分开传。
+
+    两者通常一致（`AppError.http_status` 就是由码推出的），但 405 这类"框架状态码
+    在业务码表里没有对应项"的情况必须能各自取值——把 405 硬拗成 422 才是失真。
+    """
+    rid = _request_id(request)
+    body = AppError(code, message, details=details).to_body(rid)
+    return JSONResponse(status_code=status_code, content=body, headers={"X-Request-ID": rid})
 
 
 _UNPRIVILEGED_ENVS = frozenset({"dev", "test", "local"})
@@ -171,6 +208,49 @@ def create_app() -> FastAPI:
         else:
             logger.info("app error %s: %s", exc.code, exc.message)
         return _error_response(exc, request)
+
+    @app.exception_handler(RequestValidationError)
+    async def _on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # 只留"定位三元组"。`exc.errors()` 每项还带 `input` / `ctx`，那是请求体原文
+        # 的切片——注册接口的密码就在里面，不能回显给客户端、也不该落进响应体。
+        errors = [
+            {
+                "loc": [str(part) for part in error.get("loc", ())],
+                "type": str(error.get("type", "")),
+                "msg": str(error.get("msg", "")),
+            }
+            for error in exc.errors()[:_MAX_VALIDATION_ERRORS]
+        ]
+        rid = _request_id(request)
+        # 参数错误是用户侧失误，记 info 不记 error（与 `_on_app_error` 同一口径）。
+        logger.info("request validation failed request_id=%s errors=%d", rid, len(errors))
+        return _unified_error_response(
+            status_code=422,
+            code=ErrorCode.INVALID_REQUEST,
+            message="request validation failed",
+            details={"errors": errors},
+            request=request,
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _on_http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        code = _HTTP_CODE_BY_STATUS.get(exc.status_code)
+        if code is None:
+            code = ErrorCode.INTERNAL_ERROR if exc.status_code >= 500 else ErrorCode.INVALID_REQUEST
+        # `detail` 是框架固定短语（"Not Found" / "Method Not Allowed"），不是用户输入，
+        # 原样当 message 用；它不是字符串时（极少见）退回通用文案。
+        message = exc.detail if isinstance(exc.detail, str) and exc.detail else "request failed"
+        if exc.status_code >= 500:
+            logger.error("http error %s: %s", exc.status_code, message)
+        else:
+            logger.info("http error %s: %s", exc.status_code, message)
+        return _unified_error_response(
+            status_code=exc.status_code,
+            code=code,
+            message=message,
+            details={},
+            request=request,
+        )
 
     @app.exception_handler(Exception)
     async def _on_unhandled(request: Request, exc: Exception) -> JSONResponse:
