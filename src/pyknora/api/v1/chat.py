@@ -31,7 +31,11 @@ from pyknora.schemas.chat import (
     TokenEvent,
 )
 from pyknora.services.auth.permissions import CHAT_RUN
-from pyknora.services.rag.answer import stream_answer
+from pyknora.services.rag.answer import (
+    invalid_cited_indices,
+    select_context_chunks,
+    stream_answer,
+)
 from pyknora.services.retrieval.search import search_hybrid
 
 router = APIRouter(tags=["chat"], dependencies=[Depends(require_permission(CHAT_RUN))])
@@ -69,6 +73,9 @@ async def chat(
         scope, kb_id, body.query, embedder=state.embedder, repo=repo, top_k=body.top_k
     )
     chunks = outcome.hits
+    # 客户端看到的 citations 必须和模型真正读到的资料是**同一批**。检索 20 条、
+    # 上下文只取 6 条时，多出来的那 14 条是幻影引用（见 services/rag/answer.py）。
+    context_chunks = select_context_chunks(chunks, settings=settings)
     if outcome.degraded:
         # 检索降级后仍会作答，但这必须让客户端知道：只靠一路召回时答案的
         # 覆盖面明显更窄，用户据此下结论前应当看得见（见 schemas/query.py）。
@@ -80,22 +87,40 @@ async def chat(
             page_no=chunk.page_no,
             snippet=chunk.content[:500],
         ).model_dump(mode="json")
-        for chunk in chunks
+        for chunk in context_chunks
     ]
+
+    def _done(answer_text: str, usage: dict[str, int] | None = None) -> DoneEvent:
+        """收尾事件，顺带把"引用越界"这件事报出去。
+
+        越界 = 模型引用了不存在的资料，或引用了被上下文上限截掉的资料。正文不能改
+        （token 已经逐块发出去了），但计数必须让调用方拿到：否则一段带假 `[资料 9]`
+        的答案会被当成有据可查。
+        """
+        invalid = invalid_cited_indices(answer_text, context_size=len(context_chunks))
+        if invalid:
+            logger.warning(
+                "chat answer cites sources outside context: indices=%s context_size=%d",
+                invalid,
+                len(context_chunks),
+            )
+        return DoneEvent(**(usage or {}), invalid_citations=len(invalid))
 
     async def events() -> AsyncIterator[str]:
         yield _sse("retrieval", RetrievalEvent(citations=citations).model_dump(mode="json"))
-        async for kind, value in stream_answer(body.query, chunks, settings=settings):
+        answer: list[str] = []
+        async for kind, value in stream_answer(body.query, context_chunks, settings=settings):
             if kind == "token":
+                answer.append(value)
                 yield _sse("token", TokenEvent(text=value).model_dump())
             elif kind == "error":
                 # 流已开始，状态码改不了：错误作为事件发出去，再补一个 done 收尾，
                 # 前端的解析器才不会一直挂着等下一块。
                 yield _sse("error", StreamErrorEvent(**value).model_dump())
-                yield _sse("done", DoneEvent().model_dump())
+                yield _sse("done", _done("".join(answer)).model_dump())
                 return
             else:
-                yield _sse("done", DoneEvent(**value).model_dump())
+                yield _sse("done", _done("".join(answer), value).model_dump())
 
     return StreamingResponse(
         events(),

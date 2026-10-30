@@ -32,6 +32,14 @@ class TokenEvent(BaseModel):
 class DoneEvent(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    invalid_citations: int = 0
+    """回答里 `[资料 N]` 序号越界的条数。
+
+    模型被要求在正文用 `[资料 N]` 标注依据，N 是**投喂给它的资料序号**。越界意味着
+    它编了一份不存在的资料，或引用了被 `chat_max_context_chunks` 截掉的那几条——
+    两者都是幻觉的硬信号。正文不改（流已经发出去了），但这件事不能只留在日志里，
+    否则调用方会把一段带假引用的答案当成有据可查。
+    """
 
 
 class StreamErrorEvent(BaseModel):

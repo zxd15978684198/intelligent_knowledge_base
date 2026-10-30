@@ -19,7 +19,12 @@ import pytest
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.settings import settings
 from pyknora.schemas.query import RetrievedChunk
-from pyknora.services.rag.answer import stream_answer
+from pyknora.services.rag.answer import (
+    cited_indices,
+    invalid_cited_indices,
+    select_context_chunks,
+    stream_answer,
+)
 
 # 9/tcp 是 discard 服务，本机不会有进程监听：连上去立刻被拒，
 # 不依赖外网，也不会因为环境不同变成"超时 60 秒"。
@@ -80,3 +85,32 @@ async def test_upstream_failure_becomes_error_event_not_exception() -> None:
     assert payload["code"] == ErrorCode.DEPENDENCY_UNAVAILABLE
     assert payload["retryable"] is True
     assert events[1][1] == {}
+
+
+def test_select_context_chunks_caps_at_setting() -> None:
+    """上下文条数只有 `chat_max_context_chunks` 一处定义。
+
+    检索可以返回 20 条，模型只读 6 条；`retrieval` 事件的 citations 必须跟着只发 6 条，
+    否则客户端会拿到一批模型从没见过的 chunk 并当成答案依据。
+    """
+    chunks = [_chunk() for _ in range(8)]
+
+    selected = select_context_chunks(chunks, settings=_settings(chat_max_context_chunks=3))
+
+    assert len(selected) == 3
+    assert selected == chunks[:3]
+
+
+def test_cited_indices_parses_markers() -> None:
+    """`[资料 N]` 的序号要能取出来，容忍中间有空格。"""
+    assert cited_indices("[资料 1] 与 [资料 2]、[资料  3]") == {1, 2, 3}
+    assert cited_indices("没有任何标注") == set()
+
+
+def test_invalid_cited_indices_flags_out_of_range() -> None:
+    """越界引用必须被抓出来：N 超出本次投喂条数、或干脆是 0。"""
+    text = "结论甲[资料 1]，结论乙[资料 7]，结论丙[资料 0]"
+
+    assert invalid_cited_indices(text, context_size=3) == [0, 7]
+    assert invalid_cited_indices(text, context_size=10) == [0]
+    assert invalid_cited_indices("[资料 2]", context_size=2) == []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -11,6 +12,39 @@ import httpx
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.settings import Settings
 from pyknora.schemas.query import RetrievedChunk
+
+# 模型被要求用 `[资料 N]` 标注依据（见 `_messages` 的 system prompt）。N 是**上下文
+# 里的序号**而不是 chunk_id：模型看不到 UUID，也不可能准确复述它。所以校验也只能
+# 校验序号是否落在本次实际投喂的资料条数内。
+_CITATION_MARKER = re.compile(r"\[资料\s*(\d+)\]")
+
+
+def select_context_chunks(
+    chunks: Sequence[RetrievedChunk], *, settings: Settings
+) -> list[RetrievedChunk]:
+    """模型**真正看到**的那几条资料。
+
+    上限只在 `chat_max_context_chunks` 一处定义，调用方必须拿同一个返回值去构建
+    `retrieval` 事件的 citations。否则会给客户端列出一批模型从没见过的 chunk——
+    `ChatRequest.top_k` 上限是 20、而上下文只取 6 时，多出来的 14 条就是**幻影引用**：
+    客户端拿它们当"答案的依据"展示，实际模型根本没读到。
+    """
+    return list(chunks[: settings.chat_max_context_chunks])
+
+
+def cited_indices(answer_text: str) -> set[int]:
+    """回答里出现的 `[资料 N]` 序号集合。"""
+    return {int(match.group(1)) for match in _CITATION_MARKER.finditer(answer_text)}
+
+
+def invalid_cited_indices(answer_text: str, *, context_size: int) -> list[int]:
+    """序号越界的引用：模型编了不存在的资料，或引用了被上下文截断掉的那几条。
+
+    **只报告，不改正文**：token 是流式发出去的，回头改会让客户端看到的内容和
+    "模型实际说了什么"不一致，排查时无法复原。越界条数是幻觉的硬信号，交给
+    调用方去记日志并写进 `done` 事件。
+    """
+    return sorted(i for i in cited_indices(answer_text) if i < 1 or i > context_size)
 
 
 def _messages(question: str, chunks: Sequence[RetrievedChunk]) -> list[dict[str, str]]:
@@ -47,7 +81,7 @@ async def stream_answer(
     url = f"{settings.chat_base_url.rstrip('/')}/chat/completions"
     payload = {
         "model": settings.chat_model,
-        "messages": _messages(question, chunks[: settings.chat_max_context_chunks]),
+        "messages": _messages(question, select_context_chunks(chunks, settings=settings)),
         "stream": True,
         "stream_options": {"include_usage": True},
     }
