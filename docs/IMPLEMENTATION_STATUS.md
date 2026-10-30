@@ -26,6 +26,31 @@
 - 已执行：`ruff check` → All checks passed；`ruff format --check` → 119 files already formatted；定向三文件 → 34 passed；全量 → 见下。
 - 未验证：默认倍数 2 是否真的提升召回（需评测集跑 Recall@k / nDCG 对比 1x / 2x / 4x，本轮明确不做）；`top_k=50` 时因封顶不再放大，该边界下融合收益仍等于旧行为。
 
+## 本轮：全新装库 RLS 漂移修复（0011，2026-10-30，经用户「要」授权）
+
+- 怎么发现的：为验证 `0009` 真正进入迁移链，我在**全新空库**上从 `0001` 重放到 `0010`，
+  结果 `pg_policies` 只有 **9** 条，而长期开发库是 **10** 条。差的正是 `index_migrations`。
+- 根因是执行顺序，不是策略写错：`migrations/0003_identity_acl.sql:124-128` 的 RLS 表清单里
+  已经写了 `index_migrations`，但这张表由 `0004` 创建，`0003` 先执行 →
+  `to_regclass('public.index_migrations')` 恒为 NULL → `CONTINUE` 安静跳过，且永远不会回头补。
+  开发库之所以有 10 条，是这张表建好后又被人重新应用过一次 `0003`——历史重放的巧合。
+- 后果：全新部署的环境里，`index_migrations`（带 `workspace_id`、`/admin` 侧暴露的迁移台账）
+  失去数据库层兜底，只剩应用层谓词。属于「升级库正常、全新装库少一层防护」的漂移，
+  只有从零重放才会暴露。
+- 改动：`migrations/0011_index_migrations_rls.sql`（新建）——单独给这张表
+  `ENABLE ROW LEVEL SECURITY` + 建 `ws_isolation` 策略，策略表达式与 `0003:134-138`
+  **逐字一致**；沿用 0003 的 `DROP POLICY IF EXISTS` + `CREATE POLICY` 写法保证幂等；
+  表不存在时 `RAISE NOTICE` 跳过。**没有改 0003**（I4：已合并号段不改历史文件，
+  改了反而让升级库与全新库继续分叉）。
+- 已执行（真实输出）：开发库重复应用 0011 → `DO` / `COMMENT`，`policies = 10`（幂等成立）；
+  全新库 `pyknora_mig11` 从 `0001` 重放到 `0011` → **11 个迁移全部 OK**、
+  `policies = 10`、`index_migrations.relrowsecurity = t`；`ruff check src tests scripts`
+  → `All checks passed!`；临时库已 DROP。
+- 未验证：`scripts/migrate.py` 本身在本沙箱跑不通（`docker` 命名管道对子进程拒绝，环境限制），
+  全链重放是用 pwsh 直连 docker 按同语义复刻的；正常终端/CI 下未跑。
+- 下一步：给「RLS 覆盖完整性」加一条结构性守卫（全新库重放后断言策略数 = 应覆盖业务表数），
+  用户此前说过暂不做，本次仍未做。
+
 ## 本轮：RLS 生效性验证 + 作业表索引（2026-10-30，经用户「先做 a b」授权）
 
 - 任务：缺陷审查遗留的两条基础设施问题——① RLS 从未在非特权角色下验证过；②
