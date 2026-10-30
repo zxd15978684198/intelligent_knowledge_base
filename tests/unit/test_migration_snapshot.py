@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -23,6 +25,7 @@ from pyknora.services.migration.snapshot import (
     SnapshotError,
     _decode_rows,
     _sql_literal,
+    _sql_value,
     assert_no_embedding,
     build_snapshot,
     count_embedding_inserts,
@@ -58,6 +61,15 @@ def _minimal_tables() -> dict[str, list[dict[str, object]]]:
                 "name": "教学区",
                 "owner_principal_id": _WS,
                 "is_public": False,
+                "created_at": now,
+            }
+        ],
+        "workspace_memberships": [
+            {
+                "membership_id": uuid.UUID("77777777-7777-7777-7777-777777777777"),
+                "workspace_id": _WS,
+                "user_id": _WS,
+                "role": "owner",
                 "created_at": now,
             }
         ],
@@ -212,6 +224,68 @@ def test_render_sql_order_follows_foreign_keys() -> None:
         if (f"INSERT INTO {name} " in sql_text)
     ]
     assert positions == sorted(positions), "重放顺序必须先父后子，否则外键会拒绝"
+
+
+def test_workspace_memberships_are_exported_and_replayed() -> None:
+    """S3b：成员关系必须在快照里，否则搬到新库后所有人都变成"非成员"。
+
+    原来的 `TABLES` 只导 principals/workspaces/knowledge_bases/documents/... 八张表，
+    没有 `workspace_memberships`。重放后 `load_membership` 查不到人 → `get_scope`
+    fail-closed → 所有人 403，而 `verify_metadata` 只比它自己导出的那几表，还会报
+    "一致"。所以这里钉两件事：导得出去、重放在 `documents` 之前。
+    """
+    names = {spec.name for spec in TABLES}
+    assert "workspace_memberships" in names
+    order = list(REPLAY_ORDER)
+    assert "workspace_memberships" in order
+    assert order.index("workspaces") < order.index("workspace_memberships")
+    assert order.index("workspace_memberships") < order.index("documents")
+
+    sql_text = render_sql(build_snapshot(_minimal_tables()))
+    assert "INSERT INTO workspace_memberships (" in sql_text
+    assert "'owner'" in sql_text
+
+
+def test_sql_value_decodes_blob_content_from_base64() -> None:
+    """S3a：`document_blobs.content` 在快照里是 base64 文本，SQL 必须还原成字节。
+
+    直接把 base64 字符串插进 bytea 列，PG 会按 bytea 的 escape 格式当成**字面文本**
+    存进去：语句不报错、行数也对，但 blob 比原文长 4/3。JSON 重放路径一直有
+    `decode(:content,'base64')`，SQL 路径没有——两条路径对同一份快照给出不同结果。
+    """
+    assert _sql_value("document_blobs", "content", "QUJD") == "decode('QUJD', 'base64')"
+    assert _sql_value("document_blobs", "content", None) == "NULL"
+    # 同名列在别的表里仍然是普通文本，不能被误伤
+    assert _sql_value("chunks", "content", "正文") == "'正文'"
+
+
+def test_render_sql_wraps_blob_base64_in_decode() -> None:
+    """整条渲染链上验证一次：快照把原始字节编成 base64，SQL 必须再解回来。
+
+    `build_snapshot` 收到的是**原始 bytes**（`_row_to_json` 负责 b64encode），
+    `render_sql` 必须用 `decode(...,'base64')` 还原，否则两边对不上。
+    """
+    raw = b"\x00\x01binary-bytes"
+    encoded = base64.b64encode(raw).decode("ascii")
+    tables = _minimal_tables()
+    tables["document_blobs"] = [
+        {
+            "workspace_id": _WS,
+            "document_version_id": _DOC,
+            "content": raw,
+        }
+    ]
+
+    snapshot = build_snapshot(tables)
+    assert snapshot["tables"]["document_blobs"][0]["content"] == encoded
+
+    sql_text = render_sql(snapshot)
+
+    assert f"decode('{encoded}', 'base64')" in sql_text
+    # 把合法的 `decode(...,'base64')` 去掉之后，base64 不许再出现在别处——
+    # 否则就是它被当成普通字符串字面量插进 bytea 列了。
+    without_decode = re.sub(r"decode\('[A-Za-z0-9+/=]*', 'base64'\)", "", sql_text)
+    assert encoded not in without_decode
 
 
 def test_decode_rows_requires_every_declared_column() -> None:

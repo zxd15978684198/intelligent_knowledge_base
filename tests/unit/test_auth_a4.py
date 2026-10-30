@@ -201,3 +201,26 @@ def test_token_without_exp_is_rejected() -> None:
 
     assert exc.value.code == ErrorCode.UNAUTHENTICATED
     assert exc.value.message == "malformed token"
+
+
+def test_non_dict_jwt_header_is_401_not_500() -> None:
+    """S4：header 段解出来必须是个 dict，否则是 401 而不是 500。
+
+    之前 `_decode_segment` 直接对 header 调 `.get()`。客户端发一段 `[]`（JSON 数组
+    也是合法 JSON）就抛 `AttributeError: 'list' object has no attribute 'get'`，
+    被兜到 500 `retryable=true`——既违反 I8（错误一律走 AppError），也让客户端以为
+    "重试就好"。签名在这里是**有效**的，所以走到的确实是头部形状检查，不是签名检查。
+    """
+    header = jwt_mod._b64url_encode(b"[]")
+    payload = jwt_mod._b64url_encode(
+        json.dumps({"sub": str(PRINCIPAL), "default_workspace_id": str(WORKSPACE_A)}).encode()
+    )
+    sig = jwt_mod._b64url_encode(
+        hmac.new(SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    )
+
+    with pytest.raises(AppError) as exc:
+        decode_token(f"{header}.{payload}.{sig}", secret=SECRET)
+
+    assert exc.value.code == ErrorCode.UNAUTHENTICATED
+    assert exc.value.message == "malformed token"

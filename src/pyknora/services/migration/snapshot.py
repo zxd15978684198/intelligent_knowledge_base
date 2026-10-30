@@ -71,6 +71,15 @@ TABLES: tuple[TableSpec, ...] = (
         ("workspace_id", "name", "owner_principal_id", "is_public", "created_at"),
         "workspace_id",
     ),
+    # 成员关系必须跟着走：目标库没有它，`get_scope` → `load_membership` 会 fail-closed，
+    # 迁完之后**所有人都是 403**，而迁移校验完全看不出来（旧版就是这个状态）。
+    # 角色矩阵（roles / role_grants）由目标库的迁移种子重建，不需要搬；
+    # 只有"谁属于哪个区、是什么角色"没有任何别的来源。
+    TableSpec(
+        "workspace_memberships",
+        ("membership_id", "workspace_id", "user_id", "role", "created_at"),
+        "membership_id",
+    ),
     TableSpec(
         "knowledge_bases",
         (
@@ -180,6 +189,9 @@ TABLES: tuple[TableSpec, ...] = (
 REPLAY_ORDER: tuple[str, ...] = (
     "principals",
     "workspaces",
+    # 成员关系紧跟 workspaces：它同时外键依赖 workspaces 与 principals，
+    # 而 principals/workspaces 已经在这之前写入。
+    "workspace_memberships",
     "knowledge_bases",
     "documents",
     "document_versions",
@@ -305,6 +317,31 @@ async def export_metadata(
         rows = (await session.execute(sql, params)).mappings().all()
         return [dict(row) for row in rows]
 
+    async def fetch_principals(ids: set[Any]) -> list[dict[str, Any]]:
+        """按 id 取 principals 行。两条导出分支（有文档 / 没文档）都要用。
+
+        `workspace_memberships.user_id` 与 `workspaces.owner_principal_id` 都是
+        `principals` 的真外键，所以这两类 id 必须导出；`created_by_principal_id`
+        没有外键，缺了不阻塞重放，但补上更完整。
+        """
+        if not ids:
+            return []
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT principal_id, username, email, password_hash, display_name, "
+                        "status, created_at, updated_at FROM principals "
+                        "WHERE principal_id IN :ids ORDER BY principal_id"
+                    ).bindparams(bindparam("ids", expanding=True)),
+                    {"ids": sorted(ids)},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(row) for row in rows]
+
     ws_filter = ""
     ws_params: dict[str, Any] = {}
     if workspace_ids is not None:
@@ -316,6 +353,11 @@ async def export_metadata(
         wanted = {str(value) for value in workspace_ids}
         workspaces = [row for row in workspaces if row["workspace_id"] in wanted]
 
+    # 成员关系跟着 workspace 走：`workspace_memberships.user_id` 有外键指向
+    # `principals`，所以下面收集 principals 时必须把成员也算进去，否则重放会在
+    # memberships 处撞外键（owner 之外的成员恰好都不是 created_by）。
+    memberships = await fetch(_SPEC_BY_NAME["workspace_memberships"], "true" + ws_filter, ws_params)
+
     # KB 不过滤 deleted_at：`documents.kb_id` 有真外键指向它，删掉 KB 行不会连带删
     # 文档行（`documents_kb_fk` 是 RESTRICT），所以"已软删的 KB + 未删的文档"是库里
     # **真实存在**的状态（烟测删库后就会留下）。漏导这一行，重放会在 documents 处
@@ -323,11 +365,16 @@ async def export_metadata(
     kbs = await fetch(_SPEC_BY_NAME["knowledge_bases"], "true" + ws_filter, ws_params)
     documents = await fetch(_SPEC_BY_NAME["documents"], "deleted_at IS NULL" + ws_filter, ws_params)
     if not documents:
-        # 没有文档就没有版本/切片，但仍然要把空的 KB 搬过去（否则"KB 存在"这条不成立）。
+        # 没有文档就没有版本/切片，但仍然要把空的 KB 和**成员关系**搬过去：
+        # "KB 存在"与"人还在这个区里"是两条独立的事实，缺了成员关系迁完就是全员 403。
+        # 成员关系有 principals 外键，所以这条分支也必须导 owner + 成员这两类 principals。
+        base_ids = {row["owner_principal_id"] for row in workspaces}
+        base_ids |= {row["user_id"] for row in memberships}
         return build_snapshot(
             {
-                "principals": [],
+                "principals": await fetch_principals(base_ids),
                 "workspaces": workspaces,
+                "workspace_memberships": memberships,
                 "knowledge_bases": kbs,
                 "documents": [],
                 "document_versions": [],
@@ -407,21 +454,10 @@ async def export_metadata(
     # principals：只导被这些 workspace 与版本引用到的行（库里的其他用户不归本次迁移管）。
     principal_ids = {row["owner_principal_id"] for row in workspaces}
     principal_ids |= {row["created_by_principal_id"] for row in version_rows}
-    principals = (
-        (
-            await session.execute(
-                text(
-                    "SELECT principal_id, username, email, password_hash, display_name, status, "
-                    "created_at, updated_at FROM principals "
-                    "WHERE principal_id IN :ids ORDER BY principal_id"
-                ).bindparams(bindparam("ids", expanding=True)),
-                {"ids": sorted(principal_ids)},
-            )
-        )
-        .mappings()
-        .all()
-    )
-    principal_rows = [dict(row) for row in principals]
+    # 成员也必须有 principals 行：`workspace_memberships.user_id` 是真外键，
+    # 而"成员不是 owner、也没创建过版本"是最常见的情况（被邀请进来的普通成员）。
+    principal_ids |= {row["user_id"] for row in memberships}
+    principal_rows = await fetch_principals(principal_ids)
 
     # principles 只需"被引用"就导：owner 必须有真行（workspaces 有外键），
     # created_by 没有外键（0003 之前的历史行允许指向不存在的用户），缺了也不阻塞。
@@ -437,6 +473,7 @@ async def export_metadata(
         {
             "principals": principal_rows,
             "workspaces": workspaces,
+            "workspace_memberships": memberships,
             "knowledge_bases": kbs,
             "documents": documents,
             "document_versions": version_rows,
@@ -542,6 +579,25 @@ def _sql_literal(column: str, value: Any) -> str:
     return f"'{escaped}'"
 
 
+#: 快照里被编码成 base64 的二进制列。`_row_to_json` 编码，`_decode_rows` 解码，
+#: `render_sql` 必须还原成 `decode(..., 'base64')`——三处必须一致。
+_BYTEA_COLUMNS: frozenset[tuple[str, str]] = frozenset({("document_blobs", "content")})
+
+
+def _sql_value(table: str, column: str, value: Any) -> str:
+    """渲染一个列值。二进制列不能走 `_sql_literal` 的字符串形状。
+
+    `document_blobs.content` 在 JSON 里是 base64 字符串（JSON 没有二进制类型）。
+    如果直接渲染成 `'BASE64...'` 再 INSERT 进 bytea 列，PG 会按 bytea 的 escape
+    格式把它当**字面文本**存进去——语句不报错，但恢复后的 blob 是 base64 字符串，
+    不是原字节。JSON 重放路径一直有 `decode(:content,'base64')`，SQL 路径没有，
+    这个缺口就是这样来的：两条路径对同一份快照做出不同结果。
+    """
+    if (table, column) in _BYTEA_COLUMNS:
+        return "NULL" if value is None else f"decode('{value}', 'base64')"
+    return _sql_literal(column, value)
+
+
 def render_sql(snapshot: Mapping[str, Any], *, target_dsn_hint: str = "") -> str:
     """把快照渲染成可人工审阅、可 psql 执行的 INSERT 脚本。"""
     lines = [
@@ -561,7 +617,7 @@ def render_sql(snapshot: Mapping[str, Any], *, target_dsn_hint: str = "") -> str
         columns = ", ".join(spec.columns)
         lines.append(f"\n-- {name}: {len(rows)} 行")
         for row in rows:
-            values = ", ".join(_sql_literal(column, row.get(column)) for column in spec.columns)
+            values = ", ".join(_sql_value(name, column, row.get(column)) for column in spec.columns)
             lines.append(f"INSERT INTO {name} ({columns}) VALUES ({values});")
     lines.append("\nCOMMIT;")
     return "\n".join(lines) + "\n"
@@ -647,6 +703,22 @@ _MISSING_VECTOR_SQL = text(
 
 _ALL_NULL_VECTOR_SQL = text(
     "SELECT count(*) AS n FROM chunks WHERE build_id IN :builds AND embedding IS NOT NULL"
+)
+
+_MEMBERSHIP_SQL = text(
+    "SELECT membership_id, user_id, role FROM workspace_memberships "
+    "WHERE workspace_id = :workspace_id ORDER BY membership_id"
+)
+
+_VERSION_COUNT_SQL = text(
+    "SELECT count(*) AS n FROM document_versions WHERE workspace_id = :workspace_id"
+)
+
+#: blob 的"行数 + 字节总数"。字节数是抓"二进制被写成 base64 文本"的关键：
+#: base64 的长度是原文的 4/3 倍，行数完全一样，只有字节数会露馅。
+_BLOB_DIGEST_SQL = text(
+    "SELECT count(*) AS n, coalesce(sum(octet_length(content)), 0) AS total "
+    "FROM document_blobs WHERE workspace_id = :workspace_id"
 )
 
 
@@ -811,4 +883,49 @@ async def verify_metadata(
                 f"{still_has} 行带向量（迁移不该带）" if still_has else "全部为 NULL，符合预期",
             )
         )
+    # 成员关系不比对 membership_id（两边都是 gen_random_uuid，必然不同），
+    # 比的是"谁、什么角色"这个集合。
+    ws_param = {"workspace_id": str(workspace_id)}
+    src_members = (await source.execute(_MEMBERSHIP_SQL, ws_param)).mappings().all()
+    dst_members = (await target.execute(_MEMBERSHIP_SQL, ws_param)).mappings().all()
+    src_member_set = {(str(row["user_id"]), row["role"]) for row in src_members}
+    dst_member_set = {(str(row["user_id"]), row["role"]) for row in dst_members}
+    checks.append(
+        Check(
+            "workspace_memberships 一致（成员身份与角色）",
+            src_member_set == dst_member_set,
+            f"源 {len(src_member_set)} 人 / 目标 {len(dst_member_set)} 人"
+            if src_member_set == dst_member_set
+            else f"源 {len(src_member_set)} / 目标 {len(dst_member_set)}，"
+            f"差异 {sorted(src_member_set ^ dst_member_set)}",
+        )
+    )
+
+    src_versions = (
+        await source.execute(_VERSION_COUNT_SQL, {"workspace_id": str(workspace_id)})
+    ).scalar_one()
+    dst_versions = (
+        await target.execute(_VERSION_COUNT_SQL, {"workspace_id": str(workspace_id)})
+    ).scalar_one()
+    checks.append(
+        Check(
+            "document_versions 行数一致",
+            int(src_versions) == int(dst_versions),
+            f"源 {src_versions} / 目标 {dst_versions}",
+        )
+    )
+
+    # 这一条是 `render_sql` 的 bytea 缺口唯一的探测手段：把 base64 文本当字节写进
+    # bytea 列不会报错、行数也一样，只有 `octet_length` 会变成 4/3 倍。
+    src_blob = (await source.execute(_BLOB_DIGEST_SQL, {"workspace_id": str(workspace_id)})).one()
+    dst_blob = (await target.execute(_BLOB_DIGEST_SQL, {"workspace_id": str(workspace_id)})).one()
+    blob_ok = (int(src_blob[0]), int(src_blob[1])) == (int(dst_blob[0]), int(dst_blob[1]))
+    checks.append(
+        Check(
+            "document_blobs 行数与字节总数一致（二进制未被编码破坏）",
+            blob_ok,
+            f"源 {src_blob[0]} 行 / {src_blob[1]} 字节，目标 {dst_blob[0]} 行 / {dst_blob[1]} 字节",
+        )
+    )
+
     return checks

@@ -26,6 +26,19 @@
 - 已执行：`ruff check` → All checks passed；`ruff format --check` → 119 files already formatted；定向三文件 → 34 passed；全量 → 见下。
 - 未验证：默认倍数 2 是否真的提升召回（需评测集跑 Recall@k / nDCG 对比 1x / 2x / 4x，本轮明确不做）；`top_k=50` 时因封顶不再放大，该边界下融合收益仍等于旧行为。
 
+## 本轮：已完成模块补洞批次 1 — JWT 头部类型 / 迁移 SQL 的 bytea / 快照补导成员关系（2026-10-30，经用户「1.A1 2.你怎么说」授权）
+
+- 任务：五成员审查后的修复清单，批次 1（S4 + S3a + S3b）。三条都是「代码跑得通但边界没守住」，不是新功能。
+- **S4 `services/auth/jwt.py:104-109`**：给 `header`/`payload` 加 `isinstance(dict)` 类型闸。原状：`[]`、`"x"`、`123` 都能被 `json.loads` 解析成功，随后 `header.get(...)` 抛 `AttributeError`（实测 `'list' object has no attribute 'get'`）、`"exp" not in 123` 抛 `TypeError`；两者都逃出 `decode_token`，被通用异常处理变成 **500 + `retryable=true`**——客户端伪造的令牌被算成服务端故障，违反 I8。现在统一 401 `malformed token`。
+- **S3a `services/migration/snapshot.py` 的 `render_sql`**：新增 `_BYTEA_COLUMNS = {("document_blobs","content")}` 与 `_sql_value(table, column, value)`，二进制列渲染成 `decode('<base64>', 'base64')`。原状：`_sql_literal` 把 base64 字符串渲染成普通字面量插进 bytea 列，PG 按 bytea 的 escape 格式当**字面文本**存下去——不报错、行数也对，但 blob 长度是原文的 4/3。旁证：JSON 重放路径 `_decode_rows` 一直有 `base64.b64decode`，SQL 路径没有，**两条路径对同一份快照给出不同结果**。`_row_to_json`（编码）/`_decode_rows`（解码）/`_sql_value`（渲染）三处现在对齐。
+- **S3b 快照补导 `workspace_memberships`**：`TABLES` 增加该表（列 `membership_id, workspace_id, user_id, role, created_at`），`REPLAY_ORDER` 放在 `workspaces` 之后、`knowledge_bases` 之前；`principal_ids` 并入成员 `user_id`（该列是真外键，只导 principals 里 `created_by` 那批人会漏成员）。原状：八张表里没有成员关系，快照搬到新库后 `load_membership` 查不到人 → `get_scope` fail-closed → **所有人 403**，而 `verify_metadata` 只比它自己导出的表，照样输出「全部校验项一致」——**校验的是自己导出的子集，缺陷天然不可见**。
+- `verify_metadata` 新增三项：① `workspace_memberships` 成员集合 `(user_id, role)` 一致（不比对 `membership_id`，两边都是 `gen_random_uuid` 必然不同）；② `document_versions` 行数一致；③ `document_blobs` **行数 + `octet_length` 字节总数**一致——这一条是 S3a 的探测手段：base64 文本写进 bytea 不报错、行数也一样，只有字节总数会露馅。
+- 新增用例 4 条：`tests/unit/test_auth_a4.py::test_non_dict_jwt_header_is_401_not_500`（用**有效签名**构造，保证走到头部形状检查而非签名检查）、`tests/unit/test_migration_snapshot.py::test_workspace_memberships_are_exported_and_replayed`、`::test_sql_value_decodes_blob_content_from_base64`、`::test_render_sql_wraps_blob_base64_in_decode`（把合法的 `decode(...)` 去掉后断言 base64 不再出现在别处，避免负向断言被自己的输出命中）。`_minimal_tables()` 也补了 memberships 行。
+- **四条用例都做过反证**（否则等于没测）：把三处修复临时退回后复跑 → 红在 `assert 'workspace_memberships' in ['principals','workspaces',...]`、`assert "'QUJD'" == "decode('QUJD','base64')"`、`assert decode('AAFiaW5...','base64') in <sql>`、`AttributeError: 'list' object has no attribute 'get'`（正是线上 500 的那个异常）。恢复后 **24 passed**。
+- 已执行：`uv run --frozen ruff check src tests scripts` → All checks passed；`ruff format --check` → 120 files already formatted；定向两文件 → 24 passed；全量 `uv run --frozen pytest` → **332 passed / exit 0**（112.98s，含覆盖率闸）。
+- 环境注记（踩了两次）：① 定向单文件跑 pytest 必须加 `-o addopts=""`，否则 `addopts` 里的 `--cov-fail-under` 会让「单文件跑全绿」变成 exit 1 且不打印汇总行；② 全量测试要显式 `PYKNORA_DATABASE_URL=postgresql+asyncpg://postgres:dev@127.0.0.1:5434/pyknora`——默认 5433 上跑的是并行会话的 `pyknora-phase0-postgres-1`，口令不是 `dev`，会得到 `InvalidPasswordError` 并被误读成 171 个 setup ERROR。
+- 未验证 / 未做：S1（`v_active_chunks` 未过滤已删 KB）、S2（`roles`/`role_grants` 全局、可被任租户 owner 改写）仍在后续批次；`document_blobs` 的字节校验只有单元层（真库往返未建用例）。
+
 ## 本轮：全新装库 RLS 漂移修复（0011，2026-10-30，经用户「要」授权）
 
 - 怎么发现的：为验证 `0009` 真正进入迁移链，我在**全新空库**上从 `0001` 重放到 `0010`，

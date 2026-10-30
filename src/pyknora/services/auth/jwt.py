@@ -101,6 +101,13 @@ def decode_token(token: str, secret: str | None = None) -> dict[str, Any]:
     except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
         raise AppError(ErrorCode.UNAUTHENTICATED, "malformed token") from exc
 
+    # header / payload 必须是 JSON 对象。`[]`、`"x"`、`123` 都能被 json.loads 解析成功，
+    # 但随后 `header.get(...)` 抛 AttributeError、`"exp" not in 123` 抛 TypeError——
+    # 两者都逃出本函数，被通用异常处理变成 500（还带 retryable=true），
+    # 等于把客户端伪造的令牌算成服务端故障。这里是不可信输入的第一道类型闸。
+    if not isinstance(header, dict) or not isinstance(payload, dict):
+        raise AppError(ErrorCode.UNAUTHENTICATED, "malformed token")
+
     # 关键：不看 header["alg"] 决定用什么算法，只拒绝非 HS256。
     if header.get("alg") != "HS256":
         raise AppError(ErrorCode.UNAUTHENTICATED, "unsupported alg")
