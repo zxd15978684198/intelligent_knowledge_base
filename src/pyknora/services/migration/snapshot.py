@@ -197,8 +197,13 @@ _SPEC_BY_NAME: dict[str, TableSpec] = {spec.name: spec for spec in TABLES}
 #:
 #: **部署顺序约束**：本句依赖 `migrations/0007_cjk_bigram_fts.sql` 建的两个函数。
 #: 目标库必须先跑完迁移再恢复快照，否则这里会因函数不存在而报错。
-#: `WHERE ... tsvector IS NULL` 是正确的：`FORBIDDEN_COLUMNS` 不含 tsvector，
-#: 所以快照本来就不搬这一列，恢复后全为 NULL，等于全量重算。
+#: `WHERE ... tsvector IS NULL` 是正确的：`FORBIDDEN_COLUMNS`（本文件 `:40`）**含**
+#: `tsvector`，导出时拒绝搬这一列，所以重放后该列必为 NULL，等于全量重算；
+#: 留着 `IS NULL` 还让本句对"部分行已有词元"的库幂等（只补缺，不重算已有）。
+#:
+#: 本句的行为有真库用例兜底：`tests/integration/test_migration_tsvector.py`
+#: 会先插一条 `tsvector IS NULL` 的 chunk，跑完本句后要求"报销"/"住宿"这类
+#: 二字词能搜到——口径退回裸 content 时它必红。
 _TSVECTOR_SQL = text(
     "UPDATE chunks SET tsvector = to_tsvector('simple', pyknora_cjk_bigram(content)) "
     "WHERE build_id IN :builds AND tsvector IS NULL"
