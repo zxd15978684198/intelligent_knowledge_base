@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -108,16 +109,34 @@ async def enqueue(
 
 
 async def claim(
-    session: AsyncSession, *, worker_id: str, lease_seconds: int = 90
+    session: AsyncSession,
+    *,
+    worker_id: str,
+    lease_seconds: int = 90,
+    job_types: Sequence[str] | None = None,
 ) -> ClaimedJob | None:
     """取一件作业。单条 SQL 完成"选中 + 加锁 + 标记"，不存在两步式的竞态窗口。
 
     `SKIP LOCKED` 让并发 Worker 直接跳过别人已锁住的行，而不是排队等锁；
     这是"两个 Worker 不会拿到同一件活"的全部机制。
+
+    `job_types` 限定本 Worker 能消费的类型，**应当按消费能力传**：不加过滤时，一个
+    只认 `ingest` 的 Worker 会把别人新增的作业类型领走、判失败——作业从此卡在
+    `failed`，而不是留在队列里等正确的消费者。传 `None` 表示不过滤（旧行为）。
     """
     now = datetime.now(UTC)
+    params: dict[str, object] = {
+        "expires_at": now + timedelta(seconds=lease_seconds),
+        "now": now,
+        "worker_id": worker_id,
+    }
+    type_filter = ""
+    if job_types is not None:
+        type_filter = " AND c.job_type = ANY(:job_types)"
+        params["job_types"] = list(job_types)
+
     stmt = text(
-        """
+        f"""
         UPDATE ingestion_jobs j
         SET status = 'processing',
             lease_epoch = j.lease_epoch + 1,
@@ -127,8 +146,8 @@ async def claim(
             updated_at = :now
         WHERE j.job_id = (
             SELECT c.job_id FROM ingestion_jobs c
-            WHERE c.status = 'pending'
-               OR (c.status = 'processing' AND c.lease_expires_at < :now)
+            WHERE (c.status = 'pending'
+               OR (c.status = 'processing' AND c.lease_expires_at < :now)){type_filter}
             ORDER BY c.created_at
             LIMIT 1
             FOR UPDATE SKIP LOCKED
@@ -137,20 +156,7 @@ async def claim(
                   j.attempt, j.lease_epoch, j.payload
         """
     )
-    row = (
-        (
-            await session.execute(
-                stmt,
-                {
-                    "expires_at": now + timedelta(seconds=lease_seconds),
-                    "now": now,
-                    "worker_id": worker_id,
-                },
-            )
-        )
-        .mappings()
-        .one_or_none()
-    )
+    row = (await session.execute(stmt, params)).mappings().one_or_none()
     if row is None:
         return None
 

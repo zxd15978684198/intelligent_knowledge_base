@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Final
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -281,6 +282,12 @@ async def process_job(
     )
 
 
+# 本 Worker 能消费的作业类型。**必须显式声明并传给 `claim`**：队列里有别人新增的
+# 类型时，不过滤会让本 Worker 把它领走、在 `process_job` 里判 unknown 然后失败，
+# 作业就永远进不了正确的消费者手里。
+SUPPORTED_JOB_TYPES: Final[tuple[str, ...]] = ("ingest", "purge")
+
+
 async def run_once(
     session: AsyncSession,
     *,
@@ -295,7 +302,12 @@ async def run_once(
     如果不先回滚到保存点，`except` 里的清理语句自己也会失败，
     真正的错误就被 "transaction is aborted" 盖掉了——排错时极难定位。
     """
-    job = await queue.claim(session, worker_id=worker_id, lease_seconds=settings.lease_seconds)
+    job = await queue.claim(
+        session,
+        worker_id=worker_id,
+        lease_seconds=settings.lease_seconds,
+        job_types=SUPPORTED_JOB_TYPES,
+    )
     if job is None:
         return None
     try:

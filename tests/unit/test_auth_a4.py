@@ -180,3 +180,24 @@ def test_non_numeric_exp_is_401_not_500() -> None:
     with pytest.raises(AppError) as exc:
         decode_token(f"{header}.{payload}.{sig}", secret=SECRET)
     assert exc.value.code == ErrorCode.UNAUTHENTICATED
+
+
+def test_token_without_exp_is_rejected() -> None:
+    """无 `exp` 的令牌等于永久令牌。
+
+    `issue_token` 永远会写 `exp`，所以"签名正确但没有过期时间"只可能来自手工构造或
+    伪造。放行它就等于把有效期做成可选项——这正是 fail-open 的典型形状。
+    """
+    payload = jwt_mod._b64url_encode(
+        json.dumps({"sub": str(PRINCIPAL), "default_workspace_id": str(WORKSPACE_A)}).encode()
+    )
+    header = jwt_mod._b64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    sig = jwt_mod._b64url_encode(
+        hmac.new(SECRET.encode(), f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    )
+
+    with pytest.raises(AppError) as exc:
+        decode_token(f"{header}.{payload}.{sig}", secret=SECRET)
+
+    assert exc.value.code == ErrorCode.UNAUTHENTICATED
+    assert exc.value.message == "malformed token"

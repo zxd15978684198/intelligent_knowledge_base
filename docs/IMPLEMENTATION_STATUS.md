@@ -1,6 +1,32 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：检索两路真并行（成员3 域，经用户「5要并行」授权）——`services/retrieval/search.py` 的 `search_hybrid` 原先 docstring 写「并行」实则两串行 `await`，改为 `asyncio.gather` 两路；因 `AsyncSession` 不支持并发语句，新增独立 session 依赖 `get_keyword_search_repo()`，`query.py`/`chat.py` 注入透传，另加 1 条「关键词必须走第二个仓库」的单元断言，全量 **303 passed / exit 0**，见下方「本轮：检索两路真并行」**；紧接其后是成员管理与权限自省补全（成员4 域，经用户「你写一份成员管理修复计划，然后执行」授权代做）——补上 6 个端点（`GET`/`POST /workspaces/{ws}/members`、`DELETE .../members/{id}`、`PUT /workspaces/{ws}/owner`、`GET .../members/{id}/permissions`、`GET /auth/me`）、2 个 repo 方法（`delete_membership` / `transfer_ownership`）、22 个新用例（其中 5 个是"新端点忘挂权限"的结构守卫），全量 **297 passed / exit 0**，见下方「本轮：成员管理与权限自省补全」**；再往前是中文全文检索从「查不出」修到「能查出」（成员2 域，经用户「现在先不做评测集合，把中文 FTS 修好或砍掉」授权）——`tsvector` 改为 `to_tsvector('simple', pyknora_cjk_bigram(content))`、查询侧改用 `pyknora_cjk_tsquery()` 并做 AND→OR 两级降级、新增 `ChunkRepo.search_keyword` 原语，新增迁移 `migrations/0007_cjk_bigram_fts.sql`（零新扩展、零新镜像），见下方「本轮：中文 FTS 修好」**；紧接其后是「角色是数据，不是 DDL 枚举」（成员4 域，经用户「补」授权代做）——摘掉 `workspace_memberships.role` 的列举式 `CHECK`，换成格式约束 + 指向 `roles(role_key)` 的外键，新增 `migrations/0008_roles_are_data.sql`、角色 CRUD 两个端点、`RoleCatalog` 改由 `roles` 表驱动，见下方「本轮：角色是数据，不是 DDL 枚举」**；再往前是 `role_grants` 从「预留」变「已接入」（成员4 域，经用户「好吧你落地role_grants」授权代做）——运行期判权链改为 `workspace_memberships.role` → `roles` → `role_grants`，新增 15 个权限点、6 个 `/workspaces/{ws}/roles|permissions` 端点、`api/deps.py` 权限依赖工厂，全量 **263 passed**，见下方「本轮：`role_grants` 落地」**；再往前是 P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：审查三条缺陷收口（经用户「要，一并处理审查」授权）——`services/queue/jobs.py` 的 `claim()` 增加 `job_types` 过滤并由 `workers/ingest_worker.py` 显式声明 `SUPPORTED_JOB_TYPES=("ingest","purge")`（原先任何 Worker 都可能领走不认识的类型、判 unknown 后作业直接丢）、`services/auth/jwt.py` 强制 `exp`（原先缺 `exp` 即放行 = 永久令牌，fail-open）、`api/v1/documents.py` 抽出 `_read_bounded()` 按 1MiB 分块读到上限即断（原先整包读进内存才判断 50MB），新增 5 条用例，全量 **308 passed / exit 0**，见下方「本轮：审查三条缺陷收口」**；紧接其后是检索两路真并行（成员3 域，经用户「5要并行」授权）——`services/retrieval/search.py` 的 `search_hybrid` 原先 docstring 写「并行」实则两串行 `await`，改为 `asyncio.gather` 两路；因 `AsyncSession` 不支持并发语句，新增独立 session 依赖 `get_keyword_search_repo()`，`query.py`/`chat.py` 注入透传，另加 1 条「关键词必须走第二个仓库」的单元断言，全量 **303 passed / exit 0**，见下方「本轮：检索两路真并行」**；紧接其后是成员管理与权限自省补全（成员4 域，经用户「你写一份成员管理修复计划，然后执行」授权代做）——补上 6 个端点（`GET`/`POST /workspaces/{ws}/members`、`DELETE .../members/{id}`、`PUT /workspaces/{ws}/owner`、`GET .../members/{id}/permissions`、`GET /auth/me`）、2 个 repo 方法（`delete_membership` / `transfer_ownership`）、22 个新用例（其中 5 个是"新端点忘挂权限"的结构守卫），全量 **297 passed / exit 0**，见下方「本轮：成员管理与权限自省补全」**；再往前是中文全文检索从「查不出」修到「能查出」（成员2 域，经用户「现在先不做评测集合，把中文 FTS 修好或砍掉」授权）——`tsvector` 改为 `to_tsvector('simple', pyknora_cjk_bigram(content))`、查询侧改用 `pyknora_cjk_tsquery()` 并做 AND→OR 两级降级、新增 `ChunkRepo.search_keyword` 原语，新增迁移 `migrations/0007_cjk_bigram_fts.sql`（零新扩展、零新镜像），见下方「本轮：中文 FTS 修好」**；紧接其后是「角色是数据，不是 DDL 枚举」（成员4 域，经用户「补」授权代做）——摘掉 `workspace_memberships.role` 的列举式 `CHECK`，换成格式约束 + 指向 `roles(role_key)` 的外键，新增 `migrations/0008_roles_are_data.sql`、角色 CRUD 两个端点、`RoleCatalog` 改由 `roles` 表驱动，见下方「本轮：角色是数据，不是 DDL 枚举」**；再往前是 `role_grants` 从「预留」变「已接入」（成员4 域，经用户「好吧你落地role_grants」授权代做）——运行期判权链改为 `workspace_memberships.role` → `roles` → `role_grants`，新增 15 个权限点、6 个 `/workspaces/{ws}/roles|permissions` 端点、`api/deps.py` 权限依赖工厂，全量 **263 passed**，见下方「本轮：`role_grants` 落地」**；再往前是 P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+
+## 本轮：审查三条缺陷收口（2026-10-29，经用户「要，一并处理审查」授权）
+
+- 任务：代码缺陷审查（用户 `/receiving-code-review 检查当前项目有无缺陷`）里被判定要修的三条——
+  `#6` 队列 `claim()` 不带类型过滤；P1-a `jwt.decode_token` 对**缺 `exp`** 的令牌放行；
+  P1-b 上传先 `await file.read()` 读满整个请求体再判断 50MB 上限。起始 `HEAD=1104ed3`。
+- 改动：
+  - `src/pyknora/services/queue/jobs.py:69`：`claim()` 新增 `job_types: Sequence[str] | None = None`，
+    非 None 时拼 `AND c.job_type = ANY(:job_types)`；None 保持"不过滤"（兼容既有调用与测试）。
+  - `src/pyknora/workers/ingest_worker.py:284`：新增模块常量
+    `SUPPORTED_JOB_TYPES: Final[tuple[str, ...]] = ("ingest", "purge")`，`run_once` 显式传给 `claim`。
+  - `src/pyknora/services/auth/jwt.py:131`：`exp` 改为**必填**——缺失即 `UNAUTHENTICATED / "malformed token"`
+    （`issue_token` 永远写 `exp`，所以"签名对但没有 exp"只可能是手工构造或伪造）。
+  - `src/pyknora/api/v1/documents.py:118`：抽出 `_read_bounded(file, limit)`——先用 `file.size` 声明值挡，
+    再按 1MiB 分块读到 `limit + 1` 字节立即中断，`read_upload()` 改为调用它。
+  - 测试：`tests/unit/test_upload_bounded.py`（新增 3 条：声明超限零读取 / 未声明超限提前中断 /
+    正常读完）、`tests/unit/test_auth_a4.py`（+`test_token_without_exp_is_rejected`）、
+    `tests/integration/test_queue_fencing.py`（+`test_claim_filters_by_job_type`）。
+- 已执行（真实输出）：`uv run ruff check src tests` → `All checks passed!`；
+  `uv run ruff format --check src tests` → `111 files already formatted`；
+  定向 `pytest -q tests/unit/test_upload_bounded.py tests/unit/test_auth_a4.py
+  tests/integration/test_queue_fencing.py` → **21 passed**；
+  `PYKNORA_DATABASE_URL=…:5434 uv run pytest -q` → **308 passed, exit 0**。
+- 未验证：`claim` 的 `job_types=None` 兼容路径没有专门用例（现有测试都走新参数或默认）；
+  `_read_bounded` 的 `file.size` 在生产 ASGI 下由 Starlette 从 multipart 头填入，测试里是伪值。
+- 下一步：审查剩余的 #4（连接池 2 session/请求未压测）等低风险项；`2 extra` 遗留项见上一轮段。
 
 ## 本轮：检索两路真并行（2026-10-29，成员3 域，经用户「5要并行」授权）
 

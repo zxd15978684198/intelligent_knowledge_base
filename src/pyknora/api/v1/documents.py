@@ -47,6 +47,35 @@ from pyknora.services.ingest.parser import SUPPORTED_SUFFIXES
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["documents"])
 
+_UPLOAD_CHUNK_BYTES = 1 << 20
+
+
+async def _read_bounded(file: UploadFile, limit: int) -> bytes:
+    """分块读上传体，一超过 `limit` 立刻中断。
+
+    直接 `await file.read()` 再比大小的话，一个 10GB 的请求会先把内存吃光；而
+    `UploadFile.size` 只反映 multipart 头里声明的长度，客户端可以不声明或谎报。
+    所以两道闸都要：声明长度先挡一次，实际读取再按块封顶。
+    """
+    declared = file.size
+    if declared is not None and declared > limit:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            "file too large",
+            details={"max_bytes": limit, "declared_bytes": declared},
+        )
+
+    buffer = bytearray()
+    while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
+        buffer.extend(chunk)
+        if len(buffer) > limit:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                "file too large",
+                details={"max_bytes": limit, "at_least_bytes": len(buffer)},
+            )
+    return bytes(buffer)
+
 
 class DocumentAccepted(BaseModel):
     """上传/删除的受理回执。"""
@@ -118,15 +147,7 @@ async def upload(
             details={"supported": sorted(SUPPORTED_SUFFIXES)},
         )
 
-    data = await file.read()
-    # 大小在读完才算得出来，所以先读后判。真实部署应改为流式读 + 提前中断，
-    # 否则一个 10GB 的请求会先把内存吃光——这条已记在计划的已知限制里。
-    if len(data) > settings.max_upload_bytes:
-        raise AppError(
-            ErrorCode.INVALID_REQUEST,
-            "file too large",
-            details={"max_bytes": settings.max_upload_bytes, "actual_bytes": len(data)},
-        )
+    data = await _read_bounded(file, settings.max_upload_bytes)
 
     result = await upload_document(
         session,

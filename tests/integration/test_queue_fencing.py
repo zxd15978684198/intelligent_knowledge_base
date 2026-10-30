@@ -263,3 +263,30 @@ async def test_cancelled_job_is_terminal_and_not_claimable(session, scope_a) -> 
         text("SELECT status FROM ingestion_jobs WHERE job_id = :j"), {"j": job.job_id}
     )
     assert row.scalar_one() in queue.TERMINAL_STATUSES
+
+
+async def test_claim_filters_by_job_type(session, scope_a) -> None:
+    """`job_types` 必须真的进 WHERE：否则 Worker 会领走自己不认识的作业。
+
+    场景是"以后加了第三种作业类型"：没过滤时任何 Worker 都可能先领到它，
+    然后在 `process_job` 里撞 unknown 分支 → 作业直接 failed，而正确的消费者
+    永远等不到它——作业不是排队，是丢了。
+    """
+    doc_id = await _document(session, scope_a)
+    purge = await queue.enqueue(
+        session,
+        scope=scope_a,
+        document_id=doc_id,
+        job_type="purge",
+        payload={"principal_id": str(scope_a.principal_id)},
+    )
+    await session.flush()
+
+    # 只消费 ingest 的 Worker 看不见 purge 作业
+    assert await queue.claim(session, worker_id="w-ingest", job_types=("ingest",)) is None
+
+    # 声明 purge 的才能领到，且拿到的就是那一件
+    claimed = await queue.claim(session, worker_id="w-purge", job_types=("purge",))
+    assert claimed is not None
+    assert claimed.job_id == purge.job_id
+    assert claimed.job_type == "purge"

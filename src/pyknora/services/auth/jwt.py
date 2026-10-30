@@ -109,14 +109,16 @@ def decode_token(token: str, secret: str | None = None) -> dict[str, Any]:
     if not hmac.compare_digest(expected, signature):
         raise AppError(ErrorCode.UNAUTHENTICATED, "bad signature")
 
-    exp = payload.get("exp")
-    if exp is not None:
-        try:
-            expired = float(exp) <= time.time()
-        except (TypeError, ValueError) as exc:
-            # exp 不是数字时不能让它变成 500：那是客户端数据，属于 401。
-            raise AppError(ErrorCode.UNAUTHENTICATED, "malformed token") from exc
-        if expired:
-            raise AppError(ErrorCode.UNAUTHENTICATED, "token expired")
+    # `exp` 必填。`issue_token` 总是写它，所以"没有 exp"只可能来自伪造或手工构造——
+    # 「没有过期时间就不校验过期」等于给这类令牌永久通行证，是 fail-open。
+    if "exp" not in payload:
+        raise AppError(ErrorCode.UNAUTHENTICATED, "malformed token")
+    try:
+        expired = float(payload["exp"]) <= time.time()
+    except (TypeError, ValueError) as exc:
+        # exp 不是数字时不能让它变成 500：那是客户端数据，属于 401。
+        raise AppError(ErrorCode.UNAUTHENTICATED, "malformed token") from exc
+    if expired:
+        raise AppError(ErrorCode.UNAUTHENTICATED, "token expired")
 
     return payload
