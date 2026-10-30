@@ -94,9 +94,11 @@ async def _seed_one(session, scope: Scope, kb_id: UUID, text: str, dim: int = 51
             """
             INSERT INTO chunks
                 (chunk_id, workspace_id, document_id, build_id, index_version,
-                 attempt_id, chunk_ordinal, content, content_hash, embedding)
+                 attempt_id, chunk_ordinal, content, content_hash, embedding,
+                 tsvector)
             VALUES (:chunk, :ws, :doc, :build, 1, :attempt, 0, :content,
-                    md5(:content), CAST(:vec AS vector))
+                    md5(:content), CAST(:vec AS vector),
+                    to_tsvector('simple', pyknora_cjk_bigram(:content)))
             """
         ),
         {
@@ -126,18 +128,8 @@ async def test_search_returns_hits_with_distance(session, scope_a) -> None:
 
 
 async def test_keyword_search_matches_full_chinese_token(session, scope_a) -> None:
-    """simple 配置按连续中文词整词匹配；本测试查询完整锚点词。"""
-    from sqlalchemy import text as sql
-
+    """整词查询命中（AND 级）：查询的每个二元组都在正文里。"""
     doc_id = await _seed_one(session, scope_a, KB_ID, "银狐锚点 检索测试")
-    await session.execute(
-        sql(
-            "UPDATE chunks SET tsvector = to_tsvector('simple', content) "
-            "WHERE workspace_id = :ws AND document_id = :doc"
-        ),
-        {"ws": scope_a.workspace_id, "doc": doc_id},
-    )
-    await session.commit()
 
     hits = await SqlChunkSearchRepo(session).search_keyword(scope_a, KB_ID, "银狐锚点", limit=5)
 
@@ -146,19 +138,82 @@ async def test_keyword_search_matches_full_chinese_token(session, scope_a) -> No
     assert hits[0].content == "银狐锚点 检索测试"
 
 
+async def test_keyword_search_matches_partial_chinese_word(session, scope_a) -> None:
+    """截断成 2 个汉字也能命中——这是 0007 修掉的那个缺陷。
+
+    修复前 `to_tsvector('simple', content)` 把"银狐锚点 检索测试"切成一整段词元，
+    查"银狐"返回 0 行；现在存二元组，AND 级就能命中。
+    """
+    await _seed_one(session, scope_a, KB_ID, "银狐锚点 检索测试")
+
+    hits = await SqlChunkSearchRepo(session).search_keyword(scope_a, KB_ID, "银狐", limit=5)
+
+    assert len(hits) == 1
+    assert "银狐锚点" in hits[0].content
+
+
+async def test_keyword_search_falls_back_to_or_for_scattered_terms(session, scope_a) -> None:
+    """非连续查询（"银狐报销"不在正文里）由 OR 级兜住，而不是返回空。
+
+    AND 对"银狐报销"要求 银狐 & 狐报 & 报销 全部命中，正文只含前两个 → AND 落空；
+    退到 OR 后返回，正是自然语言问句会走的路径。
+    """
+    await _seed_one(session, scope_a, KB_ID, "银狐锚点报销标准按级别区分")
+
+    hits = await SqlChunkSearchRepo(session).search_keyword(scope_a, KB_ID, "银狐报销", limit=5)
+
+    assert len(hits) == 1
+
+
+async def test_keyword_search_single_char_does_not_match(session, scope_a) -> None:
+    """单个汉字查不到多字词：存储侧只有二元组。已知边界，用测试钉住而不是留给人猜。"""
+    await _seed_one(session, scope_a, KB_ID, "银狐锚点 检索测试")
+
+    hits = await SqlChunkSearchRepo(session).search_keyword(scope_a, KB_ID, "狐", limit=5)
+
+    assert hits == []
+
+
+async def test_keyword_search_ignores_tsquery_metacharacters(session, scope_a) -> None:
+    """查询串里的 tsquery 元字符被当分隔符丢掉，不会变成语法或注入。"""
+    await _seed_one(session, scope_a, KB_ID, "银狐锚点 检索测试")
+
+    # 修复前这一句会因 to_tsquery 语法错误直接抛 500
+    hits = await SqlChunkSearchRepo(session).search_keyword(
+        scope_a, KB_ID, "银狐 & 锚点 | !:*()", limit=5
+    )
+
+    assert len(hits) == 1
+
+
+async def test_keyword_search_punctuation_only_returns_empty(session, scope_a) -> None:
+    """纯标点查询得到空结果而不是异常。"""
+    await _seed_one(session, scope_a, KB_ID, "银狐锚点 检索测试")
+
+    hits = await SqlChunkSearchRepo(session).search_keyword(scope_a, KB_ID, "，。！？", limit=5)
+
+    assert hits == []
+
+
+async def test_keyword_search_caps_overlong_query(session, scope_a) -> None:
+    """超长查询被截断而不是把 to_tsquery 打崩。
+
+    中文二元组下词元数随字符数线性增长：实测 20000 字会让 `to_tsquery` 抛
+    `stack depth limit exceeded`，经 API 就是 500。`search_keyword` 必须在分词前封顶。
+    """
+    await _seed_one(session, scope_a, KB_ID, "银狐锚点 检索测试")
+
+    huge = "银狐锚点报销标准按级别区分一线城市住宿上限" * 1250  # 20 万字符
+    hits = await SqlChunkSearchRepo(session).search_keyword(scope_a, KB_ID, huge, limit=5)
+
+    # 截断后仍是合法查询：不抛异常，且仍能靠 OR 级召回（前缀里有"银狐锚点"）
+    assert len(hits) == 1
+    assert "银狐锚点" in hits[0].content
+
+
 async def test_keyword_search_filters_workspace_in_sql(session, scope_a, scope_b) -> None:
     """相同关键词在另一 workspace 中不可见。"""
-    from sqlalchemy import text as sql
-
-    doc_id = await _seed_one(session, scope_a, KB_ID, "赤鹿锚点 权限测试")
-    await session.execute(
-        sql(
-            "UPDATE chunks SET tsvector = to_tsvector('simple', content) "
-            "WHERE workspace_id = :ws AND document_id = :doc"
-        ),
-        {"ws": scope_a.workspace_id, "doc": doc_id},
-    )
-    await session.commit()
+    await _seed_one(session, scope_a, KB_ID, "赤鹿锚点 权限测试")
 
     repo = SqlChunkSearchRepo(session)
     assert await repo.search_keyword(scope_a, KB_ID, "赤鹿锚点", limit=5)

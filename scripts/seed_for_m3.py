@@ -58,11 +58,13 @@ _NAMESPACE = uuid5(NAMESPACE_URL, "https://pyknora.local/seed-for-m3")
 # 成员3 可以直接拿它当 query 做对照实验：A 区搜 "蓝鲸锚点" 命中 A 的 5 行，
 # 换成 B 的 scope 搜同一个词，命中的是 B 里同样的 5 行，两边的 document_id 互不相交。
 #
-# **查全文检索时必须整词查，不能截断**：`to_tsvector('simple', ...)` 对中文是
-# 按连续汉字串整段切分的，"银狐锚点" 入库后是一个完整的 token，不是 "银狐"+"锚点"。
-# 实测 to_tsquery('simple','银狐') 匹配 '银狐锚点' 的结果是 false。截半个词去查
-# 拿到 0 命中，看起来像"权限过滤把结果吃掉了"，其实只是分词没对上——这是本脚本
-# 最容易被误读成 bug 的地方。
+# **锚点词可以截断查，不必整词**：tsvector 由 `pyknora_cjk_bigram` 分词
+# （连续汉字切成重叠二元组，见 migrations/0007_cjk_bigram_fts.sql），"银狐锚点"
+# 入库后是 `银狐 狐锚 锚点`，所以搜 "银狐"、"锚点"、"银狐锚点" 都能命中，
+# 只是打分不同（含完整短语的 chunk 分数更高）。
+# 但**单个汉字查不到多字词**：存储侧只产出二元组，没有单字词元，搜 "狐" 匹配不到
+# "银狐锚点"。最短有效查询是 2 个汉字。这个边界容易被误读成"权限过滤把结果吃掉了"，
+# 排查时先确认查询本身有 2 个以上连续汉字。
 _DOC_TOPICS: tuple[tuple[str, str], ...] = (
     ("索引构建与发布事务", "蓝鲸锚点"),
     ("向量召回与重排", "银狐锚点"),
@@ -365,9 +367,10 @@ async def seed_document(
     # tsvector 交给 PG 算，而不是在 Python 里拼字符串：
     # 词法分析规则（分词、大小写归一、停用词）属于数据库配置，抄一份到 Python
     # 里就是在制造第二份真相，两边一旦漂移，全文检索与 GIN 索引就会不一致。
+    # 分词必须过 pyknora_cjk_bigram（中文二元组），与 worker/重建索引同一口径。
     await session.execute(
         text(
-            "UPDATE chunks SET tsvector = to_tsvector('simple', content) "
+            "UPDATE chunks SET tsvector = to_tsvector('simple', pyknora_cjk_bigram(content)) "
             "WHERE workspace_id = :workspace_id AND build_id = :build_id"
         ),
         {"workspace_id": ids.workspace_id, "build_id": ids.build_id},

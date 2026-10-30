@@ -1,8 +1,9 @@
 # 成员2 契约草案：摄取与索引交给下游的三件共享物
 
-> 状态：草案 v1（2026-10-28）｜需要成员3、成员5 各回一句「同意」或「改 X」
+> 状态：草案 v2（2026-10-29）｜需要成员3、成员5 各回一句「同意」或「改 X」
 > 读者：成员3（检索与 RAG）、成员5（来源追踪与索引迁移）
-> 依据：本文件所有列名与签名**逐条对照过 `src/pyknora/` 现有代码与 `migrations/0001_init.sql`**，不是从设计文档抄的。凡与旧计划书不一致处，见 §7。
+> 依据：本文件所有列名与签名**逐条对照过 `src/pyknora/` 现有代码与 `migrations/`**，不是从设计文档抄的。凡与旧计划书不一致处，见 §7。
+> v2 变更（2026-10-29，仅 §2 / §3.5 / §5 / §7 受影响）：中文 FTS 已修好——`tsvector` 改为 `to_tsvector('simple', pyknora_cjk_bigram(content))`，查询侧改用 `pyknora_cjk_tsquery()`；**新增 `ChunkRepo.search_keyword` 原语**（原先让成员3 来找我定 `search_text` 的那句作废）。迁移见 `migrations/0007_cjk_bigram_fts.sql`。
 
 ---
 
@@ -46,7 +47,7 @@
 | `char_end` | int | 是 | 在全文中的结束字符偏移 | 成员5 精确引用 | 契约 |
 | `token_count` | int | 是 | 估算 token 数 | 成员3 上下文预算裁剪 | 契约 |
 | `locator_ref` | text | 是 | 非文本资源的定位句柄 | 成员5 | 契约 |
-| `tsvector` | tsvector | 是 | 全文检索向量，由 `to_tsvector('simple', content)` 在写库后算 | 成员3 的关键词（FTS）分支 | 契约 |
+| `tsvector` | tsvector | 是 | 全文检索向量，由 `to_tsvector('simple', pyknora_cjk_bigram(content))` 在写库后算（`migrations/0007_cjk_bigram_fts.sql`）；**查询侧必须用 `pyknora_cjk_tsquery(text, 'and'\|'or')` 生成 tsquery，不能再用 `plainto_tsquery('simple', …)`** | 成员3 的关键词（FTS）分支——但**不要自己写 SQL**，走 §3.5 的 `search_keyword` | 契约 |
 | `embedding` | vector | 是 | 语义向量 | 成员3 的向量召回分支 | 契约 |
 
 三条必须记住的事实：
@@ -86,7 +87,7 @@ async def list_active_chunks(
 - **返回**：`Sequence[ActiveChunk]`，按 `chunk_ordinal` 升序。`ActiveChunk`（`pyknora.schemas.document`）**19 个字段**：`chunk_id` / `workspace_id` / `kb_id` / `document_id` / `build_id` / `index_version` / `attempt_id` / `chunk_ordinal` / `content` / `page_no` / `heading_path` / `char_start` / `char_end` / `token_count` / `locator_ref` / `embedding_model_key` / `embedding_dim` / `chunk_size` / `active_document_version_id`。
 - **失败语义**：**不抛异常、也不返回 `None`**。跨区、文档不存在、staging 未发布，一律返回**空序列**（`[]`）。所以 `if chunks is None` 是永远不成立的分支，`if not chunks` 才是对的。
 - **语义红线**：活动构建之外的数据永远读不到。视图的 `WHERE` 是四条合取（`migrations/0001_init.sql:231-234`）：`d.active_build_id = b.build_id`、`b.state = 'active'`、`d.deleted_at IS NULL`、`c.embedding IS NOT NULL`。`staging` 与 `retired` 的 build 里的切片在结构上不可见——注意最后一条 `embedding IS NOT NULL`，它意味着**"切片写了但向量还没算出来"的行在发布前后都读不到**，向量化失败的批次不会以半成品形态漏到检索里。
-- **注意**：`ActiveChunk` **不含 `tsvector`、也不含 `embedding`**（视图这两列都有，模型刻意没带）。**不要写"逐列对应"的假设**，也不要指望从这里拿到向量自己去算距离——需要向量或关键词打分走 §3.4 的 `search_similar`。
+- **注意**：`ActiveChunk` **不含 `tsvector`、也不含 `embedding`**（视图这两列都有，模型刻意没带）。**不要写"逐列对应"的假设**，也不要指望从这里拿到向量自己去算距离——需要向量走 §3.4 的 `search_similar`，需要关键词召回走 §3.5 的 `search_keyword`。
 
 ### 3.3 `IndexBuildRepo.get`
 
@@ -114,6 +115,23 @@ async def search_similar(
 - **`distance` 是余弦距离，不是相似度**：0 表示方向完全一致，2 表示完全相反。**故意不叫 `score`**——叫 score 就会有人当成"越大越相关"去排序或加阈值。要转相似度写 `1 - distance`，这个减法请写在调用方，别藏在这一层。
 - **失败语义**：跨区 / KB 不存在 → **空序列 `[]`**，不抛异常。查询向量维度与库内不一致 → 抛 `EmbeddingDimensionError`（`details["expected"]` / `details["actual"]` 两个键），因为它不是"没找到"，是调用方配置错了。
 - **维度护栏在 DDL 层，不在这里**：`chunks.embedding` 声明为 `vector(:dim)`，整表维度是一个常量，所以"同库混存 512 与 1024"在 `INSERT` 阶段就被 PG 拒了（实测 `DataError: expected 512 dimensions, not 1024`）。因此本方法里的维度检查是**纵深防御**，主防线是列类型。换模型要换维度必须走迁移（新列或新表），不能插不同长度的向量。这条已由 `tests/integration/test_search_repo.py::test_mixed_dimensions_are_forbidden_by_ddl_not_by_app` 钉住。
+
+### 3.5 `ChunkRepo.search_keyword`（中文修好之后新增的关键词召回原语）
+
+```python
+async def search_keyword(
+    self, scope: Scope, kb_id, query_text: str, *, limit: int = 10,
+) -> list[ActiveChunk]
+```
+
+- **为什么现在有它了**：上一版本文里写的是「关键词(FTS)召回成员2 还没提供原语，要做请来找我」。现在它有了——`src/pyknora/db/repos/reads.py` 的 `SqlChunkRepo.search_keyword`。**同样不要自己写 SQL 打视图**，理由和 §3.4 一样：写漏 `workspace_id` 谓词就是一次越权。
+- **它替你做的降级**：内部是**两阶段**——先用 `AND` 把所有 bigram 同时命中（精确、召回低），不够 `limit` 条再用 `OR` 补（宽松、召回高）。两阶段结果按 `chunk_id` 去重并保持 `ts_rank_cd` 降序，所以**返回顺序仍是全局相关性降序，但你不被告知某一条是 AND 阶段还是 OR 阶段来的**。若你需要这个区分（例如只想要精确命中），跟我说，我加一个可选参数，而不是你在外面重写一遍 SQL。
+- **`query_text` 传原始查询串，不要自己分词**。分词在数据库侧由 `pyknora_cjk_bigram()` 完成（汉字取相邻 2 字、英文数字整词、单字保留、标点当分隔符）。你要是先在 Python 里切一遍再传进来，会被当成一整段再切一次，结果是乱码级 token。
+- **超长查询会被截到 256 字符**（`reads.py::_MAX_KEYWORD_QUERY_CHARS`）。这不是保守，是必需：中文按「字数≈词元数」，而 `to_tsquery` 是递归下降解析——实测 5000 字 → 4999 词元/200ms，**20000 字直接 `stack depth limit exceeded`**，经 API 就是 500。旧实现（`plainto_tsquery('simple', …)`）把整段汉字当 1 个词元所以不会炸，是 bigram 引入的新风险面。截断只影响关键词这一路，向量路仍用完整问题。
+- **限长不能只靠 API schema**：封顶首先落在仓库层（`_MAX_KEYWORD_QUERY_CHARS = 256`），因为任何调用方（含未来的内部任务）都可能绕过 schema 直接调仓库。**第二道已经在 API 层加好**（2026-10-30，经用户确认后越域改了成员3 的 `src/pyknora/schemas/query.py`）：`QueryRequest.query` 现在是 `Field(min_length=1, max_length=1000)`——上限比仓库层宽松，以免砍掉正常长问句；`min_length=1` 是因为空问题会走到 embedding 但语义为空，返回一堆无关片段比 422 更糟。对应用例 `tests/api/test_api_query.py::test_query_rejects_overlong_and_empty_query`（1001 字与空串都必须 422，且向量路一次都没被调用）。
+- **失败语义**：跨区 / KB 不存在 / 无命中 → **空列表 `[]`**，不抛异常。纯标点查询 → `[]` 不报错；单个汉字查询 → `[]`，因为 bigram 最短有效长度是 2 个汉字（已知边界：`pyknora_cjk_bigram('税')` 只产出 `税` 一个词元，而多字词的索引里没有 `税` 这个 token，所以对不上；要单字召回得再叠一层 `ILIKE` 或 `pg_trgm`，本轮没做）。
+- **参数化**：`query_text` 走绑定参数，查询串里的 `& | ! : * (` 等 tsquery 元字符在分词阶段被当分隔符丢掉，不构成注入面（`tests/integration/test_search_repo.py::test_keyword_search_ignores_tsquery_metacharacters`）。
+- **和 §3.4 的关系**：两者是并行的召回通道，融合（RRF）在成员3 那层做。`search_keyword` 只给候选，不给分数——`ts_rank_cd` 的值不对外暴露，理由同 §3.4 不暴露原始距离。
 
 ---
 
@@ -168,7 +186,7 @@ async def get_embedding_profile(self, scope: Scope, kb_id) -> object | None
 
 但有一件**必须由你做**的事，视图无法替你做：**查询向量必须用行内的 `embedding_model_key` / `embedding_dim` 去校验**。视图给出的 `embedding_dim` 是"这行数据属于哪个向量空间"，你拼出来的查询向量若与它不同维，`<=>` 运算会直接报错（维度不一致），而不是给你一个错的结果。换言之：视图保证"不会读到旧 build 的数据"，但不保证"你的查询向量和它同维"——后者只能由你在 SQL 或服务层显式对齐。
 
-补充（同属第一条的延伸，但很容易踩）：`list_active_chunks` 返回的 `ActiveChunk` **不带 `embedding` 和 `tsvector`**。所以你**不要**自己写 SQL 去打视图取这两列——向量召回走 §3.4 的 `search_similar`（它已经把 `workspace_id` 谓词写好了）；关键词（FTS）召回这一段成员2 还没提供原语，若你要做，请直接找我，我们一起定一个 `search_text`，而不是各写一份 SQL。**两份各写一份的结果是：一份漏了 workspace 谓词、另一份没漏，而两者返回值长得一样。**
+补充（同属第一条的延伸，但很容易踩）：`list_active_chunks` 返回的 `ActiveChunk` **不带 `embedding` 和 `tsvector`**。所以你**不要**自己写 SQL 去打视图取这两列——向量召回走 §3.4 的 `search_similar`（它已经把 `workspace_id` 谓词写好了）；关键词召回走 §3.5 的 `search_keyword`（同样带谓词）。**两份各写一份的结果是：一份漏了 workspace 谓词、另一份没漏，而两者返回值长得一样。**
 
 **第二条：`Scope` 是必填参数，`scope.owns(None)` 返回 `False`。**
 
@@ -233,6 +251,7 @@ async def publish(session: AsyncSession, *, job: ClaimedJob, manifest: PublishMa
 | 方法归属 | 一个 `DocumentReader` 同时含 `get_active` / `list_active_chunks` / `fetch` | 拆成四个 Protocol：`DocumentRepo` / `ChunkRepo` / **`ChunkSearchRepo`（新增，向量检索原语）** / `IndexBuildRepo`，另有 `KbRepo` | 依赖注入按单个 Protocol 声明，不要按合并类声明 |
 | 分页 | `list_active_chunks(scope, document_id, limit, cursor) -> (Sequence, str \| None)` | `list_active_chunks(scope, document_id, *, limit=100, offset=0) -> Sequence` | 没有 next_cursor，分页是 offset 式 |
 | 向量检索 | 计划书未定义（只有一句 `fetch(scope, kb_id, top_k)`，未实现） | **新增 `ChunkSearchRepo.search_similar(scope, kb_id, query_vector, *, limit=10, document_id=None) -> Sequence[ScoredChunk]`**，`distance` 是余弦距离 | 这是成员3 唯一的向量召回入口，别自己写 SQL 打视图 |
+| 关键词检索 | 计划书未定义（`search_hybrid` 内部直接 `plainto_tsquery`，无独立原语） | **新增 `ChunkRepo.search_keyword(scope, kb_id, query_text, *, limit=10) -> list[ActiveChunk]`**，内部 AND→OR 两阶段降级 | 这是成员3 唯一的关键词召回入口；**查询串不要自己分词**，分词在库侧 |
 | `IndexBuildRepo.get` | `get(build_id)`，无 scope | `get(scope, build_id)` | 旧写法违反计划书自己的 R3 红线（scope 必填第一个参数） |
 | `ActiveChunk` 位置 | `pyknora.schemas.chunk` | `pyknora.schemas.document`（`schemas/chunk.py` 里是切片器输出 `Chunk`） | import 路径不同 |
 | `ActiveChunk` 字段数 | 与视图列「逐列对应，不多不少」 | `chunks` 17 列 → **视图 21 列**（去掉 `content_hash`，加 `kb_id` / `embedding_model_key` / `embedding_dim` / `chunk_size` / `active_document_version_id`）→ `ActiveChunk` **19 个字段** = 视图减去 `tsvector` 与 `embedding` | 「逐列对应」这句话在当前代码里不成立，差集就在这两列；`kb_id` 是后补的，早期版本没有 |
@@ -249,6 +268,8 @@ async def publish(session: AsyncSession, *, job: ClaimedJob, manifest: PublishMa
 
 | 谁 | 回什么 | 截止 |
 | --- | --- | --- |
-| 成员3 | 「§2 列清单、§3 签名、§5 三条约束」同意 / 改 X | 今天 |
-| 成员5 | 「§6 两条约束 + §3 四个方法够不够用」同意 / 改 X | 今天 |
+| 成员3 | 「§2 列清单、§3 五个方法（含新增的 §3.5 `search_keyword`）、§5 三条约束」同意 / 改 X | 今天 |
+| 成员5 | 「§6 两条约束 + §3 五个方法够不够用」同意 / 改 X | 今天 |
 | 成员1 | §4.1 选甲还是选乙 | 今天（这条卡住我的 `FakeKbRepo` 替换） |
+
+**v2 额外提醒成员3**：如果你已经按 v1 写了 `plainto_tsquery('simple', ...)` 或自己拼 FTS SQL，请**删掉改成 `search_keyword`**。旧写法在中文上返回 0 行且不报错——现象是「融合之后结果变差」，很容易误判成 RRF 权重问题。

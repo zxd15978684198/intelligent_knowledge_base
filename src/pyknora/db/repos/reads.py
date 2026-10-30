@@ -11,6 +11,7 @@ from uuid import UUID
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import TextClause
 
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
@@ -45,6 +46,51 @@ _CHUNK_COLUMNS_BY_BUILD = """
     b.embedding_model_key, b.embedding_dim, b.chunk_size,
     d.active_document_version_id
 """
+
+#: 关键词检索允许的最大查询字符数。
+#:
+#: 中文按字符数≈词元数（1 个汉字对应约 1 个二元组），而 `to_tsquery` 是递归下降解析：
+#: 实测在 pyknora_cjk_bigram 口径下 1000 字 → 999 词元/13.6ms，5000 字 → 4999 词元/200ms，
+#: **20000 字直接 `stack depth limit exceeded`**（SQL 报错 → API 500）。
+#: 旧口径（`plainto_tsquery('simple', content)`）把整段连续汉字当 1 个词元，所以同样的
+#: 2 万字输入不会炸；引入 bigram 后词元数随字符数线性增长，必须在这一层封顶，
+#: 否则任何调用方（不只是 HTTP）都能用一条超长查询把请求打成 500。
+#:
+#: 256 字对真实问句足够宽松，且最坏只有 ~255 个词元（parse 约 2.3ms），比崩溃边界低两个数量级。
+#: 超长时**截前缀**而不是报错：关键词路只是召回通道之一，向量路仍然拿到完整问题。
+_MAX_KEYWORD_QUERY_CHARS = 256
+
+_KEYWORD_STMT_CACHE: dict[str, TextClause] = {}
+
+
+def _keyword_stmt(join_op: str) -> TextClause:
+    """按 and/or 两种 tsquery 组合方式各编译一次 SQL。
+
+    `join_op` 会进 SQL 文本，所以只接受白名单值（不允许把调用方字符串直接拼进去）。
+    缓存是因为同一进程里 and/or 两条语句是固定的，不必每次重新构造 TextClause。
+    """
+    if join_op not in ("and", "or"):
+        raise ValueError(f"join_op 只接受 'and' 或 'or'，收到 {join_op!r}")
+    cached = _KEYWORD_STMT_CACHE.get(join_op)
+    if cached is not None:
+        return cached
+    stmt = text(
+        f"""
+        WITH query AS (
+            SELECT to_tsquery('simple', pyknora_cjk_tsquery(:query_text, '{join_op}')) AS terms
+        )
+        SELECT {_CHUNK_COLUMNS}
+        FROM v_active_chunks AS c
+        CROSS JOIN query AS q
+        WHERE c.workspace_id = :workspace_id
+          AND c.kb_id = :kb_id
+          AND c.tsvector @@ q.terms
+        ORDER BY ts_rank_cd(c.tsvector, q.terms) DESC, c.chunk_id ASC
+        LIMIT :limit
+        """
+    )
+    _KEYWORD_STMT_CACHE[join_op] = stmt
+    return stmt
 
 
 class SqlDocumentRepo:
@@ -272,41 +318,57 @@ class SqlChunkSearchRepo:
         *,
         limit: int = 10,
     ) -> list[ActiveChunk]:
-        """按 PostgreSQL FTS 相关度取 top-k 活动 chunk。
+        """按 PostgreSQL FTS 相关度取 top-k 活动 chunk（中文可用）。
 
-        参数化 query 防止把用户文本当 SQL/tsquery 语法执行。`simple` 与 Worker
-        生成 tsvector 时使用的配置一致。当前中文数据需用索引中的完整连续词查询；
-        中文分词策略尚未评测，不在这里伪造分词或用子串匹配冒充全文检索。
+        分词在数据库侧的 `pyknora_cjk_bigram` 里做（见 `migrations/0007_cjk_bigram_fts.sql`）：
+        Worker 写 `tsvector` 时把连续汉字切成重叠二元组，这里用同一个函数把查询也切成
+        二元组，两边词元口径一致，`@@` 才对中文有意义。
+
+        取数分两级，先精度后召回：
+
+        1. ``and``：要求命中查询里的**全部**二元组。注意这不是短语匹配——`&` 只保证
+           每个词元都出现，不保证相邻；相邻性只通过 `ts_rank_cd` 的覆盖密度间接影响
+           排序。专有名词、编号、错误码（"银狐"、"KB-001"）走这一级能拿到最准的结果。
+        2. ``or``：只要求任一命中，靠 `ts_rank_cd` 排序。自然语言问句（"一线城市住宿
+           报销上限是多少钱"）走 AND 会全落空，必须退到这一级。
+
+        实测依据：文档"银狐锚点报销标准"对查询"银狐报销标准"（不连续）AND=false、
+        OR=true；长问句同理。所以只做 AND 会漏掉一类正常提问，只做 OR 会丢掉短语精度。
+        AND 结果先返回、OR 结果只用来补足到 ``limit``，同一 chunk 不重复出现。
+
+        参数化 query 防止把用户文本当 SQL 执行；查询串里的 tsquery 元字符
+        （``& | ! : * ( )``）在分词阶段被当分隔符丢弃，不构成 tsquery 语法注入。
+        纯标点/空查询在 SQL 层得到 NULL 词元，`@@` 为 NULL，自然 0 行、不报错。
+
+        查询超长时截到 ``_MAX_KEYWORD_QUERY_CHARS`` 字符再分词。这是必需的防御：
+        中文二元组下词元数随字符数线性增长，2 万字的查询会让 `to_tsquery` 报
+        `stack depth limit exceeded`（实测），把请求变成 500。截断只影响关键词这一路，
+        向量路仍用完整问题，融合结果不受影响。
         """
         normalized_query = query_text.strip()
-        if not normalized_query:
+        if not normalized_query or limit <= 0:
             return []
 
-        stmt = text(
-            f"""
-            WITH query AS (
-                SELECT plainto_tsquery('simple', :query_text) AS terms
+        # 截前缀而非报错：见 _MAX_KEYWORD_QUERY_CHARS 的说明（超长会炸 to_tsquery）。
+        body = normalized_query[:_MAX_KEYWORD_QUERY_CHARS]
+
+        collected: dict[UUID, ActiveChunk] = {}
+        for mode in ("and", "or"):
+            result = await self._session.execute(
+                _keyword_stmt(mode),
+                {
+                    "workspace_id": scope.workspace_id,
+                    "kb_id": kb_id,
+                    "query_text": body,
+                    "limit": limit,
+                },
             )
-            SELECT {_CHUNK_COLUMNS}
-            FROM v_active_chunks AS c
-            CROSS JOIN query AS q
-            WHERE c.workspace_id = :workspace_id
-              AND c.kb_id = :kb_id
-              AND c.tsvector @@ q.terms
-            ORDER BY ts_rank_cd(c.tsvector, q.terms) DESC, c.chunk_id ASC
-            LIMIT :limit
-            """
-        )
-        result = await self._session.execute(
-            stmt,
-            {
-                "workspace_id": scope.workspace_id,
-                "kb_id": kb_id,
-                "query_text": normalized_query,
-                "limit": limit,
-            },
-        )
-        return [_to_active_chunk(row) for row in result.mappings()]
+            for row in result.mappings():
+                chunk = _to_active_chunk(row)
+                collected.setdefault(chunk.chunk_id, chunk)
+            if len(collected) >= limit:
+                break
+        return list(collected.values())[:limit]
 
     async def _kb_dims(self, scope: Scope, kb_id: UUID) -> set[int]:
         """本 scope 内该库现存活动向量用到的维度集合。"""

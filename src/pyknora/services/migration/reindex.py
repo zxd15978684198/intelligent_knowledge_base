@@ -436,9 +436,11 @@ async def _reindex_document(
     await session.flush()
 
     # tsvector 由数据库算（与 worker 同一句），避免 Python 侧维护第二套分词规则。
+    # 同样必须过 pyknora_cjk_bigram，否则重建出来的索引搜不到中文短词——
+    # 重建索引是最容易"看起来跑完了、其实口径退回去"的地方。
     await session.execute(
         text(
-            "UPDATE chunks SET tsvector = to_tsvector('simple', content) "
+            "UPDATE chunks SET tsvector = to_tsvector('simple', pyknora_cjk_bigram(content)) "
             "WHERE workspace_id = :workspace_id AND build_id = :build_id"
         ),
         {"workspace_id": scope.workspace_id, "build_id": build.build_id},

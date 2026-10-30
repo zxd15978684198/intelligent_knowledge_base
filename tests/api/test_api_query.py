@@ -160,6 +160,30 @@ async def test_query_rejects_nonpositive_top_k() -> None:
     assert repo.query_vector is None
 
 
+async def test_query_rejects_overlong_and_empty_query() -> None:
+    """超长/空查询在 schema 层就被挡住，不落到 SQL（防 to_tsquery 递归爆栈）。"""
+    repo = FakeSearchRepo()
+    configure(embedder=HashingEmbedder(dim=512))
+    _app, client = _client(repo)
+
+    async with client:
+        too_long = await client.post(
+            f"/api/v1/knowledge-bases/{KB_ID}/query",
+            headers=bearer(),
+            json={"query": "报" * 1001},
+        )
+        empty = await client.post(
+            f"/api/v1/knowledge-bases/{KB_ID}/query",
+            headers=bearer(),
+            json={"query": ""},
+        )
+
+    assert too_long.status_code == 422
+    assert empty.status_code == 422
+    # 两次都没有进到检索：向量路一次都没被调用。
+    assert repo.query_vector is None
+
+
 async def test_api_lifespan_configures_default_embedder_lazily() -> None:
     reset_state()
 
@@ -181,7 +205,7 @@ async def test_query_returns_hits_from_real_postgres(
     )
     await db_session.execute(
         text(
-            "UPDATE chunks SET tsvector = to_tsvector('simple', content) "
+            "UPDATE chunks SET tsvector = to_tsvector('simple', pyknora_cjk_bigram(content)) "
             "WHERE workspace_id = :ws AND document_id = :doc"
         ),
         {"ws": WORKSPACE_A, "doc": document_id},

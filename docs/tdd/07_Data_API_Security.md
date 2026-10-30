@@ -249,3 +249,16 @@ Approval 与审计见 02：审批参数、主体、工具版本、scope、有效
 异常恢复依靠 01 Outbox/单 owner、02 receipt/审批、06 版本发布；API 202 表示已登记而非执行成功。08 覆盖数据库约束、越权引用/签名/恢复/游标、RLS 连接污染、审批重放/撤权、事件草稿/终态、模型和 parser 注入、PII/secret canary。所有表/endpoint 在实现阶段生成迁移及 OpenAPI 契约测试；本轮未运行 DB/API 安全测试。
 
 未决：身份域例外 ADR、P0 认证方式、模型与 PII 处理许可、RLS 策略精确 SQL、事件/幂等/对象 TTL、审计不可篡改存储、跨空间共享、法定擦除与保留冲突、查询中文分词。数值均为建议配置，不是已实现 SLA。
+
+## 7. 实现期新增与偏差登记（全部为**提议**状态，待用户接受）
+
+本节登记实现阶段出现的、本文正文未列的口径。它与 `docs/IMPLEMENTATION_STATUS.md` 的逐轮记录互为索引：状态文件记"这轮做了什么"，这里记"文档口径因此怎么变"。
+
+**7.1 错误码新增 4 个（2026-10-29 前）**：`CONFLICT` / `CURSOR_EXPIRED` / `DEPENDENCY_UNAVAILABLE` / `INTERNAL_ERROR`。§6 原表未列，实现期因 409 冲突、游标过期、依赖不可用、未捕获异常兜底而需要，统一在 `src/pyknora/core/errors.py` 定义并按 §6 的错误体形状返回。
+
+**7.2 `chunks.tsvector` 的写入口径改变（2026-10-29）**：不再直接对正文做 `to_tsvector('simple', content)`，改为 `to_tsvector('simple', pyknora_cjk_bigram(content))`；查询侧不再用 `plainto_tsquery('simple', …)`，改用 `pyknora_cjk_tsquery(text, 'and'|'or')`（`migrations/0007_cjk_bigram_fts.sql`）。**为什么这算契约变更而不是局部优化**：`tsvector` 是 §4 表结构里的列，成员5 的重建索引（`services/migration/reindex.py`）与快照（`services/migration/snapshot.py`）都要写它，成员3 的检索要按新 token 语义查询——三处不一起改就会出现"索引里旧 token、查询里新 token"，现象是**检索静默变差而不是报错**。影响面：写侧三处 SQL（worker / reindex / snapshot）+ 读侧一个 repo 方法 + 造数脚本 + 三处测试夹具。`chunks` 当时 0 行，回填成本为零。
+
+**7.3 新增读原语 `ChunkRepo.search_keyword`（2026-10-29）**：`(scope, kb_id, query_text, *, limit=10) -> list[ActiveChunk]`，内部 AND→OR 两级降级，跨区/无命中返回空列表不抛异常。**授权在 SQL 里**（与 §5「所有 repository 必填 Scope，SQL 先过滤 workspace」一致），不让调用方自己拼 FTS SQL——两份各写一份的结果是其中一份漏了 `workspace_id` 谓词，而两者返回值长得一样。
+
+**7.4 未随本轮解决的已知缺口**：查询向量与索引维度不符时的护栏在 `ChunkSearchRepo.search_similar`（因为 `v_active_chunks` 视图不校验维度）；单汉字查询无召回（bigram 最短有效长度 2 汉字）；停用词表未做；没有任何召回率/排序质量评测数据。
+

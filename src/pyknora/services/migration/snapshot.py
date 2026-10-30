@@ -192,8 +192,15 @@ _SPEC_BY_NAME: dict[str, TableSpec] = {spec.name: spec for spec in TABLES}
 
 #: 重放后补一次 tsvector：它可由 content 完全重算，属于派生列，
 #: 让 PG 自己算（与 seed / worker 同一口径），不在 Python 里拼。
+#: 口径必须是 pyknora_cjk_bigram：迁库后如果 tsvector 用回裸 content，
+#: 中文检索会在新库上静默失效，而快照本身看起来完整无误。
+#:
+#: **部署顺序约束**：本句依赖 `migrations/0007_cjk_bigram_fts.sql` 建的两个函数。
+#: 目标库必须先跑完迁移再恢复快照，否则这里会因函数不存在而报错。
+#: `WHERE ... tsvector IS NULL` 是正确的：`FORBIDDEN_COLUMNS` 不含 tsvector，
+#: 所以快照本来就不搬这一列，恢复后全为 NULL，等于全量重算。
 _TSVECTOR_SQL = text(
-    "UPDATE chunks SET tsvector = to_tsvector('simple', content) "
+    "UPDATE chunks SET tsvector = to_tsvector('simple', pyknora_cjk_bigram(content)) "
     "WHERE build_id IN :builds AND tsvector IS NULL"
 )
 

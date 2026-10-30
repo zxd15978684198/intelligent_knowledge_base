@@ -194,7 +194,9 @@ stateDiagram-v2
 | ADR-0003 | 提议；AC-E09、A14–A18 | 审批绑定+工具调用账本+原生 interrupt；未知结果需核查，不承诺外部 exactly-once |
 | ADR-0004 | 提议；C01/C06、B05/B11 | DocReader 服务复用+TXT/MD 简单适配；Browser 双后端，先桥接验证再决定 Python 直连 |
 | ADR-0005 | 提议；F-01/05/06、R05/R14 | workspace 复合约束、引用再授权、持久化事件；空间内 principal，跨空间共享暂不支持 |
-| DEC-06 | 待评测 | PG FTS+向量+RRF 起步，BM25/中文分词由 H6 决定；不可比较原始异构分数 |
+| DEC-06 | 待评测（2026-10-29 追加：已有可跑的默认实现，仍待评测） | PG FTS+向量+RRF 起步，BM25/中文分词由 H6 决定；不可比较原始异构分数 |
+
+> **2026-10-29 实现期补充（提议，未评测）**：中文分词在实现阶段已经不能再等 H6——原样用 `to_tsvector('simple', content)` 时，连续汉字会被当成**一个 token**（实测 `'银狐锚点报销标准':1`，`@@ plainto_tsquery('simple','银狐')` = `f`），FTS 那一路静默恒空。当前采用的默认值是**库侧 bigram**：写侧 `to_tsvector('simple', pyknora_cjk_bigram(content))`（汉字取相邻两字、英文数字整词、标点作分隔），读侧 `pyknora_cjk_tsquery(text,'and'|'or')` 并做 AND→OR 两级降级，见 `migrations/0007_cjk_bigram_fts.sql` 与 `src/pyknora/db/repos/reads.py` 的 `search_keyword`。**选它的理由不是"更好"，而是"不用自建镜像"**：`pg_bigm`/`zhparser` 不在 `pg_available_extensions`，`pg_trgm` 是模糊相似度而非确定性命中。DEC-06 的状态因此保持"待评测"——这套口径尚无 Recall/MRR 数据，H6 的对照实验仍欠着；若 H6 结论与之冲突，替换点只在两个 SQL 函数与四处写入语句。
 | DEC-07 | 工作树已对齐，正式基线待确认 | 初读 F-14 为 P0，期间检测到非本轮工具写入的 PRD 修改将其调为 P1；保留该未提交编辑，当前按 P1 设计，未将外部编辑冒充本轮交付 |
 | DEC-08 | 待产品/安全确认 | 首发认证/共享、模型地域、全文保留、合法站点、审批角色、TTL/RPO/RTO、原生 Windows 支持范围 |
 

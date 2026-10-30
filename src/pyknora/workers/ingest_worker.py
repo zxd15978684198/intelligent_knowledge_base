@@ -249,10 +249,13 @@ async def process_job(
         )
     await session.flush()
 
-    # tsvector 由数据库算，避免 Python 侧维护第二套分词规则
+    # tsvector 由数据库算，避免 Python 侧维护第二套分词规则。
+    # 必须过 pyknora_cjk_bigram：`simple` 分词器把连续汉字当**一个词元**，
+    # 直接 to_tsvector('simple', content) 会让"搜银狐"永远搜不到"银狐锚点报销标准"。
+    # 见 migrations/0007_cjk_bigram_fts.sql 与 db/repos/reads.py 的 search_keyword。
     await session.execute(
         text(
-            "UPDATE chunks SET tsvector = to_tsvector('simple', content) "
+            "UPDATE chunks SET tsvector = to_tsvector('simple', pyknora_cjk_bigram(content)) "
             "WHERE workspace_id = :ws AND build_id = :build"
         ),
         {"ws": job.workspace_id, "build": build.build_id},
