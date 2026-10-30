@@ -6,7 +6,9 @@ from collections.abc import Sequence
 from uuid import UUID
 
 import httpx
+import pytest
 from fastapi import FastAPI
+from pydantic import ValidationError
 from sqlalchemy import text
 
 from pyknora.api.deps import get_chunk_search_repo, get_keyword_search_repo
@@ -20,6 +22,7 @@ from pyknora.api.main import (
 from pyknora.core.scope import WORKSPACE_A, Scope
 from pyknora.core.settings import settings
 from pyknora.schemas.document import ActiveChunk, ScoredChunk
+from pyknora.schemas.query import MAX_TOP_K, QueryRequest
 from pyknora.services.ingest.embedder import HashingEmbedder
 from tests.api.tokens import KB_ID, bearer
 from tests.integration.test_search_repo import _seed_one
@@ -161,6 +164,40 @@ async def test_query_rejects_nonpositive_top_k() -> None:
 
     assert response.status_code == 422
     assert repo.query_vector is None
+
+
+async def test_query_rejects_top_k_above_max() -> None:
+    """`top_k` 超上限是 422，不是被静默截断。
+
+    `top_k` 会直接进向量路与关键词路两条 SQL 的 `LIMIT`，还决定响应体大小；
+    静默截断会让调用方以为"库里只有 50 条"，拿错结论比报错代价高。
+    """
+    repo = FakeSearchRepo()
+    configure(embedder=HashingEmbedder(dim=512))
+    _app, client = _client(repo)
+
+    async with client:
+        response = await client.post(
+            f"/api/v1/knowledge-bases/{KB_ID}/query",
+            headers=bearer(),
+            json={"query": "问题", "top_k": MAX_TOP_K + 1},
+        )
+
+    assert response.status_code == 422
+    assert repo.query_vector is None, "校验必须在打库之前"
+
+
+def test_query_accepts_top_k_at_exactly_max() -> None:
+    """边界值本身要放行（不放行就等于上限只有 49）。
+
+    这里只验 schema：用 `QueryRequest` 直接构造，不经过检索链路——
+    本文件的 `FakeSearchRepo.search_similar` 把 `limit == 3` 写死了，
+    走 HTTP 会让"上限放行"这件事被夹具的硬期望干扰成假失败。
+    """
+    assert QueryRequest(query="问题", top_k=MAX_TOP_K).top_k == MAX_TOP_K
+
+    with pytest.raises(ValidationError):
+        QueryRequest(query="问题", top_k=MAX_TOP_K + 1)
 
 
 async def test_query_rejects_overlong_and_empty_query() -> None:

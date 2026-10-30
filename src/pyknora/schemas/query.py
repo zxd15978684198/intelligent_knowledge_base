@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+from typing import Final
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+
+#: 单次检索最多返回多少条片段。这是**资源边界**，不是产品调参项。
+#:
+#: 不封顶的后果是可放大的：`LIMIT :top_k` 直接进向量路与关键词路两条 SQL，
+#: 融合阶段还要为每条候选建一条 `RetrievedChunk` 并序列化进响应体，
+#: 所以 `top_k=100000` 会让一次请求同时放大数据库扫描、Python 内存与响应体积。
+#: 服务层 `services/retrieval/search.py` 也读这个常量做同一道校验——schema 层
+#: 挡住的是 HTTP 入口，服务层挡住的是脚本/内部调用，两层不是重复而是两个入口。
+#:
+#: 50 的依据：本项目 `chat_max_context_chunks` 默认 6，检索 UI 一页展示远小于 50；
+#: 上限取 50 留出 8 倍余量，同时让"误传大数"立刻得到 422 而不是拖慢全服务。
+MAX_TOP_K: Final[int] = 50
 
 
 class QueryRequest(BaseModel):
@@ -26,7 +39,16 @@ class QueryRequest(BaseModel):
             "返回一堆无关片段比返回 422 更糟。"
         ),
     )
-    top_k: int = Field(default=10, gt=0)
+    top_k: int = Field(
+        default=10,
+        ge=1,
+        le=MAX_TOP_K,
+        description=(
+            f"返回片段数上限（1..{MAX_TOP_K}）。"
+            "这是资源边界：它会直接进两条 SQL 的 LIMIT，并决定响应体大小；"
+            "超上限返回 422，不做静默截断——静默截断会让调用方以为自己拿到了 100 条。"
+        ),
+    )
 
 
 class RetrievedChunk(BaseModel):

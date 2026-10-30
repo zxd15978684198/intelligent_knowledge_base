@@ -13,10 +13,26 @@ from uuid import UUID
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
 from pyknora.schemas.document import ScoredChunk
-from pyknora.schemas.query import RetrievedChunk
+from pyknora.schemas.query import MAX_TOP_K, RetrievedChunk
 from pyknora.services.contracts.reads import ChunkSearchRepo
 from pyknora.services.ingest.embedder import EmbeddingProvider
 from pyknora.services.retrieval.rrf import reciprocal_rank_fusion
+
+
+def _require_bounded_limit(value: int, *, name: str) -> None:
+    """校验"条数"类参数落在 `[1, MAX_TOP_K]`。
+
+    服务层也要查上限，不只是 schema 层：脚本、worker、内部调用都绕过 HTTP，
+    而 `limit` 会直接进 SQL 的 `LIMIT`。两层不是重复校验，是两个入口。
+    """
+    if value < 1:
+        raise AppError(ErrorCode.INVALID_REQUEST, f"{name} must be greater than zero")
+    if value > MAX_TOP_K:
+        raise AppError(
+            ErrorCode.INVALID_REQUEST,
+            f"{name} must not exceed {MAX_TOP_K}",
+            details={"max": MAX_TOP_K, "actual": value},
+        )
 
 
 async def search_vector(
@@ -35,8 +51,7 @@ async def search_vector(
     normalized_query = query.strip()
     if not normalized_query:
         raise AppError(ErrorCode.INVALID_REQUEST, "query must not be empty")
-    if top_k < 1:
-        raise AppError(ErrorCode.INVALID_REQUEST, "top_k must be greater than zero")
+    _require_bounded_limit(top_k, name="top_k")
 
     vectors = await embedder.embed([normalized_query])
     if len(vectors) != 1:
@@ -72,12 +87,10 @@ async def search_hybrid(
     normalized_query = query.strip()
     if not normalized_query:
         raise AppError(ErrorCode.INVALID_REQUEST, "query must not be empty")
-    if top_k < 1:
-        raise AppError(ErrorCode.INVALID_REQUEST, "top_k must be greater than zero")
+    _require_bounded_limit(top_k, name="top_k")
 
     candidate_limit = candidate_k if candidate_k is not None else top_k
-    if candidate_limit < 1:
-        raise AppError(ErrorCode.INVALID_REQUEST, "candidate_k must be greater than zero")
+    _require_bounded_limit(candidate_limit, name="candidate_k")
     if rrf_k < 1:
         raise AppError(ErrorCode.INVALID_REQUEST, "rrf_k must be greater than zero")
 

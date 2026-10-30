@@ -10,6 +10,7 @@ import pytest
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import WORKSPACE_A, Scope
 from pyknora.schemas.document import ActiveChunk, ScoredChunk
+from pyknora.schemas.query import MAX_TOP_K
 from pyknora.services.retrieval.rrf import reciprocal_rank_fusion
 from pyknora.services.retrieval.search import search_hybrid, search_vector
 
@@ -242,3 +243,41 @@ async def test_search_hybrid_routes_keyword_to_second_repo(scope: Scope) -> None
         UUID("11111111-1111-1111-1111-111111111111"),
         UUID("22222222-2222-2222-2222-222222222222"),
     }
+
+
+async def test_limits_above_max_top_k_are_rejected(scope: Scope) -> None:
+    """上限是资源边界：超了必须报错，而不是静默截断成 50 条。
+
+    服务层单独校验的依据：脚本/worker 不走 HTTP schema，但它同样会把这个数
+    直接塞进 SQL 的 `LIMIT`。
+    """
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    with pytest.raises(AppError) as exc:
+        await search_vector(scope, KB_ID, "问题", embedder=embedder, repo=repo, top_k=MAX_TOP_K + 1)
+
+    assert exc.value.code == ErrorCode.INVALID_REQUEST
+    assert exc.value.details == {"max": MAX_TOP_K, "actual": MAX_TOP_K + 1}
+    assert embedder.received_texts is None, "校验要在调模型之前"
+    assert repo.received is None
+
+
+async def test_hybrid_rejects_over_max_candidate_k(scope: Scope) -> None:
+    """candidate_k 决定两路各取多少候选，同样不能无限放大。"""
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    with pytest.raises(AppError) as exc:
+        await search_hybrid(
+            scope,
+            KB_ID,
+            "问题",
+            embedder=embedder,
+            repo=repo,
+            candidate_k=MAX_TOP_K + 1,
+        )
+
+    assert exc.value.code == ErrorCode.INVALID_REQUEST
+    assert "candidate_k" in str(exc.value.message)
+    assert embedder.received_texts is None
