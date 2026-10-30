@@ -1,6 +1,33 @@
 # PyKnora 实施状态
 
-更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：成员管理与权限自省补全（成员4 域，经用户「你写一份成员管理修复计划，然后执行」授权代做）——补上 6 个端点（`GET`/`POST /workspaces/{ws}/members`、`DELETE .../members/{id}`、`PUT /workspaces/{ws}/owner`、`GET .../members/{id}/permissions`、`GET /auth/me`）、2 个 repo 方法（`delete_membership` / `transfer_ownership`）、22 个新用例（其中 5 个是"新端点忘挂权限"的结构守卫），全量 **297 passed / exit 0**，见下方「本轮：成员管理与权限自省补全」**；再往前是中文全文检索从「查不出」修到「能查出」（成员2 域，经用户「现在先不做评测集合，把中文 FTS 修好或砍掉」授权）——`tsvector` 改为 `to_tsvector('simple', pyknora_cjk_bigram(content))`、查询侧改用 `pyknora_cjk_tsquery()` 并做 AND→OR 两级降级、新增 `ChunkRepo.search_keyword` 原语，新增迁移 `migrations/0007_cjk_bigram_fts.sql`（零新扩展、零新镜像），见下方「本轮：中文 FTS 修好」**；紧接其后是「角色是数据，不是 DDL 枚举」（成员4 域，经用户「补」授权代做）——摘掉 `workspace_memberships.role` 的列举式 `CHECK`，换成格式约束 + 指向 `roles(role_key)` 的外键，新增 `migrations/0008_roles_are_data.sql`、角色 CRUD 两个端点、`RoleCatalog` 改由 `roles` 表驱动，见下方「本轮：角色是数据，不是 DDL 枚举」**；再往前是 `role_grants` 从「预留」变「已接入」（成员4 域，经用户「好吧你落地role_grants」授权代做）——运行期判权链改为 `workspace_memberships.role` → `roles` → `role_grants`，新增 15 个权限点、6 个 `/workspaces/{ws}/roles|permissions` 端点、`api/deps.py` 权限依赖工厂，全量 **263 passed**，见下方「本轮：`role_grants` 落地」**；再往前是 P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+更新日期：2026-10-29（Asia/Shanghai）。**2026-10-29 追加（最新）：检索两路真并行（成员3 域，经用户「5要并行」授权）——`services/retrieval/search.py` 的 `search_hybrid` 原先 docstring 写「并行」实则两串行 `await`，改为 `asyncio.gather` 两路；因 `AsyncSession` 不支持并发语句，新增独立 session 依赖 `get_keyword_search_repo()`，`query.py`/`chat.py` 注入透传，另加 1 条「关键词必须走第二个仓库」的单元断言，全量 **303 passed / exit 0**，见下方「本轮：检索两路真并行」**；紧接其后是成员管理与权限自省补全（成员4 域，经用户「你写一份成员管理修复计划，然后执行」授权代做）——补上 6 个端点（`GET`/`POST /workspaces/{ws}/members`、`DELETE .../members/{id}`、`PUT /workspaces/{ws}/owner`、`GET .../members/{id}/permissions`、`GET /auth/me`）、2 个 repo 方法（`delete_membership` / `transfer_ownership`）、22 个新用例（其中 5 个是"新端点忘挂权限"的结构守卫），全量 **297 passed / exit 0**，见下方「本轮：成员管理与权限自省补全」**；再往前是中文全文检索从「查不出」修到「能查出」（成员2 域，经用户「现在先不做评测集合，把中文 FTS 修好或砍掉」授权）——`tsvector` 改为 `to_tsvector('simple', pyknora_cjk_bigram(content))`、查询侧改用 `pyknora_cjk_tsquery()` 并做 AND→OR 两级降级、新增 `ChunkRepo.search_keyword` 原语，新增迁移 `migrations/0007_cjk_bigram_fts.sql`（零新扩展、零新镜像），见下方「本轮：中文 FTS 修好」**；紧接其后是「角色是数据，不是 DDL 枚举」（成员4 域，经用户「补」授权代做）——摘掉 `workspace_memberships.role` 的列举式 `CHECK`，换成格式约束 + 指向 `roles(role_key)` 的外键，新增 `migrations/0008_roles_are_data.sql`、角色 CRUD 两个端点、`RoleCatalog` 改由 `roles` 表驱动，见下方「本轮：角色是数据，不是 DDL 枚举」**；再往前是 `role_grants` 从「预留」变「已接入」（成员4 域，经用户「好吧你落地role_grants」授权代做）——运行期判权链改为 `workspace_memberships.role` → `roles` → `role_grants`，新增 15 个权限点、6 个 `/workspaces/{ws}/roles|permissions` 端点、`api/deps.py` 权限依赖工厂，全量 **263 passed**，见下方「本轮：`role_grants` 落地」**；再往前是 P0–P4 安全与一致性收口（JWT 密钥生产护栏 / 停用账号令牌立即失效 / RLS 部署缺口启动告警 / `role_grants`·`is_public`·权限缓存三处口径注释），见下方「本轮：P0–P4 安全与一致性收口」**；再往前是文档事实校正——错误码 16 → 17（`AGENTS.md` §2、结构说明两处、`docs/tdd/07` §7 登记 4 个新增码为提议），见下方「本轮：文档事实校正」**；再往前是任务 17 迁库演练完成（成员5 实现 / lead 记录）——17/17 任务全部 `已完成`（「本轮：任务 17 迁库演练」）、任务 16 重建索引 `/admin/reindex` 完成（「本轮：任务 16 重建索引」）、B0 环境对账 + B2 主链路烟测（「本轮：B0 环境对账 + B2 主链路烟测」）、合并远端 chat 分支 + 修 `index_migrations` 主键口径（「本轮：合并远端 chat 分支」）；更早的成员2 两条 P0 修复、成员2 四任务收口、成员4 验收闭环、成员1 S05、身份基座落地、数据契约外键、Phase 0 / P0-T01 章节保留为其自身时点的历史记录。
+
+## 本轮：检索两路真并行（2026-10-29，成员3 域，经用户「5要并行」授权）
+
+- 任务：缺陷审查（用户 `/receiving-code-review 检查当前项目有无缺陷`）列出的第 5 条——
+  `src/pyknora/services/retrieval/search.py` 的 `search_hybrid` docstring 写着「并行候选检索」，
+  实际是两串行 `await`。起始 HEAD `2aa9d8d`，`git status` 起始为干净。
+- 关键约束（决定实现形状）：**SQLAlchemy 的 `AsyncSession` 不支持并发语句**，同一 session 上
+  `asyncio.gather` 两路查询会抛 `InvalidRequestError`。所以「并行」必须由调用方提供**两个绑定
+  不同 session 的仓库**，不能靠库里自己拆。
+- 改动：
+  - `src/pyknora/api/deps.py`：新增 `get_keyword_search_repo()`（独立 session 的 `SqlChunkSearchRepo`）。
+  - `src/pyknora/services/retrieval/search.py`：`search_hybrid()` 新增 `keyword_repo: ChunkSearchRepo | None = None`；
+    传入则 `asyncio.gather` 两路，不传则退回顺序（语义一致，单测/脚本不必开真连接）。
+  - `src/pyknora/api/v1/query.py`、`src/pyknora/api/v1/chat.py`：注入并透传 `keyword_repo`。
+  - `tests/api/test_api_query.py`：`_client()` 补 `get_keyword_search_repo` 的 override——只 override
+    第一个依赖时关键词那路会真连库返回空集，融合结果与 fake 数据对不上（首跑 4 条红的根因）。
+  - `tests/unit/test_retrieval_search.py`：新增 `test_search_hybrid_routes_keyword_to_second_repo`，
+    断言关键词没落到向量仓库上（串了 session 时 fake 上看不出来，生产是随机 `InvalidRequestError`）。
+- 已执行（真实输出）：`uv run ruff check src tests` → `All checks passed!`；
+  `uv run ruff format --check src tests` → `110 files already formatted`；
+  `PYKNORA_DATABASE_URL=postgresql+asyncpg://postgres:dev@127.0.0.1:5434/pyknora uv run pytest -q`
+  → **303 passed, exit 0**。
+- 未验证：真 PG 下的并行收益未压测（理论上两路各一次往返，延迟应减半）；**连接数**——每个检索
+  请求从 1 个 session 变成 2 个，默认 `pool_size=5 / max_overflow=10` 下高并发会比之前更早耗尽，
+  是否调大或复用连接未评估。
+- 下一步：#6（`claim()` 无 `job_type` 过滤）等用户裁决；审查里的两条 P1（JWT 缺 `exp` 即被接受、
+  `documents.py:121` 先全量读内存再比 50MB 上限）仍未修。
 
 ## 本轮：成员管理与权限自省补全（2026-10-29，成员4 域，经用户「你写一份成员管理修复计划，然后执行」授权代做）
 

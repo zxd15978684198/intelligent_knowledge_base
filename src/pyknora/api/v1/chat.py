@@ -10,7 +10,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from pyknora.api.deps import get_chunk_search_repo, get_scope, require_permission
+from pyknora.api.deps import (
+    get_chunk_search_repo,
+    get_keyword_search_repo,
+    get_scope,
+    require_permission,
+)
 from pyknora.api.main import get_app_state
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
@@ -45,6 +50,7 @@ async def chat(
     scope: Annotated[Scope, Depends(get_scope)],
     kb_id: UUID,
     repo: Annotated[SqlChunkSearchRepo, Depends(get_chunk_search_repo)],
+    keyword_repo: Annotated[SqlChunkSearchRepo, Depends(get_keyword_search_repo)],
 ) -> StreamingResponse:
     """SSE 顺序固定为 retrieval、token*、done；检索沿用可信 Scope。"""
     state = get_app_state()

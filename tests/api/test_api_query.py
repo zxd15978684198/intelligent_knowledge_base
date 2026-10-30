@@ -9,7 +9,7 @@ import httpx
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from pyknora.api.deps import get_chunk_search_repo
+from pyknora.api.deps import get_chunk_search_repo, get_keyword_search_repo
 from pyknora.api.main import (
     _lifespan,
     configure,
@@ -83,7 +83,10 @@ def _scored_chunk() -> ScoredChunk:
 
 def _client(repo: FakeSearchRepo) -> tuple[FastAPI, httpx.AsyncClient]:
     app = create_app()
+    # 两路检索现在各有一个 session 依赖：只 override 第一条的话，关键词那一路
+    # 会真的去连库并返回空集，融合结果就和用例声明的 fake 数据对不上。
     app.dependency_overrides[get_chunk_search_repo] = lambda: repo
+    app.dependency_overrides[get_keyword_search_repo] = lambda: repo
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=True)
     return app, httpx.AsyncClient(transport=transport, base_url="http://test")
 

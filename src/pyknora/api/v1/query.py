@@ -7,7 +7,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends
 
-from pyknora.api.deps import get_chunk_search_repo, get_scope, require_permission
+from pyknora.api.deps import (
+    get_chunk_search_repo,
+    get_keyword_search_repo,
+    get_scope,
+    require_permission,
+)
 from pyknora.api.main import get_app_state
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
@@ -29,6 +34,7 @@ async def query_knowledge_base(
     body: QueryRequest,
     scope: Annotated[Scope, Depends(get_scope)],
     repo: Annotated[SqlChunkSearchRepo, Depends(get_chunk_search_repo)],
+    keyword_repo: Annotated[SqlChunkSearchRepo, Depends(get_keyword_search_repo)],
 ) -> QueryResponse:
     """使用可信 Scope 检索并返回融合排名后的片段。"""
     embedder = get_app_state().embedder
@@ -41,6 +47,7 @@ async def query_knowledge_base(
         body.query,
         embedder=embedder,
         repo=repo,
+        keyword_repo=keyword_repo,
         top_k=body.top_k,
     )
     return QueryResponse(query=body.query, results=list(results))

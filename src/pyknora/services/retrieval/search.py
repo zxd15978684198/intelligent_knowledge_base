@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from uuid import UUID
 
@@ -55,11 +56,19 @@ async def search_hybrid(
     *,
     embedder: EmbeddingProvider,
     repo: ChunkSearchRepo,
+    keyword_repo: ChunkSearchRepo | None = None,
     top_k: int = 10,
     candidate_k: int | None = None,
     rrf_k: int = 60,
 ) -> list[RetrievedChunk]:
-    """并行候选检索后用 RRF 融合；两路查询都由带 Scope 的仓库执行。"""
+    """两路候选检索后用 RRF 融合；两路查询都由带 Scope 的仓库执行。
+
+    `keyword_repo` 传进来时两路**真并行**（`asyncio.gather`）：SQLAlchemy 的
+    `AsyncSession` 不支持并发语句，所以并行版必须由调用方给两个绑定不同
+    session 的仓库（见 `api/deps.py` 的 `get_keyword_search_repo`）。不传时退回
+    顺序执行，结果与并行版一致——单元测试和脚本走这条，不用为了测一个函数的
+    融合逻辑去开真连接。
+    """
     normalized_query = query.strip()
     if not normalized_query:
         raise AppError(ErrorCode.INVALID_REQUEST, "query must not be empty")
@@ -80,10 +89,16 @@ async def search_hybrid(
             details={"expected": 1, "actual": len(vectors)},
         )
 
-    vector_results = await repo.search_similar(scope, kb_id, vectors[0], limit=candidate_limit)
-    keyword_results = await repo.search_keyword(
-        scope, kb_id, normalized_query, limit=candidate_limit
-    )
+    if keyword_repo is None:
+        vector_results = await repo.search_similar(scope, kb_id, vectors[0], limit=candidate_limit)
+        keyword_results = await repo.search_keyword(
+            scope, kb_id, normalized_query, limit=candidate_limit
+        )
+    else:
+        vector_results, keyword_results = await asyncio.gather(
+            repo.search_similar(scope, kb_id, vectors[0], limit=candidate_limit),
+            keyword_repo.search_keyword(scope, kb_id, normalized_query, limit=candidate_limit),
+        )
     return reciprocal_rank_fusion(
         vector_results,
         keyword_results,

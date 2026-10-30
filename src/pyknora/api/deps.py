@@ -38,7 +38,7 @@ from pyknora.db.repos.reads import (
     SqlDocumentRepo,
     SqlIndexBuildRepo,
 )
-from pyknora.db.session import session_scope
+from pyknora.db.session import get_session_factory, session_scope
 from pyknora.services.auth.jwt import decode_token
 from pyknora.services.auth.membership import (
     load_membership,
@@ -110,6 +110,24 @@ def get_chunk_search_repo(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> SqlChunkSearchRepo:
     return SqlChunkSearchRepo(session)
+
+
+async def get_keyword_search_repo(
+    scope: Annotated[Scope, Depends(get_scope)],
+) -> AsyncIterator[SqlChunkSearchRepo]:
+    """关键词那一路的**独立连接**——两路检索要真并行，就不能共用 session。
+
+    SQLAlchemy 的 `AsyncSession` 不是并发安全的：同一个 session 上同时跑两条
+    语句会抛 `InvalidRequestError`（greenlet 之间互相踩）。所以并行版的两路
+    各用各的 session，这个依赖负责开第二条并在请求结束时关掉。
+
+    `set_workspace_context` 不能省：`chunks` 表开了 RLS，漏设时开发库因为用
+    superuser 连（绕过 RLS）测不出来，生产换成 `pyknora_app` 会静默返回 0 行。
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        await set_workspace_context(session, scope.workspace_id)
+        yield SqlChunkSearchRepo(session)
 
 
 def get_build_repo(

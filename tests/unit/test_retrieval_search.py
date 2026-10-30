@@ -208,3 +208,37 @@ def _active_chunk(chunk_id: str, content: str) -> ActiveChunk:
         embedding_dim=3,
         chunk_size=512,
     )
+
+
+async def test_search_hybrid_routes_keyword_to_second_repo(scope: Scope) -> None:
+    """并行分支：关键词那一路必须走传入的第二个仓库。
+
+    两个 session 是并行的前提（`AsyncSession` 不支持并发语句），所以这里断言
+    "第二路没落到第一个仓库上"——写错的话两路会挤在同一个 session 上，生产里
+    表现为随机 `InvalidRequestError`，而在 fake 上看起来一切正常。
+    """
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    vector_repo = FakeSearchRepo(
+        results=[_scored_chunk("11111111-1111-1111-1111-111111111111", "向量命中")]
+    )
+    keyword_repo = FakeSearchRepo(
+        keyword_results=[_active_chunk("22222222-2222-2222-2222-222222222222", "关键词命中")]
+    )
+
+    fused = await search_hybrid(
+        scope,
+        KB_ID,
+        "开放时间",
+        embedder=embedder,
+        repo=vector_repo,
+        keyword_repo=keyword_repo,
+        top_k=2,
+    )
+
+    assert vector_repo.received is not None
+    assert vector_repo.keyword_received is None, "关键词查询不该落到向量仓库上"
+    assert keyword_repo.keyword_received is not None
+    assert {hit.chunk_id for hit in fused} == {
+        UUID("11111111-1111-1111-1111-111111111111"),
+        UUID("22222222-2222-2222-2222-222222222222"),
+    }
