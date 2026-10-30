@@ -71,6 +71,10 @@ def _to_retrieved_chunk(
         workspace_id=chunk.workspace_id,
         kb_id=chunk.kb_id,
         document_id=chunk.document_id,
+        # 两个来源（`ScoredChunk` / `ActiveChunk`）本来就带着现行版本 ID；不往下传
+        # 的话，出参里 `active_document_version_id` 会永远是 None，"引用来自现行版"
+        # 这件事就只能靠人工比对——字段名存实亡比没有这个字段更危险。
+        active_document_version_id=chunk.active_document_version_id,
         index_version=chunk.index_version,
         chunk_ordinal=chunk.chunk_ordinal,
         content=chunk.content,

@@ -94,3 +94,15 @@ junit*.xml
 # ── 放行子模块 gitlink：上面的 references/** 会连 references/WeKnora 这个 gitlink 一并忽略，
 #    导致 git status 看不到子模块指针变化（bump 了 WeKnora 不会报警）、重新 submodule add 失败
 !references/WeKnora
+
+# ── Day3 离线评测的运行产物：eval/run_eval.py 每次运行写一个子目录
+#    （raw.jsonl / summary.json / report.md，含真实语料片段与模型回答），可随时重跑再生成，
+#    所以不入库；入库的是 eval_set / 两份 config / runner 这些"能重放出数字"的东西。
+#    eval/reports/ 留给汇总报告（当前仓库尚未生成，先占位忽略，免得哪天手工产物被误 add）。
+eval/results/
+eval/reports/
+
+# ── pytest 的 tmp_path 兜底目录：某些用例传了相对 basetemp 时 pytest 会在
+#    当前工作目录建 pytest-of-<用户名>/，里面全是临时产物，不该入库。
+#    用 pytest-of-*/ 而不是固定用户名，换机器（Administrator / runner / dev）都覆盖。
+/pytest-of-*/

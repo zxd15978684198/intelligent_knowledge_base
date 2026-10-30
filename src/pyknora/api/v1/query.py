@@ -59,4 +59,11 @@ async def query_knowledge_base(
     )
     # `degraded` 必须原样透出：单路失败时结果依然返回，但客户端要能分辨
     # 「库里只有这些」和「一路挂了只剩一路」（见 schemas/query.py 的字段说明）。
-    return QueryResponse(query=body.query, results=outcome.hits, degraded=outcome.degraded)
+    # `retrieval_strategy` 同理走实际值而不是回读配置：A/B 要按次归因，报告里
+    # 每条样本都得带着它自己走的那条路。
+    return QueryResponse(
+        query=body.query,
+        results=outcome.hits,
+        degraded=outcome.degraded,
+        retrieval_strategy=outcome.retrieval_strategy,
+    )

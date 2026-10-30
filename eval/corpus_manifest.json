@@ -1,0 +1,51 @@
+{
+  "generated_at": "2026-10-30T17:50:03+08:00",
+  "source_note": "基本财务管理制度.pdf 复制自课程资料桌面原件；员工手册v1/v2.docx 复制自仓库 .tmp_ref/ 根下；财务内部预算.md 与 团建与年会通知.md 由 eval/corpus.py 生成。语料不入库（.gitignore 的 .tmp_ref/），换机器需重新放文件并重跑 --prepare。target=main 进 workspace A 的评测 KB，target=forbidden 只上传到 workspace B，供 deny 样本证明「越权被拦」而非「库不存在」。",
+  "files": [
+    {
+      "name": "基本财务管理制度.pdf",
+      "path": ".tmp_ref/eval_corpus/基本财务管理制度.pdf",
+      "bytes": 626068,
+      "sha256": "ae11fe143c98a36fa74aab40429e55fa3d6adf8e38e4444b7e20c22aa45e1d01",
+      "kind": "pdf",
+      "target": "main",
+      "description": "真实制度文档，40 页；条款号与审批流程是 exact_term 类样本的出处"
+    },
+    {
+      "name": "员工手册v1.docx",
+      "path": ".tmp_ref/eval_corpus/员工手册v1.docx",
+      "bytes": 54545,
+      "sha256": "9bc608565bbfdcfe35904613ee36affaef3803a1fb71db9ebf0d9dfddb5c5123",
+      "kind": "docx",
+      "target": "main",
+      "description": "真实文档首版；与 v2 同名重传，用来把 active_index_version 顶到 2"
+    },
+    {
+      "name": "员工手册v2.docx",
+      "path": ".tmp_ref/eval_corpus/员工手册v2.docx",
+      "bytes": 51097,
+      "sha256": "01919d1b2855f2d13f75a90aa27576d062cee31d0caac6757d360854356172bd",
+      "kind": "docx",
+      "target": "main",
+      "description": "真实文档第二版；重传后 v1 的切片应被 retire，只有 v2 现行"
+    },
+    {
+      "name": "团建与年会通知.md",
+      "path": ".tmp_ref/eval_corpus/团建与年会通知.md",
+      "bytes": 1414,
+      "sha256": "585e9ee18259489af0a404508ad60b2e23ce9cc3dfb1219a8745fdb5c04ccedf",
+      "kind": "md",
+      "target": "main",
+      "description": "无关干扰文档；制造 no_evidence 与 top5 噪声，不得命中被测问题"
+    },
+    {
+      "name": "财务内部预算.md",
+      "path": ".tmp_ref/eval_corpus/财务内部预算.md",
+      "bytes": 1105,
+      "sha256": "4dee099144380155e372be06ca1d39eb9beef17b34ae37f8d77180d1b7cc6c8b",
+      "kind": "md",
+      "target": "forbidden",
+      "description": "越权语料，仅上传到 workspace B；A 的令牌问它必须 404 且无片段"
+    }
+  ]
+}

@@ -16,6 +16,11 @@ from uuid import UUID
 
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
+from pyknora.core.settings import (
+    RETRIEVAL_STRATEGY_BASELINE,
+    RETRIEVAL_STRATEGY_CANDIDATE,
+    settings,
+)
 from pyknora.schemas.document import ActiveChunk, ScoredChunk
 from pyknora.schemas.query import MAX_TOP_K, RetrievedChunk
 from pyknora.services.contracts.reads import ChunkSearchRepo
@@ -24,18 +29,34 @@ from pyknora.services.retrieval.rrf import reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
 
+#: `candidate` 策略把候选池放大到 `top_k` 的几倍。取 4 而不是 2，是为了让它与
+#: baseline 的 `top_k * 2` 有可辨认的差别，同时仍被 `MAX_TOP_K` 压住；倍数本身是
+#: 待标定值（要靠评测集定），当前没有评测集，所以先给一个保守的放大。
+#:
+#: 上限会吃掉这个差别：`top_k >= MAX_TOP_K // 2`（25）时 baseline 已经封到 50，
+#: candidate 也是 50，两个策略结算出同一个池子——所以 A/B 必须用 `top_k < 25`
+#: 才有可比性。这条边界由 `tests/unit/test_retrieval_strategy.py` 钉住。
+_CANDIDATE_POOL_FACTOR = 4
+
 
 @dataclass(frozen=True, slots=True)
 class HybridSearchResult:
-    """融合结果 + 降级实情。
+    """融合结果 + 降级实情 + 本次实际走的策略。
 
     `degraded` 为空表示两路都成功。非空时键是失败的分支名（`"vector"` /
     `"keyword"`），值是该分支的错误码（`AppError` 取 `code`，其他异常取类名）。
     调用方——尤其是 HTTP 层——有义务把它透出去，否则就是又一次静默降级。
+
+    `retrieval_strategy` 是**实际生效**的策略（参数 > `PYKNORA_RETRIEVAL_STRATEGY`
+    > 默认 `baseline`），不是"配置里写的那个"；`candidate_k` 是算完之后真正进两路
+    `LIMIT` 的候选数。`candidate_k=None` 只表示构造方没填（旧调用点），不是"取了
+    0 条"。
     """
 
     hits: list[RetrievedChunk]
     degraded: dict[str, str] = field(default_factory=dict)
+    retrieval_strategy: str = RETRIEVAL_STRATEGY_BASELINE
+    candidate_k: int | None = None
 
 
 def _require_bounded_limit(value: int, *, name: str) -> None:
@@ -76,6 +97,34 @@ def _candidate_limit(*, top_k: int, candidate_k: int | None) -> int:
             details={"candidate_k": candidate_k, "top_k": top_k},
         )
     return candidate_k
+
+
+def _resolve_candidate_k(*, top_k: int, strategy: str, explicit: int | None) -> int:
+    """按策略结算候选池大小；显式传参优先。返回值直接进两路 `LIMIT`。
+
+    `baseline` 刻意复用 `_candidate_limit(top_k=top_k, candidate_k=None)`，而不是
+    在这里再写一个 `top_k * 2`：改造前只有那一条推导，"默认策略不改线上行为"要
+    靠**结构上走同一条代码**成立，而不是靠两处算式恰好相等——后者在有人调了
+    `_candidate_limit` 的倍数时就会静默分叉，而分叉的后果是对照实验的 baseline
+    已经不是线上那条路。
+
+    `candidate` 只放大候选池，其余参数（rrf_k、切片、embedding、top_k）一概不动：
+    一次只改一个主因素，A/B 的差值才能归因到候选池大小。
+
+    非法策略在调用模型与数据库之前拒绝：拼错的策略若被忽略，跑完一轮对照实验
+    才发现两组走的是同一条路，代价是整轮结果作废。
+    """
+    if explicit is not None:
+        return _candidate_limit(top_k=top_k, candidate_k=explicit)
+    if strategy == RETRIEVAL_STRATEGY_BASELINE:
+        return _candidate_limit(top_k=top_k, candidate_k=None)
+    if strategy == RETRIEVAL_STRATEGY_CANDIDATE:
+        return min(top_k * _CANDIDATE_POOL_FACTOR, MAX_TOP_K)
+    raise AppError(
+        ErrorCode.INVALID_REQUEST,
+        f"unknown retrieval strategy: {strategy!r}",
+        details={"allowed": [RETRIEVAL_STRATEGY_BASELINE, RETRIEVAL_STRATEGY_CANDIDATE]},
+    )
 
 
 async def search_vector(
@@ -130,6 +179,7 @@ async def search_hybrid(
     top_k: int = 10,
     candidate_k: int | None = None,
     rrf_k: int = 60,
+    retrieval_strategy: str | None = None,
 ) -> HybridSearchResult:
     """两路候选检索后用 RRF 融合；**单路失败时降级到另一路并在 `degraded` 里报告**。
 
@@ -139,8 +189,13 @@ async def search_hybrid(
     顺序执行，结果与并行版一致——单元测试和脚本走这条，不用为了测一个函数的
     融合逻辑去开真连接。
 
-    `candidate_k` 是**两路各自**取多少候选（默认 `top_k * 2`，封顶 `MAX_TOP_K`）；
-    它必须不小于 `top_k`，否则候选池比返回值还窄，融合没有意义。见 `_candidate_limit`。
+    `candidate_k` 是**两路各自**取多少候选；不传时由策略决定（`baseline` → 改造前
+    的 `top_k * 2`，`candidate` → 放大候选池，见 `_resolve_candidate_k`）。它必须
+    不小于 `top_k`，否则候选池比返回值还窄，融合没有意义。
+
+    `retrieval_strategy` 缺省读 `settings.retrieval_strategy`（环境变量
+    `PYKNORA_RETRIEVAL_STRATEGY`）：HTTP 层不传参，切换只靠换配置；脚本/评测要
+    逐次对照时按次传参。
 
     降级规则（本函数是唯一判定处）：
 
@@ -155,7 +210,10 @@ async def search_hybrid(
         raise AppError(ErrorCode.INVALID_REQUEST, "query must not be empty")
     _require_bounded_limit(top_k, name="top_k")
 
-    candidate_limit = _candidate_limit(top_k=top_k, candidate_k=candidate_k)
+    # 策略与候选池都在碰模型/数据库之前结算：参数错了要立刻 422，不能先跑一遍
+    # 检索再发现"策略名打错、这一轮其实白跑"。
+    strategy = retrieval_strategy if retrieval_strategy is not None else settings.retrieval_strategy
+    candidate_limit = _resolve_candidate_k(top_k=top_k, strategy=strategy, explicit=candidate_k)
     if rrf_k < 1:
         raise AppError(ErrorCode.INVALID_REQUEST, "rrf_k must be greater than zero")
 
@@ -205,4 +263,9 @@ async def search_hybrid(
         limit=top_k,
         k=rrf_k,
     )
-    return HybridSearchResult(hits=hits, degraded=degraded)
+    return HybridSearchResult(
+        hits=hits,
+        degraded=degraded,
+        retrieval_strategy=strategy,
+        candidate_k=candidate_limit,
+    )

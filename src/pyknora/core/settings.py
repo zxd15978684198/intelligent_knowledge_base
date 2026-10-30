@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,6 +20,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 避免"两处各写一个字符串、改了一处忘了另一处"。
 DEV_JWT_SECRET = "dev-only-insecure-secret"
 DEV_CURSOR_SECRET = "dev-only-insecure-cursor-secret"
+
+# 检索策略的取值集中定义一次：`Settings.retrieval_strategy` 的字段类型与
+# `services/retrieval/search.py` 的运行时校验都引用这两个常量，否则"配置里写
+# baseline、服务里再写一遍字符串"迟早有一处改漏，而漏了只会表现为策略静默不生效。
+RETRIEVAL_STRATEGY_BASELINE = "baseline"
+RETRIEVAL_STRATEGY_CANDIDATE = "candidate"
 
 # 这几个环境下允许使用开发默认密钥；其余（staging/prod/...）一律要求显式配置。
 _INSECURE_ENVS = frozenset({"dev", "test", "local"})
@@ -52,6 +60,38 @@ class Settings(BaseSettings):
     chat_model: str = "gpt-4o-mini"
     chat_timeout_s: float = 60.0
     chat_max_context_chunks: int = 6
+    # 部分网关（实测 opencode.ai）要求请求带 `x-opencode-session`，否则回
+    # 400 `MissingSessionID`；标准 OpenAI 会忽略未知头，所以默认为空、不发送。
+    #
+    # 为什么做成配置而不是代码里写死常量：这个头是**部署方**的约定，换一个网关
+    # 就不存在；写死会让别的部署凭空多出一个无意义的头。
+    chat_session_id: str = ""
+
+    # 一次问答的运行预算（计划 §7.3 / T5.1，实现在 services/rag/budget.py）。
+    #
+    # 这两个值是计划 §7.3 给出的**教学建议值，不是压测结论**：口径要求
+    # "timeout = max(3 × P95, 10s) 且 ≤ chat_timeout_s"，但本项目还没测出 P95，
+    # 所以先用 chat_timeout_s × 0.4 = 24s 的保守替代，再取整成 25s 留一点余量——
+    # 它必须小于 chat_timeout_s（60s），否则上游的 60s 超时会先触发，预算形同虚设。
+    # 拿到 W1 的 P95 后按上式重算，并把实测值写进文档；在那之前任何"够用/不够用"
+    # 的结论都缺依据。
+    chat_budget_timeout_s: float = 25.0
+    # 当前一次问答只调用一次 search_hybrid，所以 2 是**预留**（给"门控判不足时补搜"
+    # 留位），不是当前会触发的上限。设 1 会退化成"只要用了这一次检索就算超限"，
+    # 语义反而错；设 3 以上则等于放弃上限。
+    chat_max_retrieval_calls: int = 2
+
+    # 检索策略：A/B 的**唯一**切换点（PYKNORA_RETRIEVAL_STRATEGY）。
+    #
+    # `baseline` 是改造前的线上行为，`candidate` 是待对照的候选实现（本轮只放大
+    # 候选池，其余参数不动）。默认必须留在 baseline：开关的价值在于"随时能切回
+    # 已验证的那条路"，若默认走 candidate，一次回归就是拿未验证路径当线上。
+    # 切换只改环境变量并重启，不改代码——这正是它作为对照实验前提的意义。
+    #
+    # 非法值**启动即失败**（`Literal` 校验），不静默退化成 baseline：退化会让运维
+    # 以为 A/B 在跑 candidate，实际两臂都是 baseline，整轮评测到看报告时才发现作废。
+    # 服务层 `_resolve_candidate_k` 对脚本/评测的按次传参做同样的拒绝（见 search.py）。
+    retrieval_strategy: Literal["baseline", "candidate"] = RETRIEVAL_STRATEGY_BASELINE
 
     # 切片
     chunk_size: int = 512

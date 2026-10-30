@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -168,13 +169,37 @@ async def _warn_if_db_role_bypasses_rls() -> None:
         )
 
 
+async def _warm_up_embedder(embedder: Any) -> None:
+    """把「第一次查询」的加载成本搬到启动期。
+
+    本地 HF 后端首次 ``embed`` 才真正加载权重（本机实测 24s，且若 HuggingFace
+    不可达还会先耗上百秒重试）。这段成本若留在首个请求里，会直接吃掉整轮 chat
+    预算（``chat_budget_timeout_s`` 25s）——用户看到的是 BUDGET_EXCEEDED 而不是
+    答案，排查时又完全不像是「模型没加载完」。
+
+    失败不拦启动：预热只是性能优化，模型真不可用时应在请求路径上按原逻辑报错，
+    而不是让整个 API 起不来（否则一次网络抖动就能把服务钉死）。
+    """
+    started = time.perf_counter()
+    try:
+        await embedder.embed(["预热"])
+    except Exception:  # noqa: BLE001 - 预热失败只降级，不改变启动语义
+        logger.warning(
+            "embedder warmup failed; the first query will pay the load cost",
+            exc_info=True,
+        )
+        return
+    logger.info("embedder warmup done in %.2fs", time.perf_counter() - started)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("pyknora api starting")
     state = get_app_state()
     if state.embedder is None:
-        # 建立 provider 不会立即加载模型；本地权重在第一次 query 时按需加载。
+        # 建立 provider 不会立即加载模型；这里显式预热，见 _warm_up_embedder。
         state.embedder = build_embedder(settings)
+        await _warm_up_embedder(state.embedder)
     await _warn_if_db_role_bypasses_rls()
     try:
         yield

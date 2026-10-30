@@ -1,0 +1,37 @@
+# 由 eval/make_configs.py 生成，勿手改；改字段请改生成器后重跑。
+# 生成时间：2026-10-30T19:09:02+08:00
+# 来源：.tmp_ref/eval_setup.json（snapshot）、pyknora.core.settings、git HEAD
+# A 组：库默认策略（baseline）；B 组见 candidate_config.yaml。
+experiment_id: day03-rag-ab
+app_commit: 4e16d652cea0f730244571dd92c16a1a112f0be4
+prompt_version: pyknora-rag-v1
+eval_dataset: eval/eval_set_v0.1.jsonl
+snapshot:
+  workspace_id: d2c28dec-61ca-4799-82c2-e3ba4b7e037e
+  kb_id: 1556633e-fff3-4a27-8731-adc00d2ff5eb
+  documents:
+  - document_id: 8fc2223d-11af-4c49-b3dc-ff842d362cba
+    active_document_version_id: bb4becf1-b34a-49cd-a70e-9be266ef8568
+    active_build_id: 8a2b50a2-3947-4676-9b17-03b2f8ef6266
+    active_index_version: 1
+    chunks: 61
+  - document_id: 2a72b9e0-aab3-4550-9bd9-875b58970100
+    active_document_version_id: 0548e2e3-ba92-4411-bd1d-0c96b81fc2ee
+    active_build_id: 41fc983c-fce7-418e-a4d9-83bf6739bcaa
+    active_index_version: 2
+    chunks: 35
+  - document_id: e0bbf0d6-5b28-4abc-baa1-cc1c93269814
+    active_document_version_id: 0a2cadd4-aa5d-42f5-84ad-471f5194b3b6
+    active_build_id: 94a8fd3e-9ffc-4600-94c9-cca0a286b43a
+    active_index_version: 1
+    chunks: 2
+chat_model: deeseek-v4.1-flash
+chat_base_url: https://opencode.ai/inference/go
+chat_timeout_s: 60.0
+embedding_model_key: BAAI/bge-small-zh-v1.5
+embedding_dim: 512
+embedding_backend: local
+retrieval_strategy: baseline
+query_top_k: 5
+chat_top_k: 6
+reranker: null

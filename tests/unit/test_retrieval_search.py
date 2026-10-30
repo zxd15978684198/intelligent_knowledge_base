@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import get_args
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import WORKSPACE_A, Scope
+from pyknora.core.settings import (
+    RETRIEVAL_STRATEGY_BASELINE,
+    RETRIEVAL_STRATEGY_CANDIDATE,
+    Settings,
+    settings,
+)
 from pyknora.schemas.document import ActiveChunk, ScoredChunk
-from pyknora.schemas.query import MAX_TOP_K
+from pyknora.schemas.query import MAX_TOP_K, QueryResponse
 from pyknora.services.retrieval.rrf import reciprocal_rank_fusion
 from pyknora.services.retrieval.search import search_hybrid, search_vector
 
@@ -187,7 +195,7 @@ def test_rrf_applies_final_limit_and_rejects_invalid_options() -> None:
         reciprocal_rank_fusion(vector, [], k=0)
 
 
-def _scored_chunk(chunk_id: str, content: str) -> ScoredChunk:
+def _scored_chunk(chunk_id: str, content: str, *, version_id: UUID | None = None) -> ScoredChunk:
     return ScoredChunk(
         chunk_id=UUID(chunk_id),
         workspace_id=WORKSPACE_A,
@@ -201,10 +209,11 @@ def _scored_chunk(chunk_id: str, content: str) -> ScoredChunk:
         embedding_model_key="test/model",
         embedding_dim=3,
         distance=0.1,
+        active_document_version_id=version_id,
     )
 
 
-def _active_chunk(chunk_id: str, content: str) -> ActiveChunk:
+def _active_chunk(chunk_id: str, content: str, *, version_id: UUID | None = None) -> ActiveChunk:
     return ActiveChunk(
         chunk_id=UUID(chunk_id),
         workspace_id=WORKSPACE_A,
@@ -218,6 +227,7 @@ def _active_chunk(chunk_id: str, content: str) -> ActiveChunk:
         embedding_model_key="test/model",
         embedding_dim=3,
         chunk_size=512,
+        active_document_version_id=version_id,
     )
 
 
@@ -295,18 +305,21 @@ async def test_hybrid_rejects_over_max_candidate_k(scope: Scope) -> None:
 
 
 async def test_hybrid_default_candidate_pool_is_wider_than_top_k(scope: Scope) -> None:
-    """默认候选池必须比最终返回更宽，否则 RRF 基本白做。
+    """默认（baseline）候选池必须比最终返回更宽，否则 RRF 基本白做。
 
     两路各只取 `top_k` 条时，某一路排第 `top_k + 1`、另一路没命中的片段永远浮不上来，
-    而"两路互补"正是混合检索相对单路唯一的价值。这里钉住默认倍数（top_k * 2）。
+    而"两路互补"正是混合检索相对单路唯一的价值。这里钉住 baseline 的推导
+    （`top_k * 2`）：它就是改造前的线上行为，改动它等于改线上。
     """
     embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
     repo = FakeSearchRepo()
 
-    await search_hybrid(scope, KB_ID, "问题", embedder=embedder, repo=repo, top_k=3)
+    outcome = await search_hybrid(scope, KB_ID, "问题", embedder=embedder, repo=repo, top_k=3)
 
     assert repo.received == (scope, KB_ID, [0.1, 0.2, 0.3], 6)
     assert repo.keyword_received == (scope, KB_ID, "问题", 6)
+    assert outcome.retrieval_strategy == RETRIEVAL_STRATEGY_BASELINE
+    assert outcome.candidate_k == 6
 
 
 async def test_hybrid_default_candidate_pool_never_exceeds_max_top_k(scope: Scope) -> None:
@@ -397,3 +410,163 @@ async def test_hybrid_does_not_degrade_on_invalid_request(scope: Scope) -> None:
         await search_hybrid(scope, KB_ID, "开放时间", embedder=embedder, repo=repo, top_k=2)
 
     assert exc.value.code == ErrorCode.INVALID_REQUEST
+
+
+async def test_candidate_strategy_widens_only_the_candidate_pool(scope: Scope) -> None:
+    """candidate 只放大候选池：这是 A/B 里唯一的受控变量。
+
+    其余参数（`rrf_k`、切片、embedding、返回数）都不许跟着变，否则两组的差值说不清
+    是"候选池更大"带来的，还是别的改动带来的。
+    """
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    outcome = await search_hybrid(
+        scope,
+        KB_ID,
+        "问题",
+        embedder=embedder,
+        repo=repo,
+        top_k=5,
+        retrieval_strategy=RETRIEVAL_STRATEGY_CANDIDATE,
+    )
+
+    # 5 * 4 = 20；两路必须拿到同一个候选数，否则融合会偏向池子大的那一路。
+    assert repo.received == (scope, KB_ID, [0.1, 0.2, 0.3], 20)
+    assert repo.keyword_received == (scope, KB_ID, "问题", 20)
+    assert outcome.candidate_k == 20
+    assert outcome.retrieval_strategy == RETRIEVAL_STRATEGY_CANDIDATE
+    assert len(outcome.hits) <= 5, "放大的是候选池，不是返回数"
+
+
+async def test_candidate_strategy_pool_is_capped_at_max_top_k(scope: Scope) -> None:
+    """放大可以，突破资源边界不行：20 * 4 = 80 必须被封成 `MAX_TOP_K`。"""
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    baseline = await search_hybrid(scope, KB_ID, "问题", embedder=embedder, repo=repo, top_k=20)
+    candidate = await search_hybrid(
+        scope,
+        KB_ID,
+        "问题",
+        embedder=embedder,
+        repo=repo,
+        top_k=20,
+        retrieval_strategy=RETRIEVAL_STRATEGY_CANDIDATE,
+    )
+
+    assert baseline.candidate_k == 40, "baseline 在 top_k=20 时还没碰到上限"
+    assert candidate.candidate_k == MAX_TOP_K
+    assert repo.received is not None
+    assert repo.received[3] == MAX_TOP_K
+    assert repo.keyword_received is not None
+    assert repo.keyword_received[3] == MAX_TOP_K
+
+
+@pytest.mark.parametrize("strategy", [RETRIEVAL_STRATEGY_BASELINE, RETRIEVAL_STRATEGY_CANDIDATE])
+async def test_explicit_candidate_k_wins_over_strategy(strategy: str, scope: Scope) -> None:
+    """显式 `candidate_k` 优先于策略推导：评测要逐次钉死候选池时不能再被策略改掉。"""
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    outcome = await search_hybrid(
+        scope,
+        KB_ID,
+        "问题",
+        embedder=embedder,
+        repo=repo,
+        top_k=3,
+        candidate_k=7,
+        retrieval_strategy=strategy,
+    )
+
+    assert outcome.candidate_k == 7
+    assert repo.received is not None
+    assert repo.received[3] == 7
+    assert repo.keyword_received is not None
+    assert repo.keyword_received[3] == 7
+
+
+async def test_unknown_retrieval_strategy_is_rejected_before_any_io(scope: Scope) -> None:
+    """策略名拼错必须立刻 422：静默忽略的代价是整轮对照实验跑的是同一条路。"""
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    with pytest.raises(AppError) as exc:
+        await search_hybrid(
+            scope, KB_ID, "问题", embedder=embedder, repo=repo, retrieval_strategy="hybrid"
+        )
+
+    assert exc.value.code == ErrorCode.INVALID_REQUEST
+    assert exc.value.details == {
+        "allowed": [RETRIEVAL_STRATEGY_BASELINE, RETRIEVAL_STRATEGY_CANDIDATE]
+    }
+    assert embedder.received_texts is None, "校验要在调模型之前"
+    assert repo.received is None
+
+
+async def test_retrieval_strategy_defaults_to_settings(
+    scope: Scope, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不传参时读配置：HTTP 层没有 per-request 开关，切换只能靠环境变量 + 重启。"""
+    monkeypatch.setattr(settings, "retrieval_strategy", RETRIEVAL_STRATEGY_CANDIDATE)
+    embedder = FakeEmbedder([[0.1, 0.2, 0.3]])
+    repo = FakeSearchRepo()
+
+    outcome = await search_hybrid(scope, KB_ID, "问题", embedder=embedder, repo=repo, top_k=5)
+
+    assert outcome.retrieval_strategy == RETRIEVAL_STRATEGY_CANDIDATE
+    assert repo.received is not None
+    assert repo.received[3] == 20
+
+
+def test_retrieval_strategy_env_defaults_to_baseline_and_rejects_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """环境变量名与默认值都是对外契约：默认 baseline 才能保证线上行为不变。"""
+    monkeypatch.delenv("PYKNORA_RETRIEVAL_STRATEGY", raising=False)
+    assert Settings().retrieval_strategy == RETRIEVAL_STRATEGY_BASELINE
+
+    monkeypatch.setenv("PYKNORA_RETRIEVAL_STRATEGY", RETRIEVAL_STRATEGY_CANDIDATE)
+    assert Settings().retrieval_strategy == RETRIEVAL_STRATEGY_CANDIDATE
+
+    monkeypatch.setenv("PYKNORA_RETRIEVAL_STRATEGY", "hybrid")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_retrieval_strategy_field_literal_matches_service_constants() -> None:
+    """Literal 只接受字面量、没法引用常量，两处一致性只能由这条用例兜住。"""
+    field_info = Settings.model_fields["retrieval_strategy"]
+    assert set(get_args(field_info.annotation)) == {
+        RETRIEVAL_STRATEGY_BASELINE,
+        RETRIEVAL_STRATEGY_CANDIDATE,
+    }
+    assert field_info.default == RETRIEVAL_STRATEGY_BASELINE
+
+
+def test_rrf_maps_active_document_version_id() -> None:
+    """版本字段必须从两路任一来源带到出参，否则"来自现行版"永远判不了。"""
+    version_id = UUID("33333333-3333-3333-3333-333333333333")
+    vector = [
+        _scored_chunk("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "向量命中", version_id=version_id)
+    ]
+    keyword = [
+        _active_chunk("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "关键词命中", version_id=version_id)
+    ]
+
+    hits = reciprocal_rank_fusion(vector, keyword, limit=2)
+
+    assert [hit.active_document_version_id for hit in hits] == [version_id, version_id]
+
+    # 来源没有版本时应保持 None，而不是编一个值出来（文档尚无激活版本）。
+    unversioned = [_scored_chunk("cccccccc-cccc-cccc-cccc-cccccccccccc", "无版本")]
+    only_vector = reciprocal_rank_fusion(unversioned, [], limit=1)
+    assert only_vector[0].active_document_version_id is None
+
+
+def test_query_response_defaults_to_baseline_strategy() -> None:
+    """老调用方不带新字段也要能构造响应，且默认值与服务层默认一致。"""
+    response = QueryResponse(query="问题", results=[])
+
+    assert response.retrieval_strategy == RETRIEVAL_STRATEGY_BASELINE

@@ -73,6 +73,17 @@ class RetrievedChunk(BaseModel):
     rrf_score: float
     vector_rank: int | None = None
     keyword_rank: int | None = None
+    active_document_version_id: UUID | None = None
+    """该片段所属文档的**现行**版本 ID（`documents.active_document_version_id`）。
+
+    `index_version` 只说明"第几次索引"，它随重切片/换切片参数而变，与"文档改过
+    几版"是两条轴：文档改到第 3 版之后，旧版内容仍可能带着一个看起来很正常的
+    `index_version` 被检出来。把现行版本 ID 透出来，引用才能被机械判定为
+    "来自现行版"——拿它与 `GET /documents/{id}` 的同名字段做等式即可。
+
+    `None` 不是"没实现"：文档此时确实没有激活版本（写入中或已撤下）。
+    默认值让既有构造点（测试、脚本）不必逐个补参数。
+    """
 
 
 class QueryResponse(BaseModel):
@@ -89,5 +100,14 @@ class QueryResponse(BaseModel):
             "非空时键是失败的分支名、值是该分支的错误码。"
             "**必须透出给调用方**——本项目踩过「FTS 一路静默恒空」的坑："
             "少了这个字段，客户端无法区分「库里只有这些」和「一路挂了只剩一路」。"
+        ),
+    )
+    retrieval_strategy: str = Field(
+        default="baseline",
+        description=(
+            "本次检索**实际**走的策略（`baseline` / `candidate`）。"
+            "A/B 是逐个样本归因的：报告里记的必须是这次真走的路，而不是查配置"
+            "反推“它应该走的路”。缺了它，两个策略的结果混在一起就再也分不开。"
+            "默认 `baseline` 让老调用方不带这个字段也能构造响应（线上行为不变）。"
         ),
     )
