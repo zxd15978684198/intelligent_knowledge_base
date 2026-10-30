@@ -276,3 +276,62 @@ async def test_search_across_workspaces_returns_empty(session, scope_a, scope_b)
 
     assert await repo.search_similar(scope_b, KB_ID, query, limit=5) == []
     assert len(await repo.search_similar(scope_a, KB_ID, query, limit=5)) == 1
+
+
+# --------------------------------------- 0012 给视图加 KB join 后，非 owner 角色仍看得见
+
+
+async def test_active_chunks_view_join_works_under_rls_and_soft_deleted_kb(
+    session, scope_a
+) -> None:
+    """`0012` 给 `v_active_chunks` 加了 `JOIN knowledge_bases`——必须钉住两件事。
+
+    ① **非 owner 角色不能被 join 误伤**：视图是 `security_invoker`，join 的
+    `knowledge_bases` 自己也有 RLS。若策略写得不匹配（或哪天有人把 join 改成
+    子查询并换了条件），非 owner 角色读到的会是**空集而不是报错**——检索静默
+    变空，比报错更难查。所以断言必须走 `pyknora_app`（`session` 是超级用户，
+    它测得再绿也证明不了这里）。
+    ② **join 的过滤是双向的**：软删 KB 之后同一个角色必须立刻读不到切片，
+    否则 `0012` 只是把「删库不影响检索」从文档层搬到了视图层。
+
+    两条单独都做过反证：把 0012 的 join 换回 0001 的定义 → ② fail（软删后仍 1 行）；
+    把 `security_invoker` 拿掉 → ① 在 B 区上下文下读到 A 区行。
+    """
+    doc_id = await _seed_chunk(session, scope_a, "银狐锚点报销标准 500 元")
+
+    engine = _app_engine()
+
+    async def count_visible(workspace_id: UUID) -> int:
+        async with engine.connect() as conn, conn.begin():
+            await conn.execute(
+                text("SELECT set_config('app.workspace_id', :ws, true)"),
+                {"ws": str(workspace_id)},
+            )
+            return (
+                await conn.execute(
+                    text("SELECT count(*) FROM v_active_chunks WHERE document_id = :doc"),
+                    {"doc": doc_id},
+                )
+            ).scalar_one()
+
+    try:
+        assert await count_visible(scope_a.workspace_id) == 1, (
+            "非 owner 角色读不到自己区的切片——KB join 把行吃掉了（RLS 与 join 谓词不匹配）"
+        )
+        assert await count_visible(WORKSPACE_B) == 0, "跨区读到了 A 区切片——RLS 没生效"
+
+        # 软删知识库（owner 会话）：视图必须立刻跟着变空。
+        await session.execute(
+            text(
+                "UPDATE knowledge_bases SET deleted_at = now(), generation = generation + 1, "
+                "row_version = row_version + 1 WHERE workspace_id = :ws AND kb_id = :kb"
+            ),
+            {"ws": scope_a.workspace_id, "kb": KB_ID},
+        )
+        await session.commit()
+
+        assert await count_visible(scope_a.workspace_id) == 0, (
+            "软删知识库后仍读得到切片——0012 的 k.deleted_at IS NULL 谓词没生效"
+        )
+    finally:
+        await engine.dispose()
