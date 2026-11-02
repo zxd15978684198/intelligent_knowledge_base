@@ -25,7 +25,9 @@
   - 100–149 页区间峰值未测（只测了 100 页这一档）。
   - 「解析跑着 + 30s 后续租成功」的真 PG 端到端仍未验（集成用例解析都 <1s），只有行锁探针证明机制本身。
 - 决策记录：`_should_batch` 的单路径上界**保持 `> 100`**（改 `>= 100` 可为 100 页文档省约 340 MB，但属策略改动，等 W5 基准重测后一并定）；`parsers/vision.py` 的 `SUFFIXES` 是**空集且必须保持空集**（PDF 的视觉触发由 `parser.py` 按信号判定，不能机械分派，否则所有 PDF 绕开文字层抽取）。
-- 下一步：Lead 接线 `parser.py`（`.pdf` → `pdf` 模块；视觉触发顺序必须是**先** `PageSignals.triggered_by()` **再** `classify_page()`，反过来会把纯文本页误送 OCR）→ W5 基准切换与收口。
+- 接线（本轮已完成）：`parser.py` 的 `_PARSUB_MODULES` 增 `".pdf": "pdf"`，`.pdf` 不再走 `_parse_pdf`；**旧的 pypdf 版本已删除**（约 30 行），理由写在原处注释里——留两条路径只会让「同一份 PDF 两次解析出不同文本」多一个来源。契约随之变化并被用例钉住：`PARSE_FAILED.details` 从 `{"reason": "<异常类名>"}` 变成 `{"reason": "broken"|"encrypted"|"empty"|"no_text_layer", "error": "<异常类名>"}`（`reason` 成了稳定的机器可读枚举，异常类名退到 `error` 只供排障）。
+- 门禁耗时变化：全量单测从 **20s 升到 67s**——`.pdf` 用例现在真的过一遍 `pdfplumber`（此前是 pypdf，快一个量级）。提交门禁仍可接受，但集成层跑全量时要留意这个基数。
+- 下一步：视觉触发接线（**先** `PageSignals.triggered_by()` **再** `classify_page()`，反过来会把纯文本页误送 OCR；且 `vision.SUFFIXES` 必须保持空集、不进派发表）→ W5 基准切换与收口。
 
 
 - 任务：ADR-0008 的 D9/D10 视觉通道。用户明确「多模态模型我不要本地部署的，我有模型接口」，随后在追问中选定：**OCR 保留本地 `rapidocr`**、**视觉配置新增独立 `PYKNORA_VISION_*`**。

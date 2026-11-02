@@ -163,20 +163,26 @@ def test_empty_parse_result_raises_parse_incomplete() -> None:
 
 
 def test_corrupt_pdf_becomes_parse_failed_not_a_crash() -> None:
-    """截断的 PDF 必须变成 `PARSE_FAILED`，不能把 pypdf 的异常原样漏出去。
+    """截断的 PDF 必须变成 `PARSE_FAILED`，不能把底层库的异常原样漏出去。
 
     原样漏出的后果不是这一份文件解析失败，而是 Worker 的整个取件事务被回滚：
     失败记录消失、作业常驻队头、队列停摆（见 tests/integration/test_ingest_poison.py）。
     这里把边界钉在解析器上——它是有能力把"库的异常"翻译成"我们的错误码"的那一层。
+
+    2026-11-02：PDF 主路径由 pypdf 换成 `pdfplumber`（ADR 0008 D5 / N13），
+    契约从 `details == {"reason": "<异常类名>"}` 扩成
+    `{"reason": "broken", "error": "<异常类名>"}`——`reason` 变成稳定的机器可读枚举
+    （`broken` / `encrypted` / `empty` / `no_text_layer`），异常类名退到 `error` 里
+    只供排障。两者都不含消息正文。
     """
     truncated = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
     with pytest.raises(AppError) as exc:
         parse(truncated, "broken.pdf")
 
     assert exc.value.code == ErrorCode.PARSE_FAILED
-    # details 只放异常类型名，不放消息：pypdf 的消息里可能夹着文件字节片段。
-    assert set(exc.value.details) == {"reason"}
-    assert exc.value.details["reason"].endswith("Error")
+    # details 只放枚举与异常类型名，不放消息：底层库的消息里可能夹着文件字节片段。
+    assert set(exc.value.details) == {"reason", "error"}
+    assert exc.value.details["reason"] == "broken"
     assert "EOF marker" not in str(exc.value.details)
 
 

@@ -126,39 +126,9 @@ def _check_allowed(filename: str, content_type: str | None) -> str:
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
 
-def _parse_pdf(data: bytes) -> ParsedText:
-    try:
-        from pypdf import PdfReader
-    except ImportError as exc:  # pragma: no cover
-        raise AppError(ErrorCode.INTERNAL_ERROR, "pypdf 未安装") from exc
-
-    # **底层异常必须包成 AppError**：`PdfReader` / `extract_text` 遇到截断、损坏、
-    # 加密的文件会抛 `PdfStreamError` / `FileNotDecryptedError` 之类的库内异常。
-    # 这些异常一旦裸奔到 Worker，只会被当成"未知错误"反复重试，而且用户拿不到
-    # `PARSE_FAILED` 这个可诊断的码——文件本身坏了，重试一百次也不会变好。
-    # 异常消息（可能夹着二进制碎片）不进 details，只留类型名。
-    try:
-        reader = PdfReader(io.BytesIO(data))
-        blocks: list[Block] = []
-        for page_index, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            for para in re.split(r"\n\s*\n", text):
-                cleaned = para.strip()
-                if cleaned:
-                    blocks.append(Block(text=cleaned, page_no=page_index + 1))
-    except AppError:
-        raise
-    except Exception as exc:  # noqa: BLE001 — 库内异常类型随版本变化，按类名记录即可
-        raise AppError(
-            ErrorCode.PARSE_FAILED,
-            "PDF 解析失败（文件损坏、截断或加密）",
-            details={"reason": type(exc).__name__},
-        ) from exc
-    if not blocks:
-        raise AppError(ErrorCode.PARSE_FAILED, "PDF 未提取到任何文本（可能是扫描件）")
-    return ParsedText(blocks=blocks, parser="pypdf")
-
-
+# PDF 不再走本模块：ADR 0008 D5 把主路径换成 `pdfplumber`（字符级 bbox + 表格检测），
+# 实现在 `parsers/pdf.py`（一次 open、>100 页分批、表格准入四条）。原先这里的 pypdf
+# 版本已删除——留着两条路径只会让「同一份 PDF 两次解析出不同文本」多一个来源。
 def _parse_docx(data: bytes) -> ParsedText:
     try:
         import docx
@@ -247,6 +217,7 @@ def _parse_html(data: bytes) -> ParsedText:
 #: 这些模块各自导出 `SUFFIXES` 与 `parse(data, filename="")`，签名刻意不带
 #: `content_type`（分派已经按后缀做完，再传一遍只会出现两个真相）。
 _PARSUB_MODULES: dict[str, str] = {
+    ".pdf": "pdf",
     ".xlsx": "tabular",
     ".xls": "tabular",
     ".csv": "tabular",
@@ -273,8 +244,6 @@ def _parse_via_submodule(module_name: str, data: bytes, filename: str) -> Parsed
 def parse(data: bytes, filename: str, content_type: str | None = None) -> ParsedText:
     """按后缀分派解析器。格式不在白名单时抛 UNSUPPORTED_FORMAT。"""
     suffix = _check_allowed(filename, content_type)
-    if suffix == ".pdf":
-        return _parse_pdf(data)
     if suffix == ".docx":
         return _parse_docx(data)
     if suffix in {".md", ".markdown"}:
