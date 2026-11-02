@@ -82,10 +82,12 @@ def _discard_pool(pool: ProcessPoolExecutor) -> None:
     """丢弃一个池：先尽力杀掉子进程，再不等候地关掉它。
 
     只 `shutdown(wait=False)` 不够——它不杀正在跑的任务（`cancel_futures` 只作用于
-    还没开始的）。`_processes` 是私有属性，取不到就退化成纯 shutdown：这时正确性
-    不受影响，只是失去了"立刻把内存还回去"的效果。
+    还没开始的）。`_processes` 是私有属性：池坏掉之后它会变成 `None`，所以这里
+    `or {}` 兜住（第一版漏了，崩溃路径上会抛 `AttributeError: 'NoneType' object has
+    no attribute 'values'`，把该报的 `PARSE_FAILED` 吃掉）。
     """
-    for proc in list(getattr(pool, "_processes", {}).values()):
+    processes = getattr(pool, "_processes", None) or {}
+    for proc in list(processes.values()):
         with contextlib.suppress(Exception):
             proc.terminate()
     with contextlib.suppress(Exception):

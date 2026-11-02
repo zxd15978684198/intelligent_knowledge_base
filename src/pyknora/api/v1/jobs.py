@@ -121,6 +121,9 @@ async def cancel_job(
         .mappings()
         .one_or_none()
     )
+    # 提交紧跟在这条 UPDATE 后面，不留"改了不提交就去做长活"的窗口（ADR 0008 D6）：
+    # 这条 UPDATE 持有该行的行锁直到事务结束，Worker 的租约心跳在**独立连接**上
+    # UPDATE 同一行，所以任何"先改后忙"的写法都会让心跳一直等到这边提交。
     await session.commit()
 
     if updated is None:

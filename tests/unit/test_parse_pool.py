@@ -159,6 +159,39 @@ def test_assert_batch_size_limit() -> None:
     assert err.details == {"metric": "pages", "limit": 100, "actual": 101}
 
 
+def test_shutdown_pool_then_lazy_recreate() -> None:
+    """显式收池后下一次调用自动重建；重复收不报错（幂等）。"""
+    before = pool.run_in_pool(_child_pid, b"payload", "a.bin")
+    pool.shutdown_pool()
+    pool.shutdown_pool()  # 幂等
+
+    after = pool.run_in_pool(_child_pid, b"payload", "b.bin")
+    assert after != before, "收池之后必须是新起的子进程"
+
+
+def test_discard_pool_tolerates_dead_pool() -> None:
+    """池坏掉后 `_processes` 会变成 `None`，丢弃它不许抛。
+
+    真实触发路径是"强制收池时子进程正被杀"，单测里没法稳定复现那个竞态，所以直接
+    喂一个形状正确的假池（第一版这里会 `AttributeError: 'NoneType' object has no
+    attribute 'values'`，把该报的 `PARSE_FAILED` 吃掉）。
+    """
+
+    class _DeadPool:
+        _processes = None
+
+        def __init__(self) -> None:
+            self.shutdown_calls: list[dict[str, bool]] = []
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            self.shutdown_calls.append({"wait": wait, "cancel_futures": cancel_futures})
+
+    dead = _DeadPool()
+    pool._discard_pool(dead)  # type: ignore[arg-type]  # 只为验证容错分支
+
+    assert dead.shutdown_calls == [{"wait": False, "cancel_futures": True}]
+
+
 # ----------------------------------------------------------------------- 心跳
 
 
