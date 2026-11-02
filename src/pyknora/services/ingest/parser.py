@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import PurePosixPath
+from typing import Any
 
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.schemas.locator import Locator
@@ -76,6 +77,13 @@ class Block:
     heading_path: str | None = None
     locator: Locator | None = None
     is_tabular: bool = False
+    # 解析侧的「可复现性凭证」（ADR 0008 D9-4）：视觉块必须能回答"这段文字是哪个
+    # 模型、哪版提示词、以什么置信度认出来的"，否则同一份文件两次解析出不同文本时
+    # 无法判断是模型漂移还是代码回归。放 dict 而不是逐字段加，是因为承载方从 OCR
+    # （`ocr_score`）到 VLM（`vision_model`/`prompt_version`）再到各格式解析器
+    # （`sheet_name`/`slide_no` 之类）都不一样——固定字段会逼所有解析器背一份空壳。
+    # 它**不参与**任何检索或切分逻辑，纯粹记账。
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

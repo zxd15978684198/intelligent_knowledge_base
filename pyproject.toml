@@ -26,6 +26,7 @@ dependencies = [
     "striprtf>=0.0.35",
     "xlrd>=2.0.2",
     "rapidocr-onnxruntime>=1.4.4",
+    "pypdfium2>=5.14.0",
 ]
 
 [project.optional-dependencies]

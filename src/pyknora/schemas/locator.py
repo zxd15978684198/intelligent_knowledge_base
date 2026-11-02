@@ -91,6 +91,10 @@ class TableLocator(_LocatorBase):
     # 两个容器字段都可选：DOCX 的表格在段落流里，两者都为 None 是正常的。
     slide: int | None = Field(default=None, ge=1, description="所在幻灯片序号（PPTX/ODP）")
     sheet: str | None = Field(default=None, description="所在工作表名（XLSX/ODS/CSV）")
+    # PDF 的表格块同理：`Block.page_no` 虽然有页号，但 `splitter.compact_locator()`
+    # 只读 locator，落库后 `locator_ref` 里就只剩「第几张表」，回指不到页。
+    # 三个容器字段互不冲突，各自表达「这张表挂在哪个容器里」，都可以是 None。
+    page: int | None = Field(default=None, ge=1, description="所在页码（PDF）")
 
 
 class RegionLocator(_LocatorBase):
