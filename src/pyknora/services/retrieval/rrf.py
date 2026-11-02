@@ -82,6 +82,13 @@ def _to_retrieved_chunk(
         page_end_no=chunk.page_end_no,
         heading_path=chunk.heading_path,
         locator_ref=chunk.locator_ref,
+        # 结构化位置（页码 / Sheet1!B2:C4 / 幻灯片 5 / 坐标框）也一路带到出参：引用
+        # 要能精确回指原文，只靠 locator_ref 字符串是点不开的。
+        # ⚠️ `RetrievedChunk` 目前还没有 `locator` 字段（schemas/query.py 归并行任务），
+        # 本行现在会被 pydantic 的 extra="ignore" **静默丢弃值**——不报错，也不会出现在
+        # 出参里。字段一旦落地，这一行不用再改就生效；在此之前 /query 与 chat 的引用
+        # 仍然只有 page_no，别看到这行就以为链路已通。
+        locator=chunk.locator,
         rrf_score=rrf_score,
         vector_rank=vector_rank,
         keyword_rank=keyword_rank,

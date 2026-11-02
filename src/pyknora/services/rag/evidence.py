@@ -80,6 +80,8 @@ from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
+from pyknora.schemas.locator import Locator
+
 # ---------------------------------------------------------------- 数据形状
 
 
@@ -129,6 +131,18 @@ class Evidence:
 
     门控不读这两个字段——引用能不能点开是前端/契约的事，能不能**答**与页码无关。
     测试里专门有一条覆盖"页码为 None 时判定不变"。
+    """
+
+    locator: Locator | None = None
+    """结构化位置（`chunks.locator`，迁移 0014 / ADR 0008 D2）。
+
+    与 `page_no` 同一类字段：门控**不读**它，它只是随证据一路带到引用里的载荷。
+    放在这里是因为 `Evidence` 是判定层与调用方之间唯一的稳定输入契约（见类注释）——
+    引用要跳到页 / `Sheet1!B2:C4` / 幻灯片 5 / 坐标框，而门控这一跳不带，后面
+    就没有任何地方能把它补回来：`Citation.locator` 的来源只能是这里。
+
+    `None` 表示来源本身没有位置信息（txt/md、老数据、解析器没读到），不是"没查"；
+    与 `page_no` 一样，缺它只影响引用能不能精确回指，不影响判定。
     """
 
 

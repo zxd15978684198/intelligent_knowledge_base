@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import text
 
 from pyknora.core.scope import WORKSPACE_A
+from pyknora.db.repos.reads import SqlChunkRepo
 from pyknora.services.ingest import documents as docs
 from pyknora.workers import ingest_worker
 
@@ -104,4 +105,16 @@ async def test_scanned_pdf_ingests_with_null_char_offsets(
     )
     assert all(r["locator"]["page"] == 1 for r in rows), (
         f"这份合成扫描件只有 1 页，page 应为 1，实际 {[r['locator'].get('page') for r in rows][:5]}"
+    )
+
+    # N6b：读路径也要把同一份结构位置带回来。上面查的是原始 JSONB（证明"落了库"），
+    # 这里走 `SqlChunkRepo`（证明"取得出"）——它的一条 SQL 列清单 + 行→模型映射，
+    # 任何一处漏掉 `locator`，表现都是接口能通、引用点不过去，单测里看不见。
+    chunks = await SqlChunkRepo(session).list_active_chunks(scope_a, up.document_id)
+    assert chunks, "读路径没有返回任何切片"
+    assert all(c.locator is not None for c in chunks), (
+        f"读路径把 locator 丢了：{[c.locator_ref for c in chunks][:3]}"
+    )
+    assert {c.locator.kind for c in chunks} == {"region"}, (
+        f"读回归来的 locator kind 不对：{[c.locator.kind for c in chunks][:5]}"
     )

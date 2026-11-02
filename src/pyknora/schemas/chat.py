@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pyknora.schemas.locator import Locator
+
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -24,6 +26,14 @@ class Citation(BaseModel):
 
     只给起始页时，前端跳到"第 3 页"却找不到引用的后半段——那段在第 4 页。
     两个字段都可能为 None：txt/md 类文档没有"页"这个概念，编一个 1 出来更糟。
+    """
+    locator: Locator | None = None
+    """结构化位置（`chunks.locator`，迁移 0014），让前端能精确跳到
+    页 / 工作表单元格 / 幻灯片 / 坐标框，而不是只能给一句 snippet。
+
+    与上面的 `page_no` 不重复：页码只是 `page`/`region` 这两种 kind 的投影，
+    电子表格要的是 `B2:C4`、PPTX 要的是幻灯片序号。`None` 表示来源没有位置信息
+    （老数据、或解析器没读到），此时前端退回只展示 `snippet`。
     """
     snippet: str
     active_document_version_id: UUID | None = None
@@ -45,6 +55,14 @@ class RetrievalEvent(BaseModel):
     接口早就把这个信息放在 `QueryResponse.degraded` 里，但流式接口先前只把它
     写进服务端日志——同一次检索，非流式调用方看得见降级、流式调用方看不见。
     流一旦开始就不能改状态码，所以它必须随第一个 `retrieval` 事件一起发出去。
+    """
+
+    retrieval_ms: float | None = None
+    """检索这一段（请求进来到检索返回）的耗时，毫秒。
+
+    只有这一段能在 `retrieval` 事件时算出来；另外三段要到 `done` 才成立，所以
+    这个事件里只带这一段——给四项都填 `null` 会让"没到那一步"看起来像"没测"。
+    `null` 表示未采到，**不是 0**：0 的含义是"测到了，且确实是 0 毫秒"。
     """
 
 
@@ -123,6 +141,37 @@ class DoneEvent(BaseModel):
     `status=ABSTAINED` 只说"拒答了"，`verdict` 才说清是**没依据**
     （`INSUFFICIENT`）还是**依据互相矛盾**（`CONFLICTING`）——两者的处置完全不同
     （补资料 vs 摆出两处引用）。
+    """
+
+    retrieval_ms: float | None = None
+    """检索这一段（请求进来到检索返回）的耗时，毫秒。
+
+    与 `retrieval` 事件里的同名字段是**同一个采样点**，两处都发是为了让只收 `done`
+    的消费方（离线评测脚本按事件名过滤）也能拿到分阶段耗时，不必回头找前面的帧。
+    """
+
+    evidence_check_ms: float | None = None
+    """证据门控 + 引用组装这一段（检索返回到引用列表定稿）的耗时，毫秒。"""
+
+    model_ttft_ms: float | None = None
+    """首字延迟：开始消费答案流 → 第一条正文 token，毫秒。
+
+    超时分支**不采**这一段（`None`）：把"等超时的那几十秒"记成 TTFT 会把最该看的
+    指标污染成看起来正常的数字。
+    """
+
+    generation_ms: float | None = None
+    """首字之后到收尾的生成耗时，毫秒。没走到模型时为 `None`。"""
+
+    total_ms: float | None = None
+    """从请求进来到发 `done` 的总耗时，毫秒。
+
+    四段之和**小于**它是正常的：段与段之间还有调度、序列化、SSE 写出的开销，实测
+    量级在 1–2 毫秒。判据写成 `abs(total - sum) <= max(0.05 * total, 2ms)`，别用
+    固定百分比卡极小请求。
+
+    五个耗时字段一律 `null` 表示**没采到**，**不是 0**：0 的意思是"测到了，确实是
+    0 毫秒"。把没采到写成 0，会让报表里出现一批"快得不讲道理"的样本。
     """
 
 

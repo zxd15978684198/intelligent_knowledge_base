@@ -30,8 +30,8 @@
 | --- | --- |
 | `services/ingest/parser.py:32-45` | `Block` 增加 `locator` / `is_tabular`；`ParsedText` 不变 |
 | `services/ingest/splitter.py:52-94` | **表格块不能参与 `full_text` 拼接**（见 D3），`page_at`/`heading_at`（`:65-75`）需对表格块让路 |
-| `db/repos/reads.py:30-36` | `_CHUNK_COLUMNS`（给 `v_active_chunks`）追加 `locator` |
-| `db/repos/reads.py:42-49` | `_CHUNK_COLUMNS_BY_BUILD`（历史 build，带 `c./d./b.` 前缀）同步追加 |
+| `db/repos/reads.py` 的 `_CHUNK_COLUMNS` | 给 `v_active_chunks` 的列清单追加 `locator` |
+| `db/repos/reads.py` 的 `_CHUNK_COLUMNS_BY_BUILD` | 历史 build 的列清单（带 `c./d./b.` 前缀）同步追加 |
 | `models/tables.py:127` 附近 | `ChunkRow` 增加 `locator` 列映射 |
 | `services/migration/snapshot.py:170-189` | 导出列清单同步 |
 | `schemas/chunk.py:24`、`schemas/document.py:105,134` | 出参增加 `locator`（可选，`None` 表示旧数据） |
@@ -266,7 +266,7 @@ VLM 同一页两次可能输出不同文字，会污染 `content_sha1_8` 并使 
 | `core/settings.py:56-82` 附近 | 新增 `vision_*` 配置组 |
 | `workers/ingest_worker.py:168-190` | 父协程调视觉通道 + 回填 + 部分成功分支（`PARSE_INCOMPLETE`） |
 | `services/ingest/splitter.py` | 视觉块与表格块同样**不进 `full_text` 拼接**（D3 规则复用） |
-| `schemas/chunk.py`、`db/repos/reads.py:30-36,42-49` | locator 出参包含 `region` 分支 |
+| `schemas/chunk.py`、`db/repos/reads.py` 的两份列清单 | locator 出参包含 `region` 分支 |
 | 前端 `web/features/query/format.ts:138` | `region` 分支显示「第 N 页（机器识别）」 |
 
 ### D10 双通道分工（OCR 认字 / VLM 认结构）

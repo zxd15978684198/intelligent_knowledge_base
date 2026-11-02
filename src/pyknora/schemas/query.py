@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pyknora.schemas.locator import Locator
+
 #: 单次检索最多返回多少条片段。这是**资源边界**，不是产品调参项。
 #:
 #: 不封顶的后果是可放大的：`LIMIT :top_k` 直接进向量路与关键词路两条 SQL，
@@ -70,6 +72,16 @@ class RetrievedChunk(BaseModel):
     )
     heading_path: str | None = None
     locator_ref: str | None = None
+    locator: Locator | None = None
+    """结构化位置（`chunks.locator`，迁移 0014 / ADR 0008 D2）。
+
+    与 `locator_ref` 分工并存：`locator_ref` 是切分层的文本偏移句柄
+    （`offsets:120-260`），点不开具体位置；`locator` 是给前端渲染回指用的结构
+    （第 3 页 / `Sheet1!B2:C4` / 幻灯片 5 / 坐标框）。扫描件与表格片段只有后者。
+
+    `None` 表示该片段没有位置信息（旧数据、或解析器本身不产位置）。
+    默认值让既有构造点不必逐个补参数。
+    """
     rrf_score: float
     vector_rank: int | None = None
     keyword_rank: int | None = None

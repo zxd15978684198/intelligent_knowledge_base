@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import TextClause
 
@@ -22,6 +22,7 @@ from pyknora.schemas.document import (
     DocumentVersionInfo,
     IndexBuild,
     ScoredChunk,
+    filename_from_object_key,
 )
 from pyknora.services.ingest.embedder import EmbeddingDimensionError
 
@@ -30,6 +31,8 @@ _CHUNK_COLUMNS = """
     chunk_id, workspace_id, kb_id, document_id, build_id, index_version,
     attempt_id, chunk_ordinal, content, page_no, page_end_no, heading_path,
     char_start, char_end, token_count, locator_ref,
+    -- 带上 locator：结构化位置（页码/工作表+单元格/幻灯片/坐标框），供引用渲染回指
+    locator,
     embedding_model_key, embedding_dim, chunk_size,
     active_document_version_id
 """
@@ -43,6 +46,8 @@ _CHUNK_COLUMNS_BY_BUILD = """
     c.index_version, c.attempt_id, c.chunk_ordinal, c.content,
     c.page_no, c.page_end_no, c.heading_path, c.char_start, c.char_end,
     c.token_count, c.locator_ref,
+    -- 历史 build 也要带 locator：引用回指与活动 build 保持同一形状
+    c.locator,
     b.embedding_model_key, b.embedding_dim, b.chunk_size,
     d.active_document_version_id
 """
@@ -93,11 +98,15 @@ def _keyword_stmt(join_op: str) -> TextClause:
     return stmt
 
 
-def _active_document(row: DocumentRow) -> ActiveDocument:
+def _active_document(row: DocumentRow, object_key: str | None = None) -> ActiveDocument:
     """把 `documents` 行映射成只读快照。
 
     单独抽出来是因为"详情"和"列表"必须给出**同一个形状**：两处各写一遍的话，
     迟早有一处漏掉新加的指针列，前端就会看到有的接口有、有的接口没有。
+
+    `object_key` 来自 `active_document_version_id` 指向的那一版，只用来派生
+    `filename`（前端只读展示）。它是可选参数：调用方没有 join 版本表时传 None，
+    `filename` 就是 None —— 而不是编一个假名字。
     """
     return ActiveDocument(
         document_id=row.document_id,
@@ -109,6 +118,33 @@ def _active_document(row: DocumentRow) -> ActiveDocument:
         generation=row.generation,
         row_version=row.row_version,
         created_at=row.created_at,
+        filename=filename_from_object_key(object_key),
+    )
+
+
+def _version_key_join() -> tuple:
+    """`documents` 左连它"当前该显示的那一版"的 join 条件。
+
+    指针取 `coalesce(desired, active)`，不是只看 `active`：
+    上传只写 `desired_document_version_id`（202 Accepted，真正的
+    `active_document_version_id` 要等 Worker 发布后才写）。只看 active 的话，
+    "刚上传完、还在排队"的文档在列表和详情里都会变成 `filename=None`，
+    前端只能显示一串短 id —— 而文件名在**上传那一刻就已确定**，没有理由等发布。
+
+    `desired` 为空（已发布且指针一致、或指针被 purge 置空）时退回 `active`；
+    两者都为空就 join 不到行，LEFT OUTER 保证文档仍出现在列表里（`filename=None`），
+    不会因为缺版本行就被 INNER JOIN 吃掉。
+    """
+    return (
+        DocumentVersionRow,
+        and_(
+            DocumentVersionRow.workspace_id == DocumentRow.workspace_id,
+            DocumentVersionRow.document_version_id
+            == func.coalesce(
+                DocumentRow.desired_document_version_id,
+                DocumentRow.active_document_version_id,
+            ),
+        ),
     )
 
 
@@ -117,15 +153,19 @@ class SqlDocumentRepo:
         self._session = session
 
     async def get_active(self, scope: Scope, document_id: UUID) -> ActiveDocument | None:
-        stmt = select(DocumentRow).where(
-            DocumentRow.workspace_id == scope.workspace_id,
-            DocumentRow.document_id == document_id,
-            DocumentRow.deleted_at.is_(None),
+        stmt = (
+            select(DocumentRow, DocumentVersionRow.object_key)
+            .outerjoin(*_version_key_join())
+            .where(
+                DocumentRow.workspace_id == scope.workspace_id,
+                DocumentRow.document_id == document_id,
+                DocumentRow.deleted_at.is_(None),
+            )
         )
-        row = (await self._session.execute(stmt)).scalar_one_or_none()
-        if row is None:
+        result = (await self._session.execute(stmt)).first()
+        if result is None:
             return None
-        return _active_document(row)
+        return _active_document(result[0], result[1])
 
     async def list_for_kb(
         self, scope: Scope, kb_id: UUID, *, limit: int = 50, offset: int = 0
@@ -136,7 +176,8 @@ class SqlDocumentRepo:
         会拿到**完全相同**的时间戳，只按时间排的话翻页会出现重复/漏行。
         """
         stmt = (
-            select(DocumentRow)
+            select(DocumentRow, DocumentVersionRow.object_key)
+            .outerjoin(*_version_key_join())
             .where(
                 DocumentRow.workspace_id == scope.workspace_id,
                 DocumentRow.kb_id == kb_id,
@@ -146,8 +187,8 @@ class SqlDocumentRepo:
             .limit(limit)
             .offset(offset)
         )
-        rows = (await self._session.execute(stmt)).scalars().all()
-        return [_active_document(row) for row in rows]
+        rows = (await self._session.execute(stmt)).all()
+        return [_active_document(row[0], row[1]) for row in rows]
 
     async def count_for_kb(self, scope: Scope, kb_id: UUID) -> int:
         """知识库下仍在册的文档数，供列表接口回 `total`。"""
@@ -605,6 +646,8 @@ def _to_active_chunk(row) -> ActiveChunk:
         char_end=row.char_end,
         token_count=row.token_count,
         locator_ref=row.locator_ref,
+        # 带上 locator：结构化位置（页码/单元格/坐标框），引用渲染要回指原文
+        locator=row.locator,
         embedding_model_key=row.embedding_model_key,
         embedding_dim=row.embedding_dim,
         chunk_size=row.chunk_size,
@@ -627,6 +670,8 @@ def _to_scored_chunk(row) -> ScoredChunk:
         page_end_no=row.page_end_no,
         heading_path=row.heading_path,
         locator_ref=row.locator_ref,
+        # 带上 locator：结构化位置（页码/单元格/坐标框），引用渲染要回指原文
+        locator=row.locator,
         embedding_model_key=row.embedding_model_key,
         embedding_dim=row.embedding_dim,
         active_document_version_id=row.active_document_version_id,
