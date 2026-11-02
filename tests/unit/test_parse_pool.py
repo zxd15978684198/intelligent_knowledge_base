@@ -213,15 +213,19 @@ async def test_heartbeat_renews_on_interval_until_stopped() -> None:
             stop.set()
         return True
 
+    # 间隔取 50 ms 而不是 10 ms：Windows 上 `time.monotonic()` 的实际粒度约 15.6 ms，
+    # 若相邻两次续租只隔 10 ms，两次采样可能落进同一个计时器刻度，差值为 0，
+    # 于是「至少睡了一个间隔」的断言会随机失败（实测全量跑时复现过一次）。
+    # 阈值取 20 ms：远小于 50 ms（真睡过就必然满足），又远大于计时器粒度。
     await asyncio.wait_for(
-        heartbeat_loop(job=_make_job(), stop=stop, renew=renew, interval_s=0.01),
+        heartbeat_loop(job=_make_job(), stop=stop, renew=renew, interval_s=0.05),
         timeout=5.0,
     )
 
     assert len(calls) == 3
     for earlier, later in itertools.pairwise(calls):
         # 每轮之间至少睡一个间隔（留一点调度余量），证明不是空转刷 DB。
-        assert later - earlier >= 0.005
+        assert later - earlier >= 0.02
 
 
 async def test_heartbeat_errors_only_warn(

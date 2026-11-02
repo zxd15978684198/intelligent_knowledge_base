@@ -377,6 +377,13 @@ async def process_job(
                 char_end=chunk.char_end,
                 token_count=chunk.token_count,
                 locator_ref=chunk.locator_ref,
+                # 结构化定位（0014，ADR 0008 D2）：切分层已经给出 `Locator` 对象，
+                # 这里必须显式落库——`locator_ref` 只是给人看的紧凑串，
+                # 前端渲染「第 3 页 / Sheet1!B2:C4」要靠这个 JSONB。
+                # `mode="json"` 才能把 Pydantic 子模型摊成纯 dict（否则 jsonb 收不下）。
+                locator=chunk.locator.model_dump(mode="json")
+                if chunk.locator is not None
+                else None,
                 embedding=vec,
             )
         )

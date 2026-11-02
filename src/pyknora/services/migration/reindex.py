@@ -70,10 +70,12 @@ _SYNCHRONOUS_WORKER_ID = "admin-reindex"
 _LEASE = timedelta(hours=1)
 
 #: 源 build 的切片正文与定位信息。**不取 embedding**：重建的意义就是用新参数重算它。
+#: 定位相关的三列必须一起带走：`page_end_no`（0013）与 `locator`（0014）漏取的话，
+#: 重建出来的切片会在「引用回指」上静默退化——正文一字不差，页码和结构化位置却丢了。
 _SOURCE_CHUNKS_SQL = text(
     """
-    SELECT chunk_ordinal, content, page_no, heading_path, char_start, char_end,
-           token_count, locator_ref
+    SELECT chunk_ordinal, content, page_no, page_end_no, heading_path,
+           char_start, char_end, token_count, locator_ref, locator
     FROM chunks
     WHERE workspace_id = :workspace_id
       AND document_id = :document_id
@@ -425,11 +427,13 @@ async def _reindex_document(
                 content=row["content"],
                 content_hash=digest_content(row["content"]),
                 page_no=row["page_no"],
+                page_end_no=row["page_end_no"],
                 heading_path=row["heading_path"],
                 char_start=row["char_start"],
                 char_end=row["char_end"],
                 token_count=row["token_count"],
                 locator_ref=row["locator_ref"],
+                locator=row["locator"],
                 embedding=vec,
             )
         )
