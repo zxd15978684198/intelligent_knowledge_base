@@ -67,6 +67,19 @@ class Settings(BaseSettings):
     # 就不存在；写死会让别的部署凭空多出一个无意义的头。
     chat_session_id: str = ""
 
+    # 视觉理解（多模态）：**一律走外部模型接口，不做本地部署**。
+    #
+    # 为什么和 chat_* 分开而不是复用：视觉调用常换更贵的模型、可能走另一家网关、
+    # 也可能要单独计量；但部署方只想配一套时不该被逼着填两遍——三项留空即回落到
+    # chat_* 的对应值（见 `resolve_vision`），于是"不配也能跑"与"能单独换"同时成立。
+    # 三者都不配且 chat_api_key 也为空时，视觉通道应整体跳过（不发空令牌）。
+    vision_base_url: str = ""
+    vision_api_key: str = ""
+    vision_model: str = ""
+    # 单张图的调用上限。不用 chat_timeout_s（60s）：视觉比文本慢一个量级，一页吃满
+    # 60s 就把整份文档的预算耗光了；20s 与 OCR 的页预算对齐（ADR-0008 D10-8）。
+    vision_page_timeout_s: float = 20.0
+
     # 一次问答的运行预算（计划 §7.3 / T5.1，实现在 services/rag/budget.py）。
     #
     # 这两个值是计划 §7.3 给出的**教学建议值，不是压测结论**：口径要求
@@ -132,6 +145,27 @@ class Settings(BaseSettings):
                 "否则分页游标可被伪造（危害低于 JWT，但不该带上生产）"
             )
         return self
+
+    def resolve_vision(self) -> tuple[str, str, str]:
+        """返回视觉通道的 `(base_url, api_key, model)`，空串项逐个回落到 `chat_*`。
+
+        回落是**逐项**的，不是"三项要么全配要么全不配"：网关地址与 key 常是同一套，
+        只有模型名会换成更贵的那个——逐项回落正好服务这个最常见的情况。
+        """
+        return (
+            self.vision_base_url or self.chat_base_url,
+            self.vision_api_key or self.chat_api_key,
+            self.vision_model or self.chat_model,
+        )
+
+    @property
+    def vision_configured(self) -> bool:
+        """有 API key 才算配置好。
+
+        没有 key 时调用方必须**跳过**视觉通道并标注降级原因，而不是发一个空令牌上去
+        换 401——那种失败看起来像网络故障，实际是没配置，会把排障引向错误的方向。
+        """
+        return bool(self.resolve_vision()[1])
 
 
 settings = Settings()
