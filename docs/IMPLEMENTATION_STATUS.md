@@ -27,8 +27,9 @@
   - **Lead 接线**：`SUPPORTED_SUFFIXES` 7 → **16**、`SUPPORTED_MIME` 补 9 个族；新增 `_PARSUB_MODULES`（后缀 → 子包模块）与 `_parse_via_submodule()`，**必须延迟导入**——`parsers/*.py` 反向 import `parser.Block/ParsedText`，顶层 import 会循环；`test_parser_dispatch.py` 115 行做三表对账（白名单 ⇄ 派发表 ⇄ 各模块 `SUFFIXES`），并真的走一遍 `parse()` 确认路由与参数。另修 N8 报的契约缺口：`TableLocator` 增可选 `slide`/`sheet`，PPTX/ODS 表格不再丢「在哪一页/哪张表」。
 - 三处子 agent 当场纠正我的错误指令（记录以免复犯）：`ParaLocator.index`/`TableLocator.index` 是 **1 基**（`Field(ge=1)`），我写的「从 0 开始」会被 pydantic 拒；`draw:page` 在 drawing 命名空间而非 presentation；`.rtf` 的 `parse` 签名**不带** `content_type`。
 - 已执行命令与真实结果（Lead 收口）：`ruff check src tests scripts` → `All checks passed!`；`ruff format --check src tests scripts` → `161 files already formatted`；`pytest tests/unit`（JUnit XML 计数）→ **`727 tests / 0 failures / 0 errors / 16 skipped / 10.09s`**，exit 0。
-- 未验证：**真实 `.xlsx`/`.pptx`/`.rtf` 解析没跑过**——`openpyxl`/`python-pptx`/`striprtf` 都不在 `.venv`，本机 `uv run --with` 连 pypi 超时，相关用例走 `sys.modules` 桩或 `importorskip` 跳过（`.xls` 的 xlrd 路径**完全未验**）；未接 N12 的进程池/超时隔离（解析器现在仍在 worker 主进程内跑）；`.doc/.ppt` 按 D4-P3 默认 422 拒收，未接 LibreOffice 开关。
-- 阻塞说明：**7 个解析依赖未入库**（`pyproject.toml` 里 `openpyxl`/`xlrd`/`python-pptx`/`pdfplumber`/`striprtf`/`pypdfium2`/`rapidocr-onnxruntime` 全无），当前只能 `uv run --with` 临时装，生产里这三类文件会落到「缺包 → `PARSE_FAILED`」。需能联网时补依赖并复跑被跳过的用例。
+- 未验证：**真实 `.pptx`/`.rtf`/`.xls` 解析没跑过**——`python-pptx`/`striprtf`/`xlrd` 仍不在 `.venv`，且本机 `uv add --offline` 对两者的解析都失败（`python-pptx` 要 Pillow 的注册表 wheel、`striprtf` 缓存里连元数据都没有），相关用例走 `sys.modules` 桩或 `importorskip` 跳过。`.xlsx` 已解封（见下条），`.xls` 的 xlrd 路径**完全未验**。
+- **已解除部分阻塞（2026-11-02 20:0x）**：`uv add --offline openpyxl` 从 `D:\uv-cache` 装成功（`openpyxl==3.1.5` + `et-xmlfile==2.0.0`，`pyproject.toml`/`uv.lock` 已改），`pytest tests/unit/test_parse_tabular.py` → **30 passed**（此前 xlsx 分支走 `sys.modules` 桩），全量 `tests/unit` 变为 **729 tests / 0 failures / 15 skipped**。剩余 15 条跳过 = 8 条 python-pptx 样张 + 2 条 striprtf + 5 条历史缺口（citations/eval，与本轮无关）。
+- 阻塞说明：**其余 6 个解析依赖仍未入库**（`xlrd`/`python-pptx`/`pdfplumber`/`striprtf`/`pypdfium2`/`rapidocr-onnxruntime`），离线缓存里虽有 `pdfplumber`/`pypdfium2`/`rapidocr` 的解包产物，但 uv 解析要求注册表 wheel + 元数据，三种 `uv add --offline` 均判不可解（`pdfplumber` 卡在 `pillow>=12.2.0` 需联网下载）。需能联网时补依赖并复跑被跳过的用例。
 - 下一步：**N12 已随本次一并交付**（进程池 + 租约心跳，见上方段）→ 随后 N6b（跨会话文件释放后）→ W5 收口。
 
 ## 本轮：解析升级 DAG 的 W1 波次（N1–N5，2026-11-02）
