@@ -121,7 +121,9 @@ def chunk_parsed(
     cursor = 0
     pieces: list[str] = []
     for index, block in enumerate(parsed.blocks):
-        if block.is_tabular:
+        if block.is_tabular or block.is_visual:
+            # 表格块（D3-1）与视觉块（D9-5）都不参与全文拼接：前者是块内偏移，
+            # 后者根本没有字符流。它们各自在下面独立成块。
             continue
         # 分隔符只插在两个参与拼接的块之间；全文本流时等价于原来的 `i > 0`。
         if pieces:
@@ -217,6 +219,39 @@ def chunk_parsed(
                         if block.locator is not None
                         else f"offsets:{start}-{end_offset}"
                     ),
+                ),
+            )
+        )
+
+    # ADR 0008 D9-5 / D10-5：视觉块独立成块，`char_start`/`char_end` 一律 None。
+    # 理由不是"懒得算"——位图里没有"原文第几个字符"，硬填一个偏移等于给引用系统
+    # 一个假坐标；能核对的只有 `locator` 的 bbox。页码与标题取块自带的（OCR 块有
+    # page_no，VLM 块同样），不像表格块那样置空。
+    for index, block in enumerate(parsed.blocks):
+        if not block.is_visual:
+            continue
+        content = block.text.strip()
+        if not content:
+            # VLM 失败时 `blocks_from_vlm` 会留一个空占位块（D9-6：不许静默丢页），
+            # 它的"存在"已经记在 `ParsedText.degraded` 里，不该再产出一个空 chunk。
+            continue
+        collected.append(
+            (
+                index,
+                0,
+                Chunk(
+                    ordinal=0,  # 同上
+                    content=content,
+                    page_no=block.page_no,
+                    page_end_no=block.page_no,
+                    heading_path=block.heading_path,
+                    char_start=None,
+                    char_end=None,
+                    token_count=max(1, len(content) // 2),
+                    locator_ref=(
+                        compact_locator(block.locator) if block.locator is not None else None
+                    ),
+                    locator=block.locator,
                 ),
             )
         )

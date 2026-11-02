@@ -53,12 +53,15 @@ from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from statistics import median
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.schemas.locator import PageLocator, TableLocator
 from pyknora.services.ingest.guards import check_document_limits
 from pyknora.services.ingest.parser import Block, ParsedText
+
+if TYPE_CHECKING:  # pragma: no cover — 只为类型标注；运行时由 _page_signals 内部延迟引入
+    from pyknora.services.ingest.parsers.vision import PageSignals
 
 #: 本模块负责的后缀。Lead 的 `parser.py` 按它分派，别在别处再抄一份。
 SUFFIXES: frozenset[str] = frozenset({".pdf"})
@@ -129,6 +132,8 @@ class _DocState:
     heading: str | None = None
     table_index: int = 0
     chars: int = 0
+    #: 逐页判定输入（ADR 0008 D9-2 的三信号）。`parse()` 不读它，视觉通道的入口读。
+    signals: list[PageSignals] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- 工具
@@ -376,13 +381,60 @@ def _table_block(rows: list[list[str]], page_no: int, state: _DocState) -> Block
 # --------------------------------------------------------------------------- 单页
 
 
+def _page_signals(page: Any, page_text: _PageText, admitted: list[Any]) -> PageSignals:
+    """一页的判定输入（ADR 0008 D9-2 的三信号）。
+
+    只数**已经抽好的东西**：字符数来自行流、图片数与覆盖面积来自 pdfplumber 的
+    `page.images`、表格来自准入结果。分栏数（`column_count`）判不了，保持默认 1——
+    判错的代价是把整页交给 VLM（贵但不会丢内容），假装能判才会真的丢内容。
+
+    **不额外 open、不额外 extract**：这份信号是解析过程的副产品，多抽一遍就等于
+    把 D5-1 的「一份文档只 open 一次」再破一次。
+    """
+    from pyknora.services.ingest.parsers.vision import PageSignals, looks_like_sentence
+
+    chars = sum(len(line.text.strip()) for line in page_text.lines)
+    width = float(getattr(page, "width", 0.0) or 0.0)
+    height = float(getattr(page, "height", 0.0) or 0.0)
+    page_area = width * height
+
+    images = list(getattr(page, "images", ()) or ())
+    covered = 0.0
+    for image in images:
+        try:
+            box_width = float(image["x1"]) - float(image["x0"])
+            box_height = float(image["bottom"]) - float(image["top"])
+        except (KeyError, TypeError, ValueError):
+            # 图片对象缺几何字段时不参与面积统计，但**仍然计数**：S2 只要求「有图」。
+            continue
+        if box_width > 0 and box_height > 0:
+            covered += box_width * box_height
+    ratio = min(1.0, covered / page_area) if page_area > 0 else 0.0
+
+    sample = "\n".join(line.text for line in page_text.lines if line.text.strip())
+    return PageSignals(
+        char_count=chars,
+        image_count=len(images),
+        image_area_ratio=ratio,
+        table_block_count=len(admitted),
+        sentence_like=looks_like_sentence(sample),
+        page_width=width,
+        page_height=height,
+    )
+
+
 def _page_blocks(page: Any, page_no: int, state: _DocState) -> list[Block]:
-    """一页 → 若干块。文本块先出，本页的表格块按 y 序追加在后。"""
+    """一页 → 若干块。文本块先出，本页的表格块按 y 序追加在后。
+
+    顺带把这一页的判定信号记进 `state.signals`（视觉通道的入口用）。
+    """
     page_text = _page_text(page)
     state.chars += sum(len(line.text.strip()) for line in page_text.lines)
 
     admitted, _ = _page_tables(page)  # 淘汰原因只给实测脚本看，解析结果里不出现
     blocked = [bbox for bbox, _ in admitted]
+
+    state.signals.append(_page_signals(page, page_text, admitted))
 
     blocks = _text_blocks(page, page_text, page_no, blocked, state)
     blocks.extend(_table_block(rows, page_no, state) for _bbox, rows in admitted)
@@ -520,12 +572,12 @@ def _open_pdf(data: bytes) -> Any:
 # --------------------------------------------------------------------------- 入口
 
 
-def parse(data: bytes, filename: str = "") -> ParsedText:
-    """PDF bytes → `ParsedText`。`filename` 只为对齐解析器签名，本模块不用它。
+def _extract(data: bytes) -> tuple[list[Block], list[PageSignals]]:
+    """PDF bytes → (块, 逐页信号)。
 
-    错误出口只有三个：`reason="empty"`（0 字节）、`"encrypted"` / `"broken"`（打不开）、
-    `"no_text_layer"`（能打开但没有文本层，N14 的 OCR 信号）。规模越界由
-    `guards.check_document_limits` 抛 `ParseGuardError`（同一错误码，`details` 带 metric）。
+    错误出口：`reason="empty"`（0 字节）、`"encrypted"` / `"broken"`（打不开）。
+    "没有文本层"**不在这里抛**——混合文档（前几页扫描、后面有文字层）要能带着信号
+    交给调用方逐页决定，而不是整份失败。
     """
     if not data:
         raise AppError(
@@ -573,10 +625,32 @@ def parse(data: bytes, filename: str = "") -> ParsedText:
     finally:
         pdf.close()
 
-    if not blocks:
+    return blocks, state.signals
+
+
+def parse_with_signals(data: bytes, filename: str = "") -> tuple[ParsedText, list[PageSignals]]:
+    """同 :func:`parse`，但把逐页信号一起交出去，且**不**因"无文本层"抛错。
+
+    视觉通道的入口就在这两个返回值上：调用方拿 `signals` 逐页问 `triggered_by()`，
+    决定哪一页要 OCR、哪一页要 VLM。`blocks` 允许为空（整份扫描件）——这时
+    "要不要报错"由调用方判，因为它比我多知道一件事：视觉通道有没有可用配置。
+    """
+    blocks, signals = _extract(data)
+    return ParsedText(blocks=blocks, parser=PARSER_NAME), signals
+
+
+def parse(data: bytes, filename: str = "") -> ParsedText:
+    """PDF bytes → `ParsedText`。`filename` 只为对齐解析器签名，本模块不用它。
+
+    本函数是**不走视觉通道**时的契约：整篇没有文本层就抛 `PARSE_FAILED`，
+    `details["reason"] == "no_text_layer"`（这个字符串是上层触发 OCR 的信号，不许改）。
+    `parser.py` 的 PDF 入口用的是 :func:`parse_with_signals`，它把这条判断接管了。
+    """
+    parsed, signals = parse_with_signals(data, filename)
+    if not parsed.blocks:
         raise AppError(
             ErrorCode.PARSE_FAILED,
             "PDF 未提取到任何文本（可能是扫描件）",
-            details={"reason": "no_text_layer", "pages": page_count},
+            details={"reason": "no_text_layer", "pages": len(signals)},
         )
-    return ParsedText(blocks=blocks, parser=PARSER_NAME)
+    return parsed

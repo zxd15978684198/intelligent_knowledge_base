@@ -10,15 +10,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.schemas.locator import Locator
+
+if TYPE_CHECKING:  # pragma: no cover — 视觉信号只在 PDF 入口用到，运行时延迟引入
+    from pyknora.services.ingest.parsers.vision import PageSignals
 
 # 新增的后缀与 `_PARSUB_MODULES` 必须同步：`tests/unit/test_parser_dispatch.py`
 # 会把两张表对账，漏一处就红（曾经就是靠人眼核对，漏了 .markdown）。
@@ -77,6 +82,9 @@ class Block:
     heading_path: str | None = None
     locator: Locator | None = None
     is_tabular: bool = False
+    #: 视觉块（OCR/VLM 认出来的）。切分层靠它把 `char_start`/`char_end` 置 `None`
+    #: ——位图里没有「第几个字符」这回事（ADR 0008 D9-5 / D10-5）。
+    is_visual: bool = False
     # 解析侧的「可复现性凭证」（ADR 0008 D9-4）：视觉块必须能回答"这段文字是哪个
     # 模型、哪版提示词、以什么置信度认出来的"，否则同一份文件两次解析出不同文本时
     # 无法判断是模型漂移还是代码回归。放 dict 而不是逐字段加，是因为承载方从 OCR
@@ -90,15 +98,20 @@ class Block:
 class ParsedText:
     blocks: list[Block] = field(default_factory=list)
     parser: str = ""
+    #: 视觉通道的降级记录（`no_vlm_config`、`ocr_slow@3`、`vision_budget@7` 之类）。
+    #: 这些**不是错误**（D9-6：单页失败不整份失败），但必须能回答"这份文档为什么少了
+    #: 某几页"，所以随产物一起往上走，由作业层决定要不要标 `PARSE_INCOMPLETE`。
+    degraded: list[str] = field(default_factory=list)
 
     @property
     def full_text(self) -> str:
-        """纯文本流的拼接结果。**表格块不参与拼接**（ADR 0008 D3-1）。
+        """纯文本流的拼接结果。**表格块与视觉块不参与拼接**。
 
-        表格块是独立单元，它的 `char_*` 是块内偏移（D3-2），拼进全文会让所有
-        偏移反算错位；所以这里和 `splitter.chunk_parsed` 用同一条排除规则。
+        表格块的 `char_*` 是块内偏移（D3-2），拼进全文会让所有偏移反算错位；
+        视觉块连原始字符流都不存在（D9-5）。所以这里和 `splitter.chunk_parsed`
+        用同一条排除规则——两处必须一致，否则偏移在两处之间就对不上。
         """
-        return "\n\n".join(b.text for b in self.blocks if not b.is_tabular)
+        return "\n\n".join(b.text for b in self.blocks if not b.is_tabular and not b.is_visual)
 
 
 def _suffix_of(filename: str, content_type: str | None) -> str:
@@ -241,9 +254,127 @@ def _parse_via_submodule(module_name: str, data: bytes, filename: str) -> Parsed
     return module.parse(data, filename)  # type: ignore[no-any-return]
 
 
+@dataclass(slots=True)
+class _VisualOutcome:
+    """视觉通道的产物与降级记录。降级**永不抛错**（ADR 0008 D9-6）。"""
+
+    blocks: list[Block] = field(default_factory=list)
+    degraded: list[str] = field(default_factory=list)
+
+    def summary(self) -> dict[str, Any]:
+        return {"blocks": len(self.blocks), "degraded": sorted(set(self.degraded))}
+
+
+def _run_vlm(png: bytes, timeout_s: float) -> Any:
+    """同步地在当前线程里跑一次 `vision.vlm_page`（它本身是协程）。
+
+    worker 里 `parser.parse` 跑在 `asyncio.to_thread` 的线程上，那里**没有**运行中的
+    事件循环，`asyncio.run` 是安全的；反过来，如果有人在协程里直接调 `parse`，
+    这里会明确报错而不是偷偷起一个嵌套循环（那会得到
+    `RuntimeError: asyncio.run() cannot be called from a running event loop`，
+    信息量远不如这句话）。要接协程调用方，正确做法是传一个 async 编排函数，
+    而不是让解析器猜。
+    """
+    from pyknora.services.ingest.parsers import vision
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(vision.vlm_page(png, timeout_s=timeout_s))
+    raise AppError(
+        ErrorCode.INTERNAL_ERROR,
+        "视觉通道不能在已有事件循环的线程里同步调用（改为在 to_thread 里解析）",
+    )
+
+
+def _visual_blocks(pdf_bytes: bytes, signals: Sequence[PageSignals]) -> _VisualOutcome:
+    """逐页决定要不要进视觉通道，并把认出来的文字变成块。
+
+    两问的顺序是硬的（ADR 0008 D10-2）：先 `triggered_by()` 问「这页到底该不该进通道」，
+    命中才 `classify_page()` 问「进去以后走 OCR 还是 VLM」。反过来先判型的话，
+    纯文字页也会被判成 `text_scan`，然后白跑一遍 OCR。
+
+    OCR 跑完还要再问一次 `escalate_to_vlm()`（D10-2 附加规则 2）：同一个框都没识别出来
+    或者平均置信度太低时升级到 VLM。OCR 已经出的块**不撤销**——两份文字都留着，
+    由切分层按块顺序排列，丢内容比多一段文字更糟。
+    """
+    from pyknora.services.ingest.parsers import vision
+
+    outcome = _VisualOutcome()
+    targets = [
+        (page_no, signal)
+        for page_no, signal in enumerate(signals, start=1)
+        if signal.triggered_by() is not None
+    ]
+    if not targets:
+        return outcome
+
+    budget = vision.DocBudget()
+    for page_no, signal in targets:
+        kind = vision.classify_page(signal)
+        try:
+            png = vision.render_page(pdf_bytes, page_no)
+        except Exception:  # noqa: BLE001 — pypdfium2 的异常类型随版本变，一律降级
+            outcome.degraded.append(f"render_error@{page_no}")
+            continue
+
+        if vision.channel_for(kind) == "ocr":
+            if not budget.claim_ocr_page():
+                outcome.degraded.append(f"ocr_budget@{page_no}")
+                continue
+            result = vision.ocr_page(png, timeout_s=budget.page_timeout(vision.OCR_PAGE_TIMEOUT_S))
+            if result.degraded:
+                outcome.degraded.append(f"{result.degraded}@{page_no}")
+            outcome.blocks.extend(vision.blocks_from_ocr(page_no, result))
+            if not vision.escalate_to_vlm(result):
+                continue
+
+        if not budget.claim_vision_page():
+            outcome.degraded.append(f"vision_budget@{page_no}")
+            continue
+        vlm = _run_vlm(png, budget.page_timeout(vision.OCR_PAGE_TIMEOUT_S))
+        if vlm.degraded:
+            outcome.degraded.append(f"{vlm.degraded}@{page_no}")
+        page_bbox = (0.0, 0.0, signal.page_width or 1.0, signal.page_height or 1.0)
+        outcome.blocks.extend(vision.blocks_from_vlm(page_no, vlm, page_bbox=page_bbox))
+    return outcome
+
+
+def _parse_pdf(data: bytes, filename: str) -> ParsedText:
+    """PDF 入口：pdfplumber 抽文本层 + 视觉通道补扫描页。
+
+    与其它格式的区别只有一处：它先拿**逐页信号**，再决定要不要动视觉通道
+    （`vision.SUFFIXES` 是空集，它永远不进上面那张后缀派发表）。
+    """
+    from pyknora.services.ingest.parsers import pdf as pdf_parser
+
+    parsed, signals = pdf_parser.parse_with_signals(data, filename)
+    visual = _visual_blocks(data, signals)
+    if visual.blocks:
+        parsed.blocks.extend(visual.blocks)
+    parsed.degraded.extend(visual.degraded)
+
+    if not parsed.blocks:
+        # 到这里说明：没有文本层，且视觉通道也没给出任何块（没配 key / 全超时 /
+        # 全是无内容的占位块）。仍然按"没有文本层"报，但把视觉侧的账一起带上，
+        # 否则排障只能看到"扫描件"三个字，看不出到底是没配还是跑挂了。
+        raise AppError(
+            ErrorCode.PARSE_FAILED,
+            "PDF 未提取到任何文本（可能是扫描件，且视觉通道未产出内容）",
+            details={
+                "reason": "no_text_layer",
+                "pages": len(signals),
+                "visual": visual.summary(),
+            },
+        )
+    return parsed
+
+
 def parse(data: bytes, filename: str, content_type: str | None = None) -> ParsedText:
     """按后缀分派解析器。格式不在白名单时抛 UNSUPPORTED_FORMAT。"""
     suffix = _check_allowed(filename, content_type)
+    if suffix == ".pdf":
+        return _parse_pdf(data, filename)
     if suffix == ".docx":
         return _parse_docx(data)
     if suffix in {".md", ".markdown"}:

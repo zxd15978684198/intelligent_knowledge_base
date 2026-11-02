@@ -588,6 +588,10 @@ class PageSignals:
     column_count: int = 1
     #: 文本层是否成句（用 `looks_like_sentence()` 算）。
     sentence_like: bool = True
+    #: 页面尺寸（pt）。视觉块的页级 bbox（D9-5）要落在页面里，所以尺寸得从 PDF 那侧
+    #: 数过来——本模块不碰 PDF，只能由调用方填。
+    page_width: float = 0.0
+    page_height: float = 0.0
 
     def triggered_by(
         self,
@@ -987,6 +991,8 @@ def blocks_from_ocr(page_no: int, result: OcrResult, *, dpi: int = RENDER_DPI) -
                 text=box.text,
                 page_no=page_no,
                 is_tabular=False,
+                # 视觉标记：切分层靠它把这一块的 char_* 置 None（D9-5 / D10-5）。
+                is_visual=True,
                 locator=RegionLocator(page=page_no, bbox=bbox),
                 # D10-5 / D9-4 的记账位：同一页两次 OCR 出不同文本时，靠这个判断是
                 # 引擎输出变了还是代码变了；不参与检索。
@@ -1015,6 +1021,8 @@ def blocks_from_vlm(
             text=result.text,
             page_no=page_no,
             is_tabular=False,
+            # 同 `blocks_from_ocr`：视觉块没有字符流偏移。
+            is_visual=True,
             locator=RegionLocator(page=page_no, bbox=page_bbox),
             meta={
                 "vision_model": result.model,

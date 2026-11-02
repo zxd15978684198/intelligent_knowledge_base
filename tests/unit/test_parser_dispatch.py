@@ -19,6 +19,7 @@ from pyknora.services.ingest.parser import (
     _PARSUB_MODULES,
     SUPPORTED_MIME,
     SUPPORTED_SUFFIXES,
+    Block,
     ParsedText,
     parse,
 )
@@ -80,7 +81,20 @@ def test_dispatch_reaches_the_expected_submodule(
         return ParsedText(blocks=[], parser=f"stub:{module_name}")
 
     real_module = importlib.import_module(f"pyknora.services.ingest.parsers.{module_name}")
-    monkeypatch.setattr(real_module, "parse", fake_parse)
+    if suffix == ".pdf":
+        # PDF 的入口是 `parse_with_signals`：它额外交出逐页信号，视觉通道靠这些信号
+        # 决定哪一页要 OCR/VLM。`parse` 只是"不走视觉通道"的薄包装，分派不走那条。
+        def fake_parse_with_signals(
+            data: bytes, filename: str = ""
+        ) -> tuple[ParsedText, list[object]]:
+            seen["data"] = data
+            seen["filename"] = filename
+            # 必须给一块：`_parse_pdf` 在"文本层空 + 视觉通道也空"时会按扫描件报错。
+            return ParsedText(blocks=[Block(text="stub")], parser=f"stub:{module_name}"), []
+
+        monkeypatch.setattr(real_module, "parse_with_signals", fake_parse_with_signals)
+    else:
+        monkeypatch.setattr(real_module, "parse", fake_parse)
 
     filename = f"report{suffix}"
     result = parser_module.parse(b"payload", filename)
