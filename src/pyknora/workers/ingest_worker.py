@@ -15,7 +15,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import functools
 import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Final
 from uuid import UUID
@@ -26,9 +30,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
 from pyknora.core.settings import settings
+from pyknora.db.session import session_scope
 from pyknora.models.tables import ChunkRow, DocumentVersionRow
 from pyknora.services.contracts.reads import KbRepo
-from pyknora.services.ingest import parser, publish, splitter
+from pyknora.services.ingest import parser, pool, publish, splitter
 from pyknora.services.ingest.embedder import EmbeddingProvider, check_profile_compat
 from pyknora.services.ingest.embedding_service import EmbeddingService, digest_content
 from pyknora.services.queue import jobs as queue
@@ -81,6 +86,104 @@ class ProcessResult:
     build_id: UUID | None = None
     chunk_count: int = 0
     error_code: str | None = None
+
+
+# --------------------------------------------------------------------- 租约心跳
+# ADR 0008 D6：租约 90 s（`core/settings.py:104`），心跳 30 s。一条心跳丢了还有两次
+# 机会；连续 3 次（≈90 s）都失败才放弃，那时租约本来也快到期了。
+HEARTBEAT_INTERVAL_S: Final[float] = 30.0
+HEARTBEAT_MAX_CONSECUTIVE_FAILURES: Final[int] = 3
+
+RenewLease = Callable[[ClaimedJob], Awaitable[bool]]
+
+
+async def _renew_lease_in_new_session(job: ClaimedJob) -> bool:
+    """用**独立连接**续租。
+
+    必须独立：主 session 正在跑作业体（发布前还要锁 documents 行），把心跳塞进
+    同一个事务里，两条 `UPDATE ingestion_jobs` 会互相等待。契约是"认领单独提交 +
+    独立连接"两条同时成立，只做前一条不够。
+    """
+    async with session_scope() as session:
+        return await queue.renew_lease(
+            session,
+            job_id=job.job_id,
+            lease_epoch=job.lease_epoch,
+            lease_seconds=settings.lease_seconds,
+        )
+
+
+async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> bool:
+    """等 `seconds` 秒；被 `stop` 提前唤醒时返回 True（该退出了）。"""
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=seconds)
+    except TimeoutError:  # py3.12：asyncio.TimeoutError 就是内置 TimeoutError
+        return False
+    return True
+
+
+async def heartbeat_loop(
+    *,
+    job: ClaimedJob,
+    stop: asyncio.Event,
+    renew: RenewLease | None = None,
+    interval_s: float = HEARTBEAT_INTERVAL_S,
+    max_consecutive_failures: int = HEARTBEAT_MAX_CONSECUTIVE_FAILURES,
+) -> None:
+    """周期性续租，直到 `stop` 置位、续租被拒、或连续失败到上限。
+
+    **失败只 warning，不杀作业**：DB 抖动是暂时的，而中途放弃一份已经跑了一半的
+    解析，代价是整份重来——这正是 D6 要修的那个缺陷。宁可让作业随租约到期被别人
+    重领，也不在这里主动判死。
+    """
+    renew_fn = renew or _renew_lease_in_new_session
+    failures = 0
+    while not await _sleep_or_stop(stop, interval_s):
+        try:
+            renewed = await renew_fn(job)
+        except Exception:
+            failures += 1
+            logger.warning(
+                "作业 %s 续租失败（连续 %d 次），作业继续跑", job.job_id, failures, exc_info=True
+            )
+            if failures >= max_consecutive_failures:
+                logger.warning(
+                    "作业 %s 连续 %d 次续租失败，停止心跳；租约到期后作业可被重新认领",
+                    job.job_id,
+                    failures,
+                )
+                return
+            continue
+        failures = 0
+        if not renewed:
+            logger.warning(
+                "作业 %s 续租被拒（lease_epoch=%s 已失效），停止心跳",
+                job.job_id,
+                job.lease_epoch,
+            )
+            return
+
+
+@contextlib.asynccontextmanager
+async def lease_heartbeat(
+    job: ClaimedJob,
+    *,
+    renew: RenewLease | None = None,
+    interval_s: float = HEARTBEAT_INTERVAL_S,
+) -> AsyncIterator[None]:
+    """给作业体挂一条心跳；退出上下文时必定收掉，不留悬空 task。"""
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        heartbeat_loop(job=job, stop=stop, renew=renew, interval_s=interval_s),
+        name=f"lease-heartbeat-{job.job_id}",
+    )
+    try:
+        yield
+    finally:
+        stop.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 async def _load_bytes(session: AsyncSession, *, scope: Scope, version_id: UUID) -> bytes:
@@ -190,7 +293,17 @@ async def process_job(
     data = await _load_bytes(session, scope=scope, version_id=version_id)
 
     # ---- 纯函数段：解析 + 切片 ----
-    parsed = parser.parse(data, filename, content_type)
+    # 解析走常驻进程池 + 硬超时（ADR 0008 D6），两件事必须同时成立：
+    # 1) 在**子进程**里跑：pdfplumber 的内存与崩溃（OOM / 段错误）不污染 Worker，
+    #    超时即整池重建（见 `services/ingest/pool.py`）；
+    # 2) 用 `to_thread` 把阻塞的 `future.result()` 挪出事件循环：否则解析期间循环被
+    #    占满，同一循环上的租约心跳一次都发不出去，90 s 后作业被第二个 Worker 重跑。
+    parsed = await asyncio.to_thread(
+        pool.run_in_pool,
+        functools.partial(parser.parse, content_type=content_type),
+        data,
+        filename,
+    )
     chunks = splitter.chunk_parsed(
         parsed,
         chunk_size=recipe_chunk_size,
@@ -316,10 +429,16 @@ async def run_once(
 ) -> ProcessResult | None:
     """取一件、跑一件。返回 None 表示队列空。
 
-    **作业体包在 SAVEPOINT 里**。这不只是"好看"：PG 里任何一条语句报错，
-    整个事务立即进入 aborted 态，之后连 `UPDATE job_attempts` 都会被拒。
-    如果不先回滚到保存点，`except` 里的清理语句自己也会失败，
-    真正的错误就被 "transaction is aborted" 盖掉了——排错时极难定位。
+    **两个事务边界，别合并**（ADR 0008 D6）：
+
+    1. `claim` 之后**立即提交**——认领的那条 `UPDATE` 会一直持有该作业行的行锁，
+       不提交就开跑，另一条连接上的心跳 `renew_lease`（同样 `UPDATE` 这一行）会阻塞
+       到作业跑完，心跳等于没发，90 s 后第二个 Worker 把整份解析重跑一遍。提交之后
+       作业已落库为 `processing`（带租约），进程崩了也不丢，到期自然被重领。
+    2. 作业体包在 SAVEPOINT 里。这不只是"好看"：PG 里任何一条语句报错，
+       整个事务立即进入 aborted 态，之后连 `UPDATE job_attempts` 都会被拒。
+       如果不先回滚到保存点，`except` 里的清理语句自己也会失败，
+       真正的错误就被 "transaction is aborted" 盖掉了——排错时极难定位。
     """
     job = await queue.claim(
         session,
@@ -329,8 +448,11 @@ async def run_once(
     )
     if job is None:
         return None
+
+    await session.commit()
+
     try:
-        async with session.begin_nested():
+        async with lease_heartbeat(job), session.begin_nested():
             return await process_job(session, job=job, kb_repo=kb_repo, embedder=embedder)
     except AppError as exc:
         # 此时保存点已回滚，作业体写的 staging 数据都不在了，但外层事务还活着

@@ -33,9 +33,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from pyknora.core.settings import settings  # noqa: E402
 from pyknora.db.repos.knowledge_bases import SqlKnowledgeBaseRepo  # noqa: E402
 from pyknora.db.session import dispose_engine, session_scope  # noqa: E402
+from pyknora.services.ingest import pool  # noqa: E402
 from pyknora.services.ingest.embedder import EmbeddingProvider, build_embedder  # noqa: E402
 from pyknora.services.outbox.dispatcher import DispatchReport, dispatch_pending  # noqa: E402
-from pyknora.workers.ingest_worker import ProcessResult, run_once  # noqa: E402
+from pyknora.workers.ingest_worker import (  # noqa: E402
+    HEARTBEAT_INTERVAL_S,
+    ProcessResult,
+    run_once,
+)
 
 logger = logging.getLogger("pyknora.worker")
 
@@ -45,8 +50,13 @@ async def _tick(
 ) -> tuple[ProcessResult | None, DispatchReport]:
     """一轮 = 一个短事务：跑一件作业 + 派发一批发件箱事件。
 
-    不要再在外面包事务：`run_once` 内部已经用 SAVEPOINT 把作业体隔开
-    （`workers/ingest_worker.py:291`），外面再包一层会破坏它设计的失败回滚语义。
+    不要再在外面包事务：`run_once` 内部自己管事务边界——先提交认领，再把作业体包进
+    SAVEPOINT（见 `workers/ingest_worker.py` 的 `run_once`）。外面再包一层会破坏它的
+    失败回滚语义，还会让"认领单独提交"失效：认领的 `UPDATE` 行锁一直不放，独立连接上
+    的租约心跳就得等到作业跑完才能续上（ADR 0008 D6）。
+
+    解析在常驻进程池里跑、60 s 硬超时（`services/ingest/pool.py`）；作业体期间每
+    `HEARTBEAT_INTERVAL_S` 秒用**独立 session** 续一次租约。
 
     发件箱派发放在**这里**而不是 `run_once` 里面：队列空时 `run_once` 提前返回，
     于是发布事务写下的 `document.index_published` 在空闲 Worker 上永远等不到派发
@@ -73,11 +83,13 @@ async def main() -> int:
     embedder = build_embedder(settings)
     worker_id = args.worker_id or f"worker-{os.getpid()}"
     logger.info(
-        "worker %s 启动：backend=%s model_key=%s dim=%s",
+        "worker %s 启动：backend=%s model_key=%s dim=%s lease=%ss heartbeat=%ss",
         worker_id,
         settings.embedding_backend,
         embedder.model_key,
         embedder.dim,
+        settings.lease_seconds,
+        HEARTBEAT_INTERVAL_S,
     )
 
     stop = asyncio.Event()
@@ -124,6 +136,10 @@ async def main() -> int:
     except KeyboardInterrupt:
         logger.info("收到 Ctrl-C，退出")
     finally:
+        # 先收进程池、再收数据库连接。只靠 `atexit` 兜底是不够的：`concurrent.futures`
+        # 的收尾挂在 `threading._register_atexit` 上，比 `atexit` 早执行，会先把正在
+        # 解析的子进程 join 完再走——Ctrl-C 时看起来像卡死（实测多等 27.8 s）。
+        pool.shutdown_pool()
         await dispose_engine()
     return 0
 
