@@ -3,6 +3,7 @@
 - 日期：2026-11-02
 - 状态：**提议**（七条决策经用户逐条确认；七项待定事项已于 2026-11-02 由用户授权代定，见「已决项」；按仓库纪律仍需评审接受，不据此宣称技术口径已定）
 - 修订：2026-11-02 第二轮，外部只读评审发现 4 条 P0 / 7 条 P1 / 5 条 P2，已全部修正（见文末「评审记录」）；同日用户授权代定七项待定事项
+- 修订：2026-11-02 第三轮，补 **D9 视觉通道（条件触发多模态）**。上一版把「扫描件无 OCR 兜底」写成缺陷却未给任何决策，属对原始需求的漏项（用户原始要求是「遇到表格或者扫描件条件触发用多模态模型」）。用户已确认：触发粒度页级起步（D9-1）、扫描页只到页级引用（D9-5）
 - 关联需求与证据：`docs/PRD_PyKnora.md`（知识摄入）；`docs/tdd/06_Knowledge_Ingestion.md`；`docs/plans/全员模块实现路径.md` 契约 C2；AGENTS §4 I1/I3/I6；落地代码 `src/pyknora/services/ingest/parser.py`、`src/pyknora/services/ingest/splitter.py`、`src/pyknora/workers/ingest_worker.py`、`src/pyknora/services/queue/jobs.py`、`scripts/run_worker.py`；评估台账 `docs/Day03/05-失败样本记录.md`（32 条）。
 
 ## 背景
@@ -52,6 +53,7 @@ A 档（仅文本）与 B 档（文本+结构）被否决，见备选方案。
 | `sheet` | `sheet`, `cells`(如 `B2:C4`) | XLSX/XLS/ODS/CSV |
 | `slide` | `slide`, `shape`(可选) | PPTX/ODP |
 | `table` | `index`, `rows`(可选，如 `R1200:R1350`)；**`cells` 仅当来源是电子表格** | 表格块 |
+| `region` | `page`, `bbox`(页内坐标) | 视觉块：扫描页整页 / 待补的图片区域（见 D9-5） |
 
 **DOCX 表格不适用 `cells`**：`cells` 是 Excel 的 `A1` 坐标，DOCX 表格没有列标，只能给 `table.index`（第几张表）+ `rows`（行进区间）。D1 对 DOCX 的承诺因此是「可回指到第几张表的第几行」，不是「单元格」。
 
@@ -85,6 +87,8 @@ A 档（仅文本）与 B 档（文本+结构）被否决，见备选方案。
 > I6 适用于纯文本流格式的连续块。表格类块不保证 `char_*` 可回拼原文，其可核对性由 `locator`（sheet/cells/rows）+ 显式 `[表头]` 标记共同保证。
 
 理由：I6 的初衷是「用户能核对」。对表格而言 `Sheet1!B2:C4` 比字符偏移更强；若强制字符偏移，则无法表达单元格边界。
+
+**D9 补充**：视觉块（`locator.kind="region"`）的 `char_start`/`char_end` 为 `null`，**I6 对它完全不适用**——连「块内偏移」都不成立，可核对性仅由 `region.page` + `bbox` 提供（见 D9-5）。
 
 ### D4 格式清单（三批）
 
@@ -164,6 +168,80 @@ A 档（仅文本）与 B 档（文本+结构）被否决，见备选方案。
 
 保留而非删除的理由：将来可能出现「新基准低于旧基准」，必须能查证是解析变差还是语料变难。
 
+### D9 视觉通道（条件触发多模态）
+
+背景缺口：本文第一版把「扫描件与损坏文件同码、无 OCR 兜底」（背景第 3 条）记为缺陷，却**没有任何决策消解它**。用户的原始需求是「遇到表格或者扫描件条件触发用多模态模型」，本版补齐。
+
+#### D9-1 触发粒度 = 页级（块级排第二步，文件级否决）
+
+| 粒度 | 做法 | 结论 |
+| --- | --- | --- |
+| **页级** | 逐页判定，命中即**整页转图**送视觉通道 | **采纳**。判据单一、可解释、成本可预估（页数 × 命中率）。代价：一页内「上半正文 + 下半扫描表」时整页重抽，可能与原始文字层不一致 |
+| 块级 | 先抽文本块，用 bbox 覆盖算出未被文本覆盖的图片区域，仅该区域送视觉 | 排第二步。收益是省成本、避免重复抽取正文；代价是 bbox 覆盖与页边距处理，复杂度显著上升 |
+| 文件级 | 整份文件「文本量 / 页数」低于阈值才启用 | **否决**：混合文档（前文后图）会被判「有文本」→ 后半扫描页**静默丢失**，比不做更危险 |
+
+#### D9-2 判据 = 三信号 + 全部记账（不拍字符数阈值）
+
+任一命中即该页走视觉通道（**取保守方向：宁可误触发**，因为漏检是静默丢失，误触发只多花一次调用）：
+
+| 信号 | 判据 | 目标 |
+| --- | --- | --- |
+| S1 | 该页 `chars == 0` | 纯扫描页 |
+| S2 | `chars < vision_min_chars` **且**该页有图片对象 | 带一层劣质 OCR 文字层的扫描页（只按「有没有文字」判会漏判） |
+| S3 | 图片面积 / 页面积 ≥ `vision_image_area_ratio` | 整页翻拍 / 贴图 |
+
+阈值全部进配置，默认取保守值；**每页记录 `{chars, image_count, image_area_ratio, triggered_by}`** 进 block 元数据与解析日志，使阈值可以事后用真实文档调参。理由：当前仓库只有 2 个 PDF、0 个扫描件，**任何具体阈值都是未验证值**，写成硬编码等于把猜测固化。
+
+#### D9-3 通道 = 复用 OpenAI 兼容视觉端点（零新增依赖）
+
+`core/settings.py:58-61` 已有 `chat_base_url` / `chat_api_key` / `chat_model`（默认 `gpt-4o-mini`，本身支持图片输入）/ `chat_timeout_s`。视觉通道复用同一协议：
+
+- 新增配置组 `vision_enabled` / `vision_base_url` / `vision_api_key` / `vision_model` / `vision_timeout_s` / `vision_max_pages`，**默认继承 `chat_*`**，需要独立模型时再填；
+- 请求 `POST {base_url}/chat/completions`，图片以 `data:image/png;base64,...` 传入；
+- 复用 `services/rag/answer.py` 的 httpx 客户端风格，**不引 SDK**；
+- 视觉调用在**父协程**（async httpx），**不进进程池**；进程池只负责本地字节解析（D6）；
+- **本地 OCR 不作默认**：RapidOCR / PaddleOCR 会带入 onnx / torch 级依赖，与「主镜像最小化」冲突，留作后续可选后端。
+
+#### D9-4 不可复现 → 用缓存钉住
+
+VLM 同一页两次可能输出不同文字，会污染 `content_sha1_8` 并使 D8 的评测基线不可比。做法：
+
+- 缓存键 = `sha256(页面位图) + vision_model + prompt_version`；命中直接复用，**不进网络**；
+- `vision_model` 与 `prompt_version` 写入 block 元数据 → 任何一条引用都能回答「这段字由哪个模型、哪版提示词识别」。
+
+#### D9-5 定位 = `region`（页级），`char_*` 留空，I6 完全不适用
+
+- `locator.kind = "region"`，带 `page` + 整页 `bbox`；
+- `char_start` / `char_end` = `null`——两列本就允许 null（`migrations/0001_init.sql:112-113`），**无需为此新增迁移**；
+- 引用渲染为「第 N 页（扫描页，机器识别）」，与文本页的「第 3 页第 2 段」并列，不假装精确；
+- **否决**「让 VLM 返回字符级 bbox 再反推偏移」：准确率不可靠，且会把 I6 变成一堆例外。
+
+用户已确认接受该粗定位（2026-11-02）。
+
+#### D9-6 失败降级 = 部分成功（不整份失败）
+
+- 单页识别失败 / 超时 → 保留**占位块**（`text=""` + `reason`），整份作业判 `PARSE_INCOMPLETE`；
+- `PARSE_INCOMPLETE` **已存在**（`core/errors.py:26`，映射 422 见 `:44`），无需新增错误码；
+- 端点不可达 → 所有视觉页同上，**不整份失败**；
+- `vision_max_pages`（默认 50）超出的页直接标 incomplete，**不静默跳过**。
+
+#### D9-7 超时预算与 D6 合流
+
+- 整份预算仍是 D6 的 60s；每页子预算 = `min(vision_timeout_s, 剩余预算)`，剩余 < 5s 停止后续页并标 incomplete；
+- 视觉块的 `content` 由父协程回填后参与后续 splitter 流程，**不改变 `ParsedText` 的唯一出口**；
+- 最坏情况由 `vision_max_pages` 与 60s 共同兜住。
+
+#### D9 影响面（逐处列全）
+
+| 位置 | 改什么 |
+| --- | --- |
+| `services/ingest/parser.py` | 页级三信号判定；`region` locator；视觉块 `char_*` 置空 |
+| `core/settings.py:56-82` 附近 | 新增 `vision_*` 配置组 |
+| `workers/ingest_worker.py:168-190` | 父协程调视觉通道 + 回填 + 部分成功分支（`PARSE_INCOMPLETE`） |
+| `services/ingest/splitter.py` | 视觉块与表格块同样**不进 `full_text` 拼接**（D3 规则复用） |
+| `schemas/chunk.py`、`db/repos/reads.py:30-36,42-49` | locator 出参包含 `region` 分支 |
+| 前端 `web/features/query/format.ts:138` | `region` 分支显示「第 N 页（机器识别）」 |
+
 ## 备选方案
 
 - **A 档（仅文本）**：改动最小，但等于承认「PDF 表格永远读不出来」，与升级目标直接冲突。否决。
@@ -175,6 +253,9 @@ A 档（仅文本）与 B 档（文本+结构）被否决，见备选方案。
 - **双轨开关 `PYKNORA_PARSER=v1|v2`**：能保住旧行为，但两套解析逻辑长期并存是标准技术债配方。否决。
 - **独立解析服务（常驻进程 + 队列）**：隔离更强，但等于新增一个部署单元，且与 AGENTS §2「队列 = PG 表 + SKIP LOCKED，不用 Celery/Redis」的口径冲突。否决。
 - **强制严格向后兼容（快照锁）**：能保住既有评测基线，但用户已明确选择废弃旧基准（见 D8）。否决，且旧结果保留归档。
+- **本地 OCR（Tesseract / RapidOCR）作为默认**：确定性优于 VLM、不出网，但只能给文字、**拿不到表格结构**，且引入 onnx / torch 级依赖。否决为默认，保留为可选后端（见 D9-3）。
+- **文件级触发（整份文件无文本才启用）**：混合文档后半段静默丢失，见 D9-1。否决。
+- **让 VLM 返回字符级 bbox 反推偏移**：准确率不可靠，且把 I6 变成一堆例外。否决（见 D9-5）。
 
 ## 后果
 
@@ -185,6 +266,7 @@ A 档（仅文本）与 B 档（文本+结构）被否决，见备选方案。
 - 结构预检把「压缩炸弹 / ODF 重复属性」这类攻击面挡在解析之前，与 `_read_bounded` 形成两层；
 - 心跳修复让长解析作业不再被重复认领，**该缺陷独立于本 ADR 也应修**，且必须与「认领单独提交」同批做；
 - 解析在子进程内崩溃不再拖垮 worker。
+- 扫描件与图片表格首次可被检索：命中三信号的页走视觉通道，引用标注「第 N 页（机器识别）」；识别失败降级为 `PARSE_INCOMPLETE` 的部分成功，而不是整份失败。
 
 **负面（必须承认）**
 
@@ -194,7 +276,10 @@ A 档（仅文本）与 B 档（文本+结构）被否决，见备选方案。
 4. **`splitter.py` 必须改**：表格块要跳出 `full_text` 拼接，这会改变既有切片路径的行为，而现有 `tests/integration/` 里对 `char_start`/`char_end` 的断言**不会因此变红**（它们断言的是「能拼回原文」，不是「切片结果与上次一致」）——存在**静默回归**风险，需补一条「表格块不参与拼接」的显式用例。
 5. **解析耗时上升**：pdfplumber 慢于 pypdf，进程池与 60s 超时会提高单文档失败率（大文档变 `PARSE_TIMEOUT`）。
 6. **依赖增加 6 个**（`pdfplumber`、`pdfminer.six`、`openpyxl`、`xlrd`、`python-pptx`、`striprtf`），需过 `--stage security`（pip-audit）。
-7. **`lxml` 口径**：`python-pptx` 需要 `lxml`；`uv.lock` 显示本仓**直接声明** `lxml` 6.1.3（`uv.lock:1530-1533`），并非经 `python-docx` 传递带入。**AGENTS §2「明确不用 lxml」需改写**为「禁止直接 `import lxml` 做 HTML/XML 解析；OOXML 库（python-docx / python-pptx）的依赖除外」（见「待用户确认项」）。
+7. **`lxml` 口径**：`python-pptx` 需要 `lxml`；`uv.lock` 显示本仓**直接声明** `lxml` 6.1.3（`uv.lock:1530-1533`），并非经 `python-docx` 传递带入。**AGENTS §2「明确不用 lxml」需改写**为「禁止直接 `import lxml` 做 HTML/XML 解析；OOXML 库（python-docx / python-pptx）的依赖除外」（见「已决项」）。
+8. **视觉通道输出不可复现**（D9-4）：同一页两次调用可能给出不同文字。缓存键只对「同一输入」有效；位图渲染参数（DPI）一旦变化，旧缓存即失效，需重跑。
+9. **视觉通道成本随页数线性增长**（D9-3）：一份 50 页扫描件 = 50 次模型调用，且与 D6 的 60s 预算竞争。`vision_max_pages` 与页级子预算只是兜底，**不降低总成本**。
+10. **扫描页引用粒度退化为页级**（D9-5）：用户点引用只能落到页，仍需人工查找具体位置；这与文本页的「第 3 页第 2 段」不是同一体验，前端必须显式标注「机器识别」，不能让用户误以为是精确引用。
 
 ## 验证条件
 
@@ -204,13 +289,15 @@ A 档（仅文本）与 B 档（文本+结构）被否决，见备选方案。
 - 编码专项：GBK CSV、gb18030 TXT；
 - 表格专项：合并单元格、空表头、超预算长表（验证分档切分 + `[表头]` 注入 + `locator.rows`）、**表格块不进 `full_text`**；
 - 结构预检：ZIP 解压总量超限、ODF `repeated` 超限、行/页上限；
-- locator 契约：discriminated union 非法 `kind` 必须抛错；`table.cells` 用于 DOCX 时必须被拒。
+- locator 契约：discriminated union 非法 `kind` 必须抛错；`table.cells` 用于 DOCX 时必须被拒；
+- 视觉通道判据：三信号各自命中 / 不命中的构造样本；`vision_enabled=false` 时**不得发起任何网络调用**；缓存键命中时**不进网络**；视觉块 `char_*` 必须为 `null`。
 
 **集成（需真 PG）**
 
 - 端到端：上传 → parse → split → publish → query，断言返回的 citation 能还原到 `locator`；
 - 迁移 `0014` 幂等：重复执行 `scripts/migrate.py` 退出 0；
-- 超时与心跳：构造必然超时的样本，断言作业状态为不可重试失败；断言解析期间 `lease_expires_at` 被推进（**该项以「认领单独提交」为前提，未改前必然失败**）。
+- 超时与心跳：构造必然超时的样本，断言作业状态为不可重试失败；断言解析期间 `lease_expires_at` 被推进（**该项以「认领单独提交」为前提，未改前必然失败**）；
+- 视觉通道（用 stub 端点，不连真实模型）：断言「单页失败 → 整份 `PARSE_INCOMPLETE` 且保留占位块」、断言 `region` locator 能还原页码、断言未命中页不产生视觉块。
 
 **命令**
 
@@ -254,6 +341,15 @@ uv run python -m eval.run_eval --config eval/baseline_config.yaml
 
 第 1、2 条已同步写入 `AGENTS.md`，并在 `docs/IMPLEMENTATION_STATUS.md` 记录改动理由（AGENTS §9 要求）。若日后不同意第 1、2 条，回退 `AGENTS.md` 对应两行即可；此时本 ADR 的 D3 需随之改回「严格 I6」，且表格块的 `[表头]` 注入方案不成立。
 
+### D9 已决（2026-11-02 第三轮，用户逐条确认）
+
+| # | 决定 | 用户原话 | 另一条路的代价 |
+| --- | --- | --- | --- |
+| 8 | 触发粒度 = **页级起步**，块级排第二步，文件级否决（D9-1） | m04775「按照你的建议」 | 直接做块级 → 复杂度前置，链路未通就陷在 bbox 计算里；文件级 → 混合文档后半段静默丢失 |
+| 9 | 扫描页引用**只到页级**：`region` + 页码 + 标注「机器识别」（D9-5） | m04789「你推荐的」 | 要字符级就得让 VLM 出 bbox 反推偏移，准确率不可靠且 I6 例外爆炸 |
+
+D9-2 至 D9-7（三信号判据、复用 OpenAI 兼容端点、缓存钉住不可复现、`region` 定位、`PARSE_INCOMPLETE` 部分成功、60s 合流）为上述两条定案后**顺着推出**的技术选择，未经用户逐条确认，标注为「提议」而非「已定」，实施前若与用户理解不符须重开。
+
 ## 未验证项（如实记录）
 
 **选型证据类**
@@ -264,7 +360,11 @@ uv run python -m eval.run_eval --config eval/baseline_config.yaml
 - `camelot` / `tabula` 的否决理由（Ghostscript / JVM）：基于公开认知，**未验证**；
 - LibreOffice 的「镜像 +400~700MB、启动 1–3s、profile 锁冲突」三个数字：**未核**；
 - 「`.doc`/`.ppt` 没有纯 Python 解析器」：**绝对断言，未穷举 PyPI**；
-- 「pdfplumber 是达成本目标的可选路径之一」中，备选（docling/unstructured）的许可证与体积：**未核**。
+- 「pdfplumber 是达成本目标的可选路径之一」中，备选（docling/unstructured）的许可证与体积：**未核**；
+- 视觉通道：实际部署模型对**扫描表格**的识别质量与幻觉率：**未测**；
+- 三信号阈值（`vision_min_chars` / `vision_image_area_ratio`）：**无样本可验**（仓库内 0 份扫描件，只有 2 个 PDF）；
+- VLM 单页延迟（1–3s 是量级估计）：**未测**，它直接决定 `vision_max_pages` 与 60s 预算是否够用；
+- `pdfplumber` 的 `bbox` 与图片对象坐标是否足以支撑 D9-1 第二步的「块级补洞」：**未核**。
 
 **机制类**
 
