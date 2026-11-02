@@ -30,6 +30,11 @@ class ErrorCode:
     CURSOR_EXPIRED = "CURSOR_EXPIRED"
     DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # 解析硬超时（ADR 0008 D7：60s 到点杀子进程）。单列一个码而不是复用
+    # PARSE_FAILED：前者是"这份文件本身坏了"（坏字节，重试仍坏），后者是
+    # "解析器没在预算内跑完"（可能是机器慢/文件过大），前端提示与排查方向都不同。
+    # 但两者的**重试语义一致**：重试同样会超时，所以不可重试、直接终态。
+    PARSE_TIMEOUT = "PARSE_TIMEOUT"
 
 
 _HTTP_STATUS: dict[str, int] = {
@@ -50,8 +55,11 @@ _HTTP_STATUS: dict[str, int] = {
     ErrorCode.REVISION_MISSING: 428,
     ErrorCode.INDEX_INCOMPLETE: 502,
     ErrorCode.INTERNAL_ERROR: 500,
+    ErrorCode.PARSE_TIMEOUT: 422,
 }
 
+# 注意：**不进** `_RETRYABLE` 就是"不可重试"的实现方式（见 AppError.retryable）。
+# PARSE_TIMEOUT 故意不在此集合内：超时是确定性的，重试只会再等 60s 再超时一次。
 _RETRYABLE = {
     ErrorCode.STALE_ATTEMPT,
     ErrorCode.INDEX_INCOMPLETE,

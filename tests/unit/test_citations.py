@@ -157,7 +157,7 @@ def test_unknown_chunk_id_is_rejected() -> None:
 
     缺什么：`validate_citation_ids(citations, known_chunk_ids)`（返回被拒的引用）。
     计划 §6.4 `:480` 要求错误码 `UNKNOWN_CITATION`，而 `src/pyknora/core/errors.py`
-    的 `ErrorCode`（17 个取值）里没有它——连"拒"的载体都还不存在。
+    的 `ErrorCode`（18 个取值）里没有它——连"拒"的载体都还不存在。
     最该实现：新建 `src/pyknora/services/rag/citations.py`，与
     `answer.invalid_cited_indices` 同层（序号校验管越界，ID 校验管身份），
     由 `api/v1/chat.py` 在组装 citations 之后、发 `done` 之前调用。
