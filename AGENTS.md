@@ -41,7 +41,8 @@
 | 语言与包管理 | Python 3.12，`uv`（依赖只写在 `pyproject.toml`，锁文件 `uv.lock` 勿手改） |
 | Web | FastAPI + pydantic v2；应用工厂 `pyknora.api.main:create_app` |
 | 数据 | PostgreSQL 16 + `pgvector`；SQLAlchemy 2 async + `asyncpg` |
-| 明确**不用** | Redis、Celery、alembic、lxml（队列=PG 表 + `SKIP LOCKED`，迁移=手写数字号段 SQL） |
+| 明确**不用** | Redis、Celery、alembic（队列=PG 表 + `SKIP LOCKED`，迁移=手写数字号段 SQL） |
+| `lxml` 口径（2026-11-02 改写） | 禁止**直接 `import lxml`** 做 HTML/XML 解析（用 stdlib `ElementTree` 或正则）；OOXML 库的依赖除外——`lxml` 本就是 `uv.lock` 里已声明的直接依赖，`python-pptx` 需要它。理由见 `docs/adr/0008_Document_Parsing_Contract.md` 后果 7 |
 | 本地库 | 容器名与端口以 `.env` 的 `PYKNORA_DB_CONTAINER` / `PYKNORA_DATABASE_URL` 为准；契约默认 `pyknora-pg`，宿主端口 **5433**，库名/用户名 `postgres`，密码 `dev`。**别人的机器上常见 5434 + `pyknora-pg-p0`，先 `docker ps` 再改 `.env`，别改代码默认值** |
 | 库结构 | `migrations/0001_init.sql` 建 **9 张表 + 1 个视图**；`0001–0005` 合计 **16 张表 + `v_active_chunks`**；ORM 只映射 15 个 Row（`outbox` 走原生 SQL、`index_migrations` 走 repo 内的 SQLAlchemy Core） |
 | 错误码 | `src/pyknora/core/errors.py` 的 **17 个** `ErrorCode`；响应体统一 `{"error":{code,message,retryable,details},"request_id"}`。其中 `CONFLICT`/`CURSOR_EXPIRED`/`DEPENDENCY_UNAVAILABLE`/`INTERNAL_ERROR` 是实现期新增、`docs/tdd/07` 原表未列，已在该文 §7 登记为**提议** |
@@ -137,7 +138,7 @@ feat(m2): S09 解析与切片（任务4）— 3 页 PDF chunk≥3，char_start<c
 | I3 | 发布是**一个事务**：旧 build 退休 + 新 build 激活 + `documents` 三指针 + job 完成 + outbox | `src/pyknora/services/ingest/publish.py` |
 | I4 | 迁移只追加：已合并的号段不改历史文件，新改动新建 `000N_*.sql` | `migrations/` |
 | I5 | 不动别人的目录（切片见结构说明 §1.3）；共用文件只允许**追加**（§1.4） | `docs/项目结构说明.md` |
-| I6 | 切片 `content` 禁止内部空白折叠（`char_start`/`char_end` 必须能拼回原文） | `src/pyknora/services/ingest/splitter.py` |
+| I6 | 切片 `content` 禁止内部空白折叠（`char_start`/`char_end` 必须能拼回原文）。**适用范围（2026-11-02 限定）：纯文本流格式的连续块**；表格类块的 `char_*` 表示块内偏移、不可回拼原文，其可核对性由 `locator`（sheet/cells/rows）+ 显式 `[表头]` 标记共同保证，见 `docs/adr/0008_Document_Parsing_Contract.md` D3 | `src/pyknora/services/ingest/splitter.py` |
 | I7 | 向量维度不匹配必须抛错，**绝不截断** | `src/pyknora/services/ingest/embedder.py` |
 | I8 | 错误一律走 `AppError`，错误码从 `core/errors.py` 取；404 不泄漏"存在但无权" | `src/pyknora/core/errors.py` |
 
