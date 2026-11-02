@@ -23,6 +23,7 @@ ISO 8601、`bytea` 存 base64。**任何一张表都不许出现 `embedding` 键
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -182,6 +183,10 @@ TABLES: tuple[TableSpec, ...] = (
             "char_end",
             "token_count",
             "locator_ref",
+            # 0014 新增（ADR 0008 D2/D2a）：格式无关的定位。漏掉它，迁库/恢复之后
+            # 所有引用只能退回 `locator_ref` 那个偏移句柄，页码/工作表/幻灯片号全丢。
+            # 它是 jsonb，`render_sql` 走 `_JSON_COLUMNS` 渲染成 `'...'::jsonb`。
+            "locator",
         ),
         "chunk_id",
     ),
@@ -586,18 +591,40 @@ def _sql_literal(column: str, value: Any) -> str:
 #: `render_sql` 必须还原成 `decode(..., 'base64')`——三处必须一致。
 _BYTEA_COLUMNS: frozenset[tuple[str, str]] = frozenset({("document_blobs", "content")})
 
+#: jsonb 列：值在快照里是普通 JSON 对象（dict/list），`render_sql` 必须渲染成合法
+#: JSON 文本再 `::jsonb` 转型，不能走 `_sql_literal` 的 `str(value)`。
+#: 目前只有 0014 加的 `chunks.locator`——它是本文件里第一个 jsonb 列，所以这条路径
+#: 以前从未被走过：`str({"kind": "para"})` 产出 `{'kind': 'para'}`（单引号 + Python 的
+#: `True`），PG 解析 jsonb 会直接报错，等于"导出的 SQL 一执行就失败"。
+_JSON_COLUMNS: frozenset[tuple[str, str]] = frozenset({("chunks", "locator")})
+
+
+def _json_literal(value: Any) -> str:
+    """把一个 jsonb 值渲染成 SQL 字面量：`'<json>'::jsonb`。
+
+    `ensure_ascii=False`：中文工作表名（`"销售数据"`）保持可读，不转义成 `\\uXXXX`；
+    转义后虽然仍是合法 JSON，但人肉审阅 `render_sql` 产物的意义就没有了。
+    单引号按 SQL 规则翻倍，JSON 字符串里的 `'` 才不会截断字面量。
+    """
+    return "'" + json.dumps(value, ensure_ascii=False).replace("'", "''") + "'::jsonb"
+
 
 def _sql_value(table: str, column: str, value: Any) -> str:
-    """渲染一个列值。二进制列不能走 `_sql_literal` 的字符串形状。
+    """渲染一个列值。二进制列与 jsonb 列都不能走 `_sql_literal` 的字符串形状。
 
     `document_blobs.content` 在 JSON 里是 base64 字符串（JSON 没有二进制类型）。
     如果直接渲染成 `'BASE64...'` 再 INSERT 进 bytea 列，PG 会按 bytea 的 escape
     格式把它当**字面文本**存进去——语句不报错，但恢复后的 blob 是 base64 字符串，
     不是原字节。JSON 重放路径一直有 `decode(:content,'base64')`，SQL 路径没有，
     这个缺口就是这样来的：两条路径对同一份快照做出不同结果。
+
+    jsonb 同理：`chunks.locator` 是 dict，必须 `json.dumps` + `::jsonb`
+    （见 `_JSON_COLUMNS` 的注释）。
     """
     if (table, column) in _BYTEA_COLUMNS:
         return "NULL" if value is None else f"decode('{value}', 'base64')"
+    if (table, column) in _JSON_COLUMNS:
+        return "NULL" if value is None else _json_literal(value)
     return _sql_literal(column, value)
 
 

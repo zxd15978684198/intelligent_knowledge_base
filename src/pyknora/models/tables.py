@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
@@ -125,6 +126,12 @@ class ChunkRow(Base):
     char_end: Mapped[int | None] = mapped_column(Integer)
     token_count: Mapped[int | None] = mapped_column(Integer)
     locator_ref: Mapped[str | None] = mapped_column(Text)
+    # 格式无关的定位（0014，ADR 0008 D2/D2a）：`kind` 决定形状，六种见
+    # `schemas/locator.py`。与 `locator_ref` **分工并存**，不是它的替代：
+    # `locator` 给前端渲染引用（页码 / 工作表+单元格 / 幻灯片号），`locator_ref` 仍是
+    # 切分层的文本偏移句柄。可空表示"这份切片从未写入过位置"；历史行由 0014 回填成
+    # `{"kind":"para","index":null,"inferred":true}`，所以线上不会有 NULL 之外的空洞。
+    locator: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     tsvector: Mapped[str | None] = mapped_column(TSVECTOR)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim))
 

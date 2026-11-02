@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 from pyknora.core.errors import AppError, ErrorCode
+from pyknora.schemas.locator import Locator
 
 SUPPORTED_SUFFIXES = frozenset({".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm"})
 SUPPORTED_MIME = frozenset(
@@ -30,11 +31,18 @@ SUPPORTED_MIME = frozenset(
 
 @dataclass(slots=True)
 class Block:
-    """一个逻辑段落。page_no 只有 PDF 才有意义。"""
+    """一个逻辑段落。page_no 只有 PDF 才有意义。
+
+    `locator` / `is_tabular` 是 ADR 0008 D2/D3 的两个接线位，本节点只**承载**它们：
+    四个解析器暂时都不填 `locator`（留 `None`），真正回填是后续 S2/S4 节点的事；
+    `is_tabular` 只是让切分层知道「这块是表格，别按纯文本流处理」。
+    """
 
     text: str
     page_no: int | None = None
     heading_path: str | None = None
+    locator: Locator | None = None
+    is_tabular: bool = False
 
 
 @dataclass(slots=True)
@@ -44,7 +52,12 @@ class ParsedText:
 
     @property
     def full_text(self) -> str:
-        return "\n\n".join(b.text for b in self.blocks)
+        """纯文本流的拼接结果。**表格块不参与拼接**（ADR 0008 D3-1）。
+
+        表格块是独立单元，它的 `char_*` 是块内偏移（D3-2），拼进全文会让所有
+        偏移反算错位；所以这里和 `splitter.chunk_parsed` 用同一条排除规则。
+        """
+        return "\n\n".join(b.text for b in self.blocks if not b.is_tabular)
 
 
 def _suffix_of(filename: str, content_type: str | None) -> str:
