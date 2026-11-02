@@ -1,7 +1,8 @@
 """S09：解析。把 bytes 变成带位置映射的 Markdown 文本块。
 
-五种白名单格式：PDF / DOCX / TXT / MD / HTML。
+白名单格式见 `SUPPORTED_SUFFIXES`（ADR 0008 D4：5 类 → 14 类）。
 每种解析器的输出统一为 `ParsedText`：整篇正文 + 每段的位置信息。
+表格类格式（xlsx/csv/pptx/ods…）的实现在 `parsers/` 子包里，这里只做后缀路由。
 
 **位置映射是坑**：PDF 的页码、DOCX 的段落序号、HTML 的元素顺序，
 来源不同，所以这里把它们统一成 `blocks` 列表，每块带 page_no 与字节内偏移。
@@ -12,16 +13,48 @@ from __future__ import annotations
 import io
 import re
 from dataclasses import dataclass, field
+from importlib import import_module
 from pathlib import PurePosixPath
 
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.schemas.locator import Locator
 
-SUPPORTED_SUFFIXES = frozenset({".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm"})
+# 新增的后缀与 `_PARSUB_MODULES` 必须同步：`tests/unit/test_parser_dispatch.py`
+# 会把两张表对账，漏一处就红（曾经就是靠人眼核对，漏了 .markdown）。
+SUPPORTED_SUFFIXES = frozenset(
+    {
+        ".pdf",
+        ".docx",
+        ".txt",
+        ".md",
+        ".markdown",
+        ".html",
+        ".htm",
+        ".xlsx",
+        ".xls",
+        ".csv",
+        ".pptx",
+        ".odt",
+        ".ods",
+        ".odp",
+        ".eml",
+        ".rtf",
+    }
+)
 SUPPORTED_MIME = frozenset(
     {
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.ms-excel",
+        "application/vnd.oasis.opendocument.text",
+        "application/vnd.oasis.opendocument.spreadsheet",
+        "application/vnd.oasis.opendocument.presentation",
+        "message/rfc822",
+        "application/rtf",
+        "text/rtf",
+        "text/csv",
         "text/plain",
         "text/markdown",
         "text/html",
@@ -202,6 +235,33 @@ def _parse_html(data: bytes) -> ParsedText:
     return ParsedText(blocks=blocks, parser="regex-html")
 
 
+#: 表格/幻灯片/ODF/邮件类后缀 → `parsers/` 子包里的模块名。
+#: 这些模块各自导出 `SUFFIXES` 与 `parse(data, filename="")`，签名刻意不带
+#: `content_type`（分派已经按后缀做完，再传一遍只会出现两个真相）。
+_PARSUB_MODULES: dict[str, str] = {
+    ".xlsx": "tabular",
+    ".xls": "tabular",
+    ".csv": "tabular",
+    ".pptx": "slides",
+    ".odt": "odf",
+    ".ods": "odf",
+    ".odp": "odf",
+    ".eml": "mail_rtf",
+    ".rtf": "mail_rtf",
+}
+
+
+def _parse_via_submodule(module_name: str, data: bytes, filename: str) -> ParsedText:
+    """延迟导入 `parsers.<module>` 并委托。
+
+    必须延迟：`parsers/*.py` 反过来 import 本模块的 `Block`/`ParsedText`，
+    在模块顶层 import 会形成循环（`parser` → `parsers.tabular` → `parser`），
+    表现为首次上传 `.xlsx` 时 `ImportError: partially initialized module`。
+    """
+    module = import_module(f"{__package__}.parsers.{module_name}")
+    return module.parse(data, filename)  # type: ignore[no-any-return]
+
+
 def parse(data: bytes, filename: str, content_type: str | None = None) -> ParsedText:
     """按后缀分派解析器。格式不在白名单时抛 UNSUPPORTED_FORMAT。"""
     suffix = _check_allowed(filename, content_type)
@@ -213,4 +273,7 @@ def parse(data: bytes, filename: str, content_type: str | None = None) -> Parsed
         return _parse_text(data, markdown=True)
     if suffix in {".html", ".htm"}:
         return _parse_html(data)
+    submodule = _PARSUB_MODULES.get(suffix)
+    if submodule is not None:
+        return _parse_via_submodule(submodule, data, filename)
     return _parse_text(data, markdown=False)

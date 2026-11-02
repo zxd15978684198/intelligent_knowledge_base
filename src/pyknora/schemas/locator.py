@@ -86,6 +86,11 @@ class TableLocator(_LocatorBase):
     index: int = Field(ge=1, description="文档内第几张表，从 1 开始")
     rows: str | None = Field(default=None, pattern=_ROWS_PATTERN)
     cells: str | None = None
+    # 表格块只带 `index` 会丢掉「它在哪一页/哪张表里」——PPTX 里第 3 张幻灯片上的表
+    # 与第 1 张幻灯片上的表都只是「第 2 张表」，引用点过去用户不知道是哪一页。
+    # 两个容器字段都可选：DOCX 的表格在段落流里，两者都为 None 是正常的。
+    slide: int | None = Field(default=None, ge=1, description="所在幻灯片序号（PPTX/ODP）")
+    sheet: str | None = Field(default=None, description="所在工作表名（XLSX/ODS/CSV）")
 
 
 class RegionLocator(_LocatorBase):
