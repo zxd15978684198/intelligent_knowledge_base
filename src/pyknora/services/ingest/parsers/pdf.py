@@ -12,9 +12,9 @@ Lead 按下面两个名字机械接线，本模块不碰 `parser.py`：
   把文本与表格拆成两次 open，S2 从 3.630s 涨到 11.267s（12.8×）——每开一次都要重解析
   全部 `Page`，`_layout` 与 `get_textmap` 缓存全部作废。
 - **分批**：`> 100` 页按 100 页一批（实测 pdfplumber 约 3.45–3.8 MB/页近线性，200 页
-  +690 MB），每批处理完显式 `page.close()` 释放 `_layout`/`_objects`；`>= 150` 页强制
-  走分批路径（D5-1 红线，见 :func:`_should_batch`）。`pdf.close()` 自身也会逐页 close，
-  重复调用是幂等的。
+  +690 MB），每批处理完显式 `page.close()` 释放 `_layout`/`_objects`。D5-1 的红线是
+  「≥150 页必须分批」，`> 100` 已覆盖它，所以实现里只有这一条判据（见
+  :func:`_should_batch`）。`pdf.close()` 自身也会逐页 close，重复调用是幂等的。
 - **文本块**：`Block(text=<段落>, page_no=<1 基页号>, locator=PageLocator(page=..., heading=...))`。
   段落靠行几何切：页内行距的 20 分位当基线，行间距超过基线 1.6 倍即新段；标题行单独成块。
 - **页眉页脚当噪声丢弃**：页顶 8% / 页底 8% 带内、字号小于本页正文的行（每页重复的
@@ -71,8 +71,6 @@ PARSER_NAME = "pdfplumber"
 
 #: 每批页数。内存实测 3.45–3.8 MB/页 → 100 页约 350–380 MB 峰值。
 PAGE_BATCH_SIZE = 100
-#: 页数到这里**必须**分批（D5-1 红线：150 页以上单路径会把内存顶穿）。
-FORCE_BATCH_PAGES = 150
 
 # 表格准入（D5-1）。四个阈值是"与"关系，改这里等于改契约，必须同步 ADR。
 MIN_TABLE_ROWS = 2
@@ -506,8 +504,17 @@ def _page_batches(page_count: int) -> Iterator[range]:
 
 
 def _should_batch(page_count: int) -> bool:
-    """是否走分批路径。`>=150` 页是 D5-1 的红线，`>100` 是内存实测的批大小。"""
-    return page_count >= FORCE_BATCH_PAGES or page_count > PAGE_BATCH_SIZE
+    """是否走分批路径。
+
+    判据只有 `> PAGE_BATCH_SIZE` 一条：它比 D5-1 的红线（≥150 页必须分批）更严，
+    150 页以上自然满足。曾另写 `page_count >= FORCE_BATCH_PAGES or ...`，但那是
+    死分支（>100 已覆盖 >=150），已删，避免两处阈值各自漂移。
+
+    100 页本身**不分批**（`_should_batch(100) is False`）：批大小就是 100，只切一批
+    等于没切，省不下内存；单路径上界实测峰值 366.6 MB，见
+    `docs/plans/parsing-bench-pdfplumber.md`。
+    """
+    return page_count > PAGE_BATCH_SIZE
 
 
 # --------------------------------------------------------------------------- 打开与报错

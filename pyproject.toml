@@ -17,7 +17,6 @@ dependencies = [
     "pydantic-settings>=2.6",
     "python-multipart>=0.0.17",
     "httpx>=0.27",
-    "pypdf>=6.21.3",
     "python-docx>=1.2.0",
     "bcrypt>=4.1",
     "openpyxl>=3.1.5",
@@ -34,6 +33,9 @@ local-embed = [
     "sentence-transformers>=3.3",
 ]
 dev = [
+    # 仅 tests/unit/test_parse_pdf.py::test_encrypted_pdf_reports_reason 用它现造加密 PDF。
+    # 运行时不读 PDF（主路径是 pdfplumber，渲染是 pypdfium2），别把它当依赖用。
+    "pypdf>=6.21.3",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",

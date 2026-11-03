@@ -155,6 +155,17 @@ def chunk_parsed(
                 return index
         return len(parsed.blocks)  # pragma: no cover — spans 已覆盖整篇 full_text
 
+    def locator_at(offset: int) -> Locator | None:
+        """偏移所在块的结构化位置（ADR 0008 D2）。
+
+        口径与 `page_at` 一致：取**起点**所在块的位置，跨块 chunk 不拆分位置。
+        表格块不在 `spans` 里（D3-1），它们各自独立成块时自带 locator。
+        """
+        for start, end, block, _index in spans:
+            if start <= offset < end:
+                return block.locator
+        return None
+
     # (块序号, 块内起始偏移, chunk)：先收集，最后按文档顺序排一次再编号 ordinal。
     collected: list[tuple[int, int, Chunk]] = []
 
@@ -183,6 +194,9 @@ def chunk_parsed(
                         char_end=end_offset,
                         token_count=max(1, len(content) // 2),
                         locator_ref=f"offsets:{start}-{end_offset}",
+                        # 解析层给的结构位置（PDF 的页 / Word 的段 / 网页的段）。
+                        # 不传就只剩 `offsets:` 句柄，前端没法把引用高亮回原文。
+                        locator=locator_at(start),
                     ),
                 )
             )
@@ -219,6 +233,10 @@ def chunk_parsed(
                         if block.locator is not None
                         else f"offsets:{start}-{end_offset}"
                     ),
+                    # D3-2 只让 page_no/page_end_no/heading_path 让路，locator 恰好是
+                    # 表格块唯一的页/表定位来源（`TableLocator.page` / `SheetLocator.cells`），
+                    # 丢了它前端就只剩一个 offsets 字符串。
+                    locator=block.locator,
                 ),
             )
         )

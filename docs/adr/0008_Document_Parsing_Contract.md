@@ -418,6 +418,8 @@ S1/S2/S3（D9-2）保留为「是否进入机器人通道」的粗筛；进入�
 12. **新增 2 个直接依赖 + onnx 运行时**（D10-6）：`pypdfium2`、`rapidocr-onnxruntime`（传递 `onnxruntime` 约 14MB 等），主镜像显著变大，与 D4 的「主镜像最小化」偏好相反；许可证待核验。
 13. **两套定位精度并存**（D10-5）：引用渲染必须同时处理「页级」（VLM）与「区域级」（OCR），`web/features/query/format.ts` 的 `region` 分支要能显示 bbox、缺失时退化为页级，测试需覆盖两种形态。
 
+**落地记要（2026-11-03，N6b `1df6ca7`）**：`locator` 已作为 `chunks.locator jsonb` 落库，迁移 `0014_chunk_locator.sql` 追加的是 `v_active_chunks` 的**第 23 列**（末列，不是改既有列），并经 `db/repos/reads.py` 的两份列清单（`_CHUNK_COLUMNS` / `_CHUNK_COLUMNS_BY_BUILD`）与两个 mapper 贯通到 `ActiveChunk` / `ScoredChunk` → `RetrievedChunk` → `/query` 的 `results[].locator` 与 chat 的 `citations[].locator`。存量行按上文「负面」第 3 条回填 `{"kind":"para","index":null,"inferred":true}`，**回填值不是真实定位**，`inferred=true` 必须原样保留、不得渲染成精确引用。断点的实际位置与 D2a 的直觉相反：`Citation` 的唯一构造点在 `api/v1/chat.py`，`services/rag/answer.py` 既不构造 `Citation` 也不构造 `Evidence`，真正的断点是 `RetrievedChunk` 缺 `locator` 且未配 `extra=`（pydantic v2 默认 `extra="ignore"`，漏传会被静默丢弃）。未覆盖：前端渲染（N11，`web/` 未入库）与 `answer.py` 的 prompt 位置文案（仍退化成「无页码」，改它需升 `PROMPT_VERSION`）。本节只记落地事实，**状态仍按文首「提议」**，不据此宣称技术口径已定。
+
 ## 验证条件
 
 **单元（进 pre-commit 门禁，不需数据库）**

@@ -389,3 +389,59 @@ def test_empty_tabular_block_is_skipped_not_fatal() -> None:
     )
     chunks = chunk_parsed(parsed, chunk_size=512, chunk_overlap=0)
     assert [c.content for c in chunks] == ["正文"]
+
+
+# --------------------------------------------------------------------------
+# (e) 三类块都必须把 block.locator 带到 chunk 上（2026-11-03 补的缺口）
+# --------------------------------------------------------------------------
+# 曾经只有视觉块传了 `locator=`，文本块与表格块只写 `locator_ref`，于是真实 PDF /
+# Excel 的 chunk 落库后 `chunks.locator` 是 NULL，`/query` 与 chat 出参只能给 null，
+# 前端空有字段没法高亮。这一节把"三类块都传"钉住。
+
+
+def test_ordinary_chunk_carries_page_locator() -> None:
+    """文本块的结构位置必须出现在 chunk 上，而不只是 offsets 句柄。"""
+    parsed = ParsedText(
+        blocks=[Block(text="第一段正文", page_no=3, locator=PageLocator(page=3))], parser="test"
+    )
+    chunks = chunk_parsed(parsed, chunk_size=512, chunk_overlap=0)
+
+    assert len(chunks) == 1
+    assert isinstance(chunks[0].locator, PageLocator)
+    assert chunks[0].locator.page == 3
+    # offsets 句柄仍在（两者分工，不互相取代）。
+    assert chunks[0].locator_ref == "offsets:0-5"
+
+
+def test_tabular_chunk_carries_sheet_locator() -> None:
+    """表格块的 page_no 让路，但 locator 必须留下——它是唯一的表/单元格位置。"""
+    parsed = ParsedText(blocks=[_tabular("A1:B2\nB2:C4")], parser="test")
+    chunks = chunk_parsed(parsed, chunk_size=512, chunk_overlap=0)
+
+    assert chunks[0].page_no is None
+    assert chunks[0].locator == SHEET_LOCATOR
+    assert chunks[0].locator_ref == "sheet:Sheet1!B2:C4"
+
+
+def test_chunk_spanning_two_blocks_takes_the_start_block_locator() -> None:
+    """跨块 chunk 取起点所在块的位置——与 page_no/heading_path 同一口径。"""
+    parsed = ParsedText(
+        blocks=[
+            Block(text="甲" * 30, page_no=1, locator=PageLocator(page=1)),
+            Block(text="乙" * 30, page_no=2, locator=PageLocator(page=2)),
+        ],
+        parser="test",
+    )
+    chunks = chunk_parsed(parsed, chunk_size=70, chunk_overlap=0)
+
+    assert len(chunks) >= 1
+    assert chunks[0].locator == PageLocator(page=1)
+
+
+def test_block_without_locator_still_yields_null_not_offsets_leak() -> None:
+    """解析器没给位置时保持 None（旧格式/降级路径），不许编一个假位置出来。"""
+    parsed = ParsedText(blocks=[Block(text="没有位置的正文", page_no=5)], parser="test")
+    chunks = chunk_parsed(parsed, chunk_size=512, chunk_overlap=0)
+
+    assert chunks[0].locator is None
+    assert chunks[0].page_no == 5
