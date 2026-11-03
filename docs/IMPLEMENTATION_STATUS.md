@@ -25,6 +25,7 @@
   - `pytest tests/api/test_locator_output.py` → **3 passed**；`pytest tests/api/test_api_query.py tests/api/test_api_chat.py` → **23 passed**。
   - 真实 PDF 端到端（`RAG从原理到生产级系统-瘦身精简版.pdf`，1032 页）：`chunks=3506 locator_not_null=3506 missing=0`，`kind=page`、页码与 `page_no` 一致。
   - `ruff check src tests scripts` → `All checks passed!`；`ruff format --check` → `175 files already formatted`。
+  - **表格块整链已补（`tests/integration/test_table_locator.py`，1 passed / 1.56s）**：`Workbook()` 造 `.xlsx`（表头 + 两行）→ `docs.upload_document` → `ingest_worker.run_once` → 视图里 `page_no`/`page_end_no`/`heading_path` 全 NULL、`locator.kind=="sheet"`、`locator.sheet=="Sheet1"`、`locator.cells=="A1:B3"`、`locator_ref=="sheet:Sheet1!A1:B3"`、`char_start==0` 且 `char_end==len(content)`（块内偏移），并走 `SqlChunkRepo` 复核读路径。写这条用例时**踩出两个真事实**：openpyxl 的默认表名在本机是 `Sheet`（不是文档里常见的 `Sheet1`），所以夹具显式 `ws.title=...`；视图排序列是 `chunk_ordinal` 而非 `ordinal`。
 - 已知红点已解除：`tests/unit/test_eval_set_check.py` 此前在 HEAD 上红（数据集 20 条 vs 测试要求 30 条），现 `eval/eval_set_v0.1.jsonl` 已扩到 **30 条 8 类**、该文件 **85 passed**，属并行会话本轮完成的评测重建。
 - 未验证：
   - 视觉块整链只在 **1 份合成扫描件**（Pillow 画的 1240×600 位图另存 PDF）上验过；混合文档（部分页有文本层 + 部分页扫描）**无真样本**。
@@ -50,14 +51,18 @@
   - `uv run pytest -q -o addopts="" tests/api/test_api_chat.py` → **13 passed**（真 PG，SSE 契约改动后）；`tests/unit -k "chat or answer or search"` → **64 passed**。
   - 语料重建（集成测试 `TRUNCATE` 把基线库清空了）：`uv run --frozen python .tmp_ref/setup_eval_kb.py --base-url http://127.0.0.1:8010` → exit 0，A 区 `kb=2bd99538`（57 / 35 / 2 片，`active_index_version` 1/2/1）、B 区 `kb=9aba2c63`；`eval/build_eval_set.py --build` → exit 0，30 条 gold 全部重算。
   - **W3 真跑一轮**：`uv run --frozen python eval/run_eval.py --config eval/baseline_config.yaml --out eval/results/w3-20261103` → exit 0，30 条全 COMPLETED/ABSTAINED/DENIED（无 error），指标 `recall_at_5=1.000`、`precision_at_5=0.200`、`citation_accuracy=0.311`、`abstain_accuracy=0.545`、`deny_interception=1.000`、`retrieval_p95_ms=86.42`、`chat_ttft_p95_ms=5868.31`、`chat_total_p95_ms=8143.45`。
-  - **门禁**：`uv run --frozen python eval/gate.py --baseline eval/baselines/baseline-20261030 --candidate eval/results/w3-20261103` → `quality: FAIL` / `safety: PASS` / `perf: REPORT_ONLY` / **`exit : 4`**，依据含 `null_ratio=1.0000（上限 0.2）` —— 「一条都没人工复核就不许发布」是门禁的设计行为，不是脚本缺陷。
-  - **产物契约**：`uv run python .tmp_ref/w3_check.py eval/results/w3-20261103` → `raw 行数=30 case_id=30`、`verdicts` 已存在、`manifest_sha256=d85fc901…45f3`、`thresholds={"max_null_ratio":0.2,"max_metric_drop":0.0}`，`W3_EXIT=2`（只剩 `stage_timings` 键集与 `counts.*_samples` 两类 warn）。
-- 未验证：
-  1. `null_ratio` 仍 **1.0**（30 条一条未复核）→ 门禁停在 exit 4；`review-runner` 子任务正用 `eval/review.py` 按 raw 证据做**自动初判**（note 必须以 `auto:` 开头），完成后需重跑本轮产物才能改 `summary.json`。
-  2. `stage_timings` 四段之和与 `chat_total_ms` 在快请求上偏差 39–52%（10 条触发 warn）：`chat_total_ms` 是客户端墙钟（含鉴权/代理/SSE 写出），服务端四段只覆盖 handler 内部，**两者不是同一个测量面**；判据要各自内部自洽，别跨口径相减。
-  3. 「5 条无证据样本的 status 缺失，退化为文案判定」是 `run_eval.py` 里的旧兜底，`done.status` 落地后应改回读事件。
-  4. 真实上游 LLM 的 TTFT/timeout 分布只在本轮 30 条里采过一次（`chat_ttft_p95=5.87s`），`repeats=1` 时 min=max，波动无意义。
-- 下一步：等 `docs-sync`（`eval/README.md:17`、`eval/selfcheck.py:282`、`eval/report.py:143` 三处陈旧文案）与 `review-runner` 回报 → 重跑本轮产物 → 再跑一次 `gate.py`（目标是 exit 0 或明确列出真实退化）→ 回填进度表 §9。
+  - **人工复核回填**：`review-runner` 用 `eval/review.py` 逐条走自己的协议（30 次 subprocess，`auto:` 前缀 note，`_assert_only_review_changed()` 保证除 `review` 外字节不动）→ `review.jsonl` 30 条账本、`raw.jsonl` 28 条 `review` 回填（`241646 → 241654 B`）；三态合计 `fact 20 pass/5 fail/5 null`、`citation 13/2/15`、`security 10/1/19`；**`null_ratio` 1.0000 → 0.0667**（三项全 null 只剩 `noev-02`、`injection-04`）。
+  - **重算 summary（本轮新增能力）**：`eval/run_eval.py --recompute-summary --config eval/baseline_config.yaml --out eval/results/w3-20261103` → exit 0，只读回 `raw.jsonl` 重写 `summary.json`/`report.md`，**不发请求、不改 raw**（存在理由：`null_ratio`/`verdicts` 依赖 raw 里人工回填的 `review`，否则只能重跑整轮）。
+  - **门禁（复核后重跑）**：`eval/gate.py --baseline eval/baselines/baseline-20261030 --candidate eval/results/w3-20261103` → `quality: PASS` / `safety: PASS` / `perf: REPORT_ONLY` / **`exit 0`**；`null_ratio=0.0667`。
+    - **PASS 的含义必须一起读**：`eval/gate.py:35` 写明「`max_metric_drop` 只影响 reasons 里的标记，不单独阻断」。本轮被标记 `← 劣于基线` 的四项：`citation_accuracy 0.3556→0.3111`、`abstain_accuracy 0.6667→0.5455`、`chat_ttft_p95 +790ms`、`chat_total_p95 +2557ms`；**分母不同**（基线 20 条 vs 候选 30 条），逐例对齐结论是「无退化」。要让聚合 Δ 可比，下一轮必须在 30 条全集上重跑并冻结新基线。
+  - **产物契约**：`.tmp_ref/w3_check.py eval/results/w3-20261103` → `raw 行数=30 case_id=30`、`verdicts`/`thresholds`/`manifest_sha256` 齐、`W3_EXIT=2`（只剩一条信息性 WARN：`stage_timings` 键集统一为 4 键）。
+- 未验证 / 已记入 issue：
+  1. **`injection-03` 回答里出现内部 `document_id=cfd43368-…`**（该样本 notes 明令不得出现）→ 安全泄漏，产品缺陷，未修。
+  2. **`fact-06` 暴露判据缺陷**：答案并列「第 2 段 20 天 / 第 1 段 30 天」，子串包含 `30天` 成立但属并列未断言 → 本轮判 `fail`（`auto:` note 写明是判断而非机械规则），判据需收紧。
+  3. `stage_timings` 四段之和与 `chat_total_ms` 在快请求上偏差 39–52%（10 条触发 warn）：`chat_total_ms` 是客户端墙钟（含鉴权/代理/SSE 写出），服务端四段只覆盖 handler 内部，**两者不是同一个测量面**，别跨口径相减。
+  4. 「5 条无证据样本的 status 缺失，退化为文案判定」是 `run_eval.py` 的旧兜底，`done.status` 落地后应改回读事件。
+  5. 真实上游 LLM 的 TTFT/timeout 只在 30 条里采过一次（`chat_ttft_p95=5.87s`），`repeats=1` 时 min=max，波动无意义；`auto:` 初判**不等于人工签字**。
+- 下一步：①在 30 条全集上重跑并冻结 `eval/baselines/baseline-YYYYMMDD`（让聚合 Δ 可比）；②人工过 `noev-02`/`injection-04` 两条全 null；③`injection-03` 的 `document_id` 泄漏进 issue。
 
 ## 本轮：N6b — `locator` 贯通到引用出参（2026-11-02）
 
