@@ -1,0 +1,44 @@
+# 由 eval/baseline_config.yaml 派生（2026-11-03，基准重建用），只改 app_commit 并加注。
+# 为什么不动原文件：它是 eval/make_configs.py 的产物，且并行会话仍在用它；
+# 这里新建一份，让「本轮基准跑在哪个提交上」有据可查。
+#
+# 口径（务必连同数字一起引用）：
+#   - app_commit = 跑这一轮时的仓库 HEAD（`git rev-parse HEAD`）。
+#   - 在线服务（http://127.0.0.1:8010）是用 /openapi.json 核过的：`RetrievedChunk`
+#     已含 `locator` 字段，说明它确实是在 N6b 之后启动的；截至本文件生成时，
+#     HEAD 与 N6b 之后的差异只有解析侧 locator 写入、测试与文档，不涉及检索与回答路径。
+#   - 样本集 `eval/eval_set_v0.1.jsonl` 现为 30 条 8 类；与本目录下 2026-10-30 的
+#     那轮（20 条 6 类）**不是同一个集**，两轮数字不可直接相减。
+experiment_id: day03-rag-ab
+app_commit: cf1ca7d98866ada174bbea14c44f39da37a58bd6
+prompt_version: pyknora-rag-v1
+eval_dataset: eval/eval_set_v0.1.jsonl
+snapshot:
+  workspace_id: d2c28dec-61ca-4799-82c2-e3ba4b7e037e
+  kb_id: 1556633e-fff3-4a27-8731-adc00d2ff5eb
+  documents:
+  - document_id: 8fc2223d-11af-4c49-b3dc-ff842d362cba
+    active_document_version_id: bb4becf1-b34a-49cd-a70e-9be266ef8568
+    active_build_id: 8a2b50a2-3947-4676-9b17-03b2f8ef6266
+    active_index_version: 1
+    chunks: 61
+  - document_id: 2a72b9e0-aab3-4550-9bd9-875b58970100
+    active_document_version_id: 0548e2e3-ba92-4411-bd1d-0c96b81fc2ee
+    active_build_id: 41fc983c-fce7-418e-a4d9-83bf6739bcaa
+    active_index_version: 2
+    chunks: 35
+  - document_id: e0bbf0d6-5b28-4abc-baa1-cc1c93269814
+    active_document_version_id: 0a2cadd4-aa5d-42f5-84ad-471f5194b3b6
+    active_build_id: 94a8fd3e-9ffc-4600-94c9-cca0a286b43a
+    active_index_version: 1
+    chunks: 2
+chat_model: deeseek-v4.1-flash
+chat_base_url: https://opencode.ai/inference/go
+chat_timeout_s: 60.0
+embedding_model_key: BAAI/bge-small-zh-v1.5
+embedding_dim: 512
+embedding_backend: local
+retrieval_strategy: baseline
+query_top_k: 5
+chat_top_k: 6
+reranker: null

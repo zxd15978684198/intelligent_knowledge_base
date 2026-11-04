@@ -1,0 +1,23 @@
+{
+  "app_commit": "d5475f258636275222630de20356addb42abc944",
+  "app_dirty": true,
+  "chunks": 3,
+  "corpus": "bf12b551cb4c686fcb2c9e08bc558a7d0eb42d787a853a1eb04877bcf65a912d",
+  "db_error": null,
+  "db_role": "postgres",
+  "db_status": "ok",
+  "documents": [
+    {
+      "active_build_id": "0a9fbc41-d847-47ba-98c1-8149ec8d41f5",
+      "active_index_version": 1,
+      "document_id": "1e1f6a16-04aa-456e-aa79-0079fff20575",
+      "filename": "scan.pdf"
+    }
+  ],
+  "embedding_dim": 512,
+  "embedding_model_key": "BAAI/bge-small-zh-v1.5",
+  "generated_at": "2026-11-02T14:45:51+00:00",
+  "manifest_sha256": "d85fc90126907062a33b185d54437c8745cff754e35be13543b1ccec99ff45f3",
+  "prompt_version": null,
+  "settings_error": null
+}
