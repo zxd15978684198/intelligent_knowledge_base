@@ -1,0 +1,24 @@
+#!/bin/sh
+# 推送前跑 GateKeeper IR 的八步流水线（lock,sync,lint,type,manifest,test,security,build）。
+# 提交钩子只跑三步是为了快；这一步才是「本地绿 == CI 绿」的对齐点。
+# type 当前 advisory（31 条已知诊断），manifest 未配置时显式 SKIP，二者都不拦。
+set -eu
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "==> 未找到 uv；先装 uv 或跳过本钩子（git push --no-verify）" >&2
+    exit 1
+fi
+
+if uv run python scripts/ci.py --profile default; then
+    echo "==> 推送前门禁通过（八步流水线）"
+    exit 0
+fi
+
+cat >&2 <<'EOF'
+
+==> 八步流水线未通过，推送已阻止。
+  uv run python scripts/ci.py --profile default   # 重跑
+  uv run python scripts/ci.py --list               # 看计划
+确需跳过：git push --no-verify
+EOF
+exit 1
