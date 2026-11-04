@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# next
+.next/
+out/
+next-env.d.ts
+
+# test artifacts
+test-results/
+playwright-report/
+blob-report/
+coverage/
+.playwright/
+
+# env
+.env.local
+.env.*.local
+
+# misc
+.DS_Store
+*.tsbuildinfo

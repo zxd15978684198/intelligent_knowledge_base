@@ -1,0 +1,43 @@
+# 构建上下文越干净，镜像层缓存越命得中，也越不容易把本机状态烤进镜像。
+# 只写"镜像里绝不该出现"的东西；不确定的宁可不写（漏掉只是慢一点）。
+.git
+.gitignore
+.githooks
+.github
+
+# Python 本地环境与缓存
+.venv
+__pycache__
+*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.pytest_cache
+coverage.xml
+htmlcov
+*.egg-info
+
+# 前端
+web/node_modules
+web/.next
+web/out
+web/playwright-report
+web/test-results
+
+# 本机状态
+.env
+.env.*
+!.env.example
+.tmp_ref
+.tmp-shots
+web/.tmp-shots
+models
+.cache
+
+# 评测产物：跑出来的 raw/report 属于数据，不属于镜像
+eval/results
+
+# 文档与教学材料不参与运行
+docs
+references
+*.xlsx

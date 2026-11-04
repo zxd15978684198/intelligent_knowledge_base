@@ -31,7 +31,85 @@
 
 ## 快速开始
 
-前置：Python 3.12、[uv](https://docs.astral.sh/uv/)、Docker。
+前置：Python 3.12、[uv](https://docs.astral.sh/uv/)、Docker、Node 20+ 与 pnpm（只有前端需要）。
+
+### 一条命令起全套（推荐）
+
+```bash
+uv sync --extra dev --extra local-embed   # 首次
+uv run python scripts/dev_up.py           # 库体检 → API:8010 → Worker → 前端:3000
+```
+
+启动后打开 **http://127.0.0.1:3000/login**。脚本会自己探活，成功才打印地址表；
+Ctrl-C 一起停。它会顺带解决三件以前靠人记住的事：
+
+- **库端口错位**：配置写 5433、机器上库在 5434（容器 `pyknora-pg-p0`）时，`/health`
+  照样 200，但登录/列表会 500。脚本探测到错位就对子进程注入 `PYKNORA_DATABASE_URL`，
+  并在屏幕上告警，不改你的配置文件；
+- **离线 embedding 卡启动**：默认给子进程加 `HF_HUB_OFFLINE=1`，否则 `transformers`
+  会对每个文件重试 5 次，实测启动卡 2 分钟以上，现象是"端口一直连不上"；
+- **前端代理地址**：自动注入 `API_PROXY_TARGET`，Next 的 rewrite 指向本次启动的 API。
+
+常用参数：
+
+```bash
+uv run python scripts/dev_up.py --check        # 只体检，不启动任何进程
+uv run python scripts/dev_up.py --no-web       # 只起后端（前端自己 pnpm dev）
+uv run python scripts/dev_up.py --start-db     # 容器没起时顺手 docker start
+uv run python scripts/dev_up.py --api-port 8011 --web-port 3001
+```
+
+脚本是幂等的：已在跑的 API/前端只探活复用，不重复起进程，可以反复执行。
+
+### Docker Compose 一键起栈（可复现环境，给评审与交付用）
+
+本机日常开发用上面的 `dev_up.py`；要一个"别人 clone 下来就能起"的环境，用 compose：
+
+```bash
+cp .env.example .env                  # 首次；生产另需 PYKNORA_ENV=prod 与非默认 JWT 密钥
+docker compose up --build --wait      # 起 db → 迁移 → api → worker → web，等到健康
+docker compose ps -a                  # migrate 必须是 Exited (0)；Exited (1) 就是迁移失败
+docker compose down                   # 停栈，保留数据卷
+docker compose down -v                # 连数据一起删，只在确认要重建时用
+```
+
+起栈顺序由 healthcheck 门控，不是靠 `sleep` 猜：`db` 健康 → `migrate` 一次性按 `0001–0014`
+顺序灌 SQL（`-v ON_ERROR_STOP=1 -v dim=$PYKNORA_EMBEDDING_DIM`）后退出 → `api`/`worker`
+等它 `service_completed_successfully` → `web` 等 `api` 健康。api 与 worker 共用同一个镜像，
+只差 `command`。
+
+| 宿主端口 | 服务 | 说明 |
+| --- | --- | --- |
+| 5435 | db | 故意避开本机常见的 5433/5434（那两个常是别人的容器），可用 `PYKNORA_COMPOSE_DB_PORT` 改 |
+| 8010 | api | OpenAPI 在 `/docs`，健康检查在 `/health` |
+| 3000 | web | 登录页 `/login` |
+
+几个容易踩的点：
+
+- **容器内走服务名**：`postgresql+asyncpg://postgres:dev@db:5432/pyknora`，不是 `127.0.0.1`
+  ——每个容器有自己的回环地址，照抄本机配置会连不上；
+- **对话上游是可选项**：`PYKNORA_CHAT_BASE_URL` / `_MODEL` / `_API_KEY` 不填时，`/chat`
+  在建流之前直接 503，而不是在 SSE 流里报错断开；
+- **模型缓存在命名卷**里（`HF_HOME=/data/hf`），重建镜像不必重下 torch；
+  只想跑远端 embedding 时用 `--build-arg INSTALL_LOCAL_EMBED=false` 把本地那套依赖摘掉；
+- **镜像本身**：三阶段构建（runtime 里没有 uv）、非 root（uid/gid 10001）、不装 curl
+  （健康检查用解释器自探）、依赖层与代码层分开 COPY 以保住缓存；
+- 回滚、排障与版本策略见 [docs/部署与回滚.md](docs/部署与回滚.md) 与 `scripts/rollback.ps1`。
+
+### 打开接口文档
+
+| 地址 | 内容 |
+| --- | --- |
+| http://127.0.0.1:3000/docs | **Swagger UI**（可交互调试，能直接填 Bearer 令牌试接口） |
+| http://127.0.0.1:3000/api-docs | 中文说明书（31 个动作分组、SSE 四帧、17 个错误码、16 个权限点） |
+| http://127.0.0.1:8010/docs | 与第一条同一个页面，绕过前端直连后端时的入口 |
+
+Swagger 的 JS/CSS 由后端自托管在 `src/pyknora/static/swagger/`（`swagger-ui-dist` 5.29.0，
+约 1.6 MB），**不走 CDN**——之前 `/docs` 一片空白就是因为页面去取
+`cdn.jsdelivr.net`，在国内网络下是 `ERR_CONNECTION_RESET`，控制台只剩
+`SwaggerUIBundle is not defined`。现在断网也能打开。
+
+### 分步启动（需要单独控制每个进程时）
 
 ```bash
 # 0. 启用仓库自带提交门禁（只做一次；绕过它提交会被评审打回）
@@ -61,14 +139,19 @@ uv run python scripts/seed_for_m3.py
 uv run uvicorn pyknora.api.main:create_app --factory --port 8010
 uv run python scripts/run_worker.py
 
-# 6. 测试
+# 6. 起前端（第三个终端；API_PROXY_TARGET 不写就默认 8010）
+cd web && pnpm install && pnpm dev        # http://127.0.0.1:3000
+
+# 7. 测试
 uv run pytest -q tests/unit      # 不需要数据库
+cd web && pnpm typecheck && pnpm test     # 前端类型与单测
 ```
 
 > **端口与库名以 `.env` 为准**：`PYKNORA_DATABASE_URL`、`PYKNORA_DB_CONTAINER`。
 > 本机若已有别的 pgvector 容器（例如跑在 5434），先 `docker ps` 确认再改 `.env`，
 > 不要改代码里的默认值。默认嵌入后端是 `local`（`BAAI/bge-small-zh-v1.5`, dim 512），
 > 无外网时可用 `PYKNORA_EMBEDDING_BACKEND=hashing` 跑通全链路。
+
 
 ### 配置
 
@@ -139,12 +222,14 @@ uv run pytest -q tests/unit      # 不需要数据库
 | --- | --- |
 | `uv run ruff check src tests scripts` | 静态检查（**别查全仓**，`.tmp_ref/` 有历史噪音） |
 | `uv run ruff format --check src tests scripts` | 格式检查 |
-| `uv run pytest -q tests/unit` | 88 个，不需要数据库 |
+| `uv run pytest -q tests/unit` | 876 个，不需要数据库 |
 | `uv run pytest -q tests/contract` | 20 个，跨模块契约 |
-| `uv run pytest -q tests/api` | 80 个，ASGI 打真库 |
-| `uv run pytest -q tests/integration` | 48 个，需真 PG |
-| `uv run python scripts/ci.py --stage all` | 本地门禁（lint + test；**不含** security） |
-| `uv run python scripts/ci.py --stage security` | 依赖漏洞审计，需联网，单独跑 |
+| `uv run pytest -q tests/api` | 161 个，ASGI 打真库 |
+| `uv run pytest -q tests/integration` | 79 个，需真 PG |
+| `uv run python scripts/ci.py --profile commit` | 提交门禁三步（lock + lint + manifest，0.1s） |
+| `uv run python scripts/ci.py --stage all` | 推送门禁八步（= `--profile default`，约 50s） |
+| `uv run python scripts/ci.py --profile full` | 全 13 阶段（含 integration/audit/container） |
+| `uv run python scripts/ci.py --stage audit` | 依赖漏洞审计（pip-audit），需联网 |
 | `uv run python scripts/smoke_e2e.py --base-url http://127.0.0.1:8010` | 端到端 14 项断言 |
 
 > 跑全量测试前先停掉本地 API 与 Worker：它们与用例共用同一个库，

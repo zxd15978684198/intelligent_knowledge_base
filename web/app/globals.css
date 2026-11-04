@@ -1,0 +1,122 @@
+@import "tailwindcss";
+
+/*
+ * 设计令牌 —— 浅色「证据工作台」（计划 D6/D7）。
+ *
+ * 规则：组件里只允许引用语义令牌（bg-surface / text-fg-muted / border-border…），
+ * 不允许出现 `#0f5964` 这类字面值。换品牌色只改本文件。
+ *
+ * 颜色选择依据：冷中性底（#f6f8f9）+ 白色内容面 + 深青单一强调（#0f5964）。
+ * 成功/警告/失败只用于状态，且必须配文字或图标（不能只靠颜色区分，D10 可访问性）。
+ */
+@theme {
+  --color-canvas: #f5f7f8;
+  --color-surface: #ffffff;
+  --color-surface-muted: #eef2f4;
+  --color-surface-raised: #fbfcfc;
+
+  --color-fg: #172225;
+  --color-fg-muted: #566a70;
+  /*
+   * 弱化前景色。原来的 #7d8f95 在 11–12px 常规字重下只有 3.36:1（白底）/ 3.13:1（canvas 底），
+   * 低于 WCAG 2.1 AA 的 4.5:1，axe 的 color-contrast 规则因此把 5 个路由全判为 serious
+   * （`web/tests/e2e/a11y.spec.ts` 可复现）。压暗到 #5f7175 后为 5.12:1 / 4.76:1，
+   * 仍比 fg-muted(#566a70) 浅，视觉层级不变。
+   */
+  --color-fg-subtle: #5f7175;
+  --color-fg-inverse: #ffffff;
+
+  --color-border: #d8e0e3;
+  --color-border-strong: #b3c1c6;
+
+  --color-primary: #0f5964;
+  --color-primary-hover: #0b4750;
+  --color-primary-weak: #e2eef0;
+  --color-primary-fg: #ffffff;
+
+  --color-success: #15704b;
+  --color-success-weak: #e4f2ea;
+  --color-warning: #8a5300;
+  --color-warning-weak: #fbf0dc;
+  --color-danger: #a5231d;
+  --color-danger-weak: #fbe7e5;
+  --color-info: #1d4f8a;
+  --color-info-weak: #e6eef8;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --font-sans:
+    "Inter", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono:
+    "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  /* 触控目标下限（计划 §6：主要触控目标 ≥ 44px） */
+  --spacing-hit: 2.75rem;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    background-color: var(--color-canvas);
+    color-scheme: light;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 正文对比度 ≥ 4.5:1（计划 §6）；焦点环必须可见，不允许 outline:none */
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  /* 标识符、ID、分数走等宽数字，表格里纵向对齐 */
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer utilities {
+  /* 屏幕阅读器可见、视觉隐藏：用于给图表/徽标补文字标签 */
+  .sr-only-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+}

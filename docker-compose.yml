@@ -1,0 +1,133 @@
+# PyKnora 一键起栈：PostgreSQL(pgvector) + 迁移 + API + Worker + Web。
+#
+#   docker compose up --build --wait      # 起全部并等到健康
+#   docker compose ps -a                  # migrate 是 Exited (0) 才对，Exited (1) 是失败
+#   docker compose down                   # 停栈（保留卷与数据）
+#   docker compose down -v                # 连数据一起删——只在确认要重建时用
+#
+# 端口（宿主）：
+#   5435 → db   （故意避开本机既有的 5433/5434，那两个是别人的容器）
+#   8010 → api
+#   3000 → web
+#
+# 版本回滚见 scripts/rollback.ps1 与 docs/部署与回滚.md。
+
+name: pyknora
+
+x-api-env: &api-env
+  # 容器内走服务名，不是 127.0.0.1：每个容器有自己的回环地址。
+  PYKNORA_DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-dev}@db:5432/pyknora
+  PYKNORA_EMBEDDING_BACKEND: ${PYKNORA_EMBEDDING_BACKEND:-local}
+  PYKNORA_EMBEDDING_MODEL_KEY: ${PYKNORA_EMBEDDING_MODEL_KEY:-BAAI/bge-small-zh-v1.5}
+  PYKNORA_EMBEDDING_DIM: ${PYKNORA_EMBEDDING_DIM:-512}
+  PYKNORA_LOG_LEVEL: ${PYKNORA_LOG_LEVEL:-INFO}
+  # 对话上游三件套是可选的：不填时 /chat 会在建流前 503（而不是在流里报错）。
+  PYKNORA_CHAT_BASE_URL: ${PYKNORA_CHAT_BASE_URL:-}
+  PYKNORA_CHAT_MODEL: ${PYKNORA_CHAT_MODEL:-}
+  PYKNORA_CHAT_API_KEY: ${PYKNORA_CHAT_API_KEY:-}
+  PYKNORA_CHAT_SESSION_ID: ${PYKNORA_CHAT_SESSION_ID:-pyknora-compose}
+  # 模型缓存落在卷里，重建镜像不必再下载
+  HF_HOME: /data/hf
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      POSTGRES_DB: pyknora
+    ports:
+      - "${PYKNORA_COMPOSE_DB_PORT:-5435}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready 只证明"能连"，不证明 migration 已跑；后者由 migrate 服务负责。
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pyknora"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # 一次性作业：按 0001..000N 顺序喂 SQL，跑完就退出。
+  # 用 db 镜像而不是 api 镜像：psql 在里面是现成的，且不需要 python 环境；
+  # 迁移文件 bind-mount 进来（容器内没有 /migrations 时 `psql -f` 必然 No such file）。
+  migrate:
+    image: pgvector/pgvector:pg16
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-dev}
+      PYKNORA_EMBEDDING_DIM: ${PYKNORA_EMBEDDING_DIM:-512}
+    volumes:
+      - ./migrations:/migrations:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        for f in /migrations/*.sql; do
+          echo "==> $$f"
+          psql -h db -U postgres -d pyknora \
+               -v ON_ERROR_STOP=1 -v dim="$$PYKNORA_EMBEDDING_DIM" \
+               -f "$$f" >/dev/null
+        done
+        echo "==> migrations done"
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_LOCAL_EMBED: ${INSTALL_LOCAL_EMBED:-true}
+    image: ${PYKNORA_IMAGE_PREFIX:-pyknora}-api:${PYKNORA_IMAGE_TAG:-local}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment: *api-env
+    ports:
+      - "${PYKNORA_API_PORT:-8010}:8010"
+    volumes:
+      - hf-cache:/data/hf
+    restart: unless-stopped
+
+  worker:
+    # 与 api 共用镜像，只换启动命令：摄取队列的消费者
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_LOCAL_EMBED: ${INSTALL_LOCAL_EMBED:-true}
+    image: ${PYKNORA_IMAGE_PREFIX:-pyknora}-api:${PYKNORA_IMAGE_TAG:-local}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment: *api-env
+    command: ["python", "scripts/run_worker.py"]
+    volumes:
+      - hf-cache:/data/hf
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        # rewrites() 在构建期求值 → 必须是构建参数；运行期改环境变量不生效
+        API_PROXY_TARGET: ${WEB_API_PROXY_TARGET:-http://api:8010}
+    image: ${PYKNORA_IMAGE_PREFIX:-pyknora}-web:${PYKNORA_IMAGE_TAG:-local}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${PYKNORA_WEB_PORT:-3000}:3000"
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  hf-cache:

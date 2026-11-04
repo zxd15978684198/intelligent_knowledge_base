@@ -1,0 +1,7 @@
+# pnpm 12 起，构建脚本白名单从 package.json 移到本文件（由 pnpm install 生成模板）。
+# 只放行这两个包在安装期执行脚本：
+# - esbuild：下载/校验平台二进制（vite / vitest 依赖）
+# - msw：生成 service worker 脚本（仅测试使用，不参与运行时）
+allowBuilds:
+  esbuild: true
+  msw: true
