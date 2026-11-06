@@ -1,39 +1,33 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { useState } from "react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import "./browser-storage";
 
 import { ApiError } from "@/lib/api/client";
-import { TOKEN_STORAGE_KEY } from "@/lib/auth/token-store";
 import { USERNAME_STORAGE_KEY } from "@/lib/auth/identity-cache";
 
 import { AuthProvider, useAuth } from "@/features/auth/auth-context";
 
 import { server } from "@/tests/msw/server";
 
-import {
-  ACCESS_TOKEN,
-  ME_RESPONSE,
-  TOKEN_RESPONSE,
-  UNAUTHENTICATED_BODY,
-  WORKSPACE_ID,
-} from "./fixtures";
+import { ME_RESPONSE, TOKEN_RESPONSE, UNAUTHENTICATED_BODY, WORKSPACE_ID } from "./fixtures";
 
 /**
- * `AuthProvider` / `useAuth` 的行为契约。
+ * `AuthProvider` / `useAuth` 的行为契约（Cookie 会话版）。
  *
- * 这里的断言都在守**状态机**，不是在测实现细节：
- * 1. 没有令牌 → anonymous，且不发 `/auth/me`（省一次必然失败的往返）；
- * 2. 登录成功 → 令牌落盘 + 身份（含 permissions / workspace）来自 `/auth/me`；
- * 3. 登录 401 → 不写令牌、状态不动、只打一次请求（**不重试**）；
- * 4. 刷新 → 用本地令牌验活；401 清令牌并转 anonymous，同样只打一次；
- * 5. 非 401 的验活失败（网络）→ 保留令牌但转 anonymous，并给出可读原因。
+ * 会话凭据在 HttpOnly Cookie 里，前端读不到也不保存令牌；登录态唯一真值源是
+ * 服务端 `/auth/me`。这里钉住五件事：
+ * 1. 首屏**总是**探活一次 `/auth/me`：401 → anonymous（正常未登录），不发多余请求；
+ * 2. 登录成功 → 后端下发 Cookie，前端再打一次 `/auth/me` 建身份，登录名进本地缓存；
+ * 3. 登录 401 → 不验活、状态保持 anonymous、只打一次登录请求（不重试）；
+ * 4. 首屏验活成功（有会话 Cookie）→ 恢复身份，username 取本地缓存；
+ * 5. 首屏网络失败 → anonymous + 可读原因；logout → 清缓存与身份。
  */
 
 function AuthProbe() {
-  const { status, token, identity, sessionError, login, register, logout } = useAuth();
+  const { status, identity, sessionError, login, register, logout } = useAuth();
   const [failure, setFailure] = useState("-");
 
   const capture = (promise: Promise<void>): void => {
@@ -45,7 +39,6 @@ function AuthProbe() {
   return (
     <div>
       <p data-testid="status">{status}</p>
-      <p data-testid="token">{token ?? "-"}</p>
       <p data-testid="username">{identity?.username ?? "-"}</p>
       <p data-testid="workspace">{identity?.default_workspace_id ?? "-"}</p>
       <p data-testid="permissions">{identity === null ? "-" : identity.permissions.join(",")}</p>
@@ -80,92 +73,15 @@ function renderAuth() {
 const text = (id: string): string => screen.getByTestId(id).textContent ?? "";
 
 describe("features/auth/auth-context", () => {
-  it("没有令牌时直接进入 anonymous，且不请求 /auth/me", async () => {
-    let meCalls = 0;
+  beforeEach(() => {
+    // 默认：没有会话（首屏探活 401）。各用例按需要覆盖成 200。
     server.use(
-      http.get("*/api/v1/auth/me", () => {
-        meCalls += 1;
-        return HttpResponse.json(ME_RESPONSE);
-      }),
+      http.get("*/api/v1/auth/me", () => HttpResponse.json(UNAUTHENTICATED_BODY, { status: 401 })),
+      http.post("*/api/v1/auth/logout", () => new HttpResponse(null, { status: 204 })),
     );
-
-    renderAuth();
-    await waitFor(() => expect(text("status")).toBe("anonymous"));
-    expect(meCalls).toBe(0);
-    expect(text("token")).toBe("-");
   });
 
-  it("登录成功：令牌写入 localStorage，身份与权限来自 /auth/me", async () => {
-    let sentBody: unknown = null;
-    let authorization: string | null = null;
-    server.use(
-      http.post("*/api/v1/auth/login", async ({ request }) => {
-        sentBody = await request.json();
-        return HttpResponse.json(TOKEN_RESPONSE);
-      }),
-      http.get("*/api/v1/auth/me", ({ request }) => {
-        authorization = request.headers.get("authorization");
-        return HttpResponse.json(ME_RESPONSE);
-      }),
-    );
-
-    renderAuth();
-    await waitFor(() => expect(text("status")).toBe("anonymous"));
-    fireEvent.click(screen.getByRole("button", { name: "login" }));
-    await waitFor(() => expect(text("status")).toBe("authenticated"));
-
-    expect(sentBody).toEqual({ username: "alice", password: "password123" });
-    expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBe(ACCESS_TOKEN);
-    expect(window.localStorage.getItem(USERNAME_STORAGE_KEY)).toBe("alice");
-    expect(authorization).toBe(`Bearer ${ACCESS_TOKEN}`);
-    expect(text("token")).toBe(ACCESS_TOKEN);
-    expect(text("username")).toBe("alice");
-    expect(text("workspace")).toBe(WORKSPACE_ID);
-    expect(text("permissions")).toBe("document.read,document.write");
-    expect(text("session-error")).toBe("-");
-  });
-
-  it("登录 401：不写令牌、状态保持 anonymous，且只打一次请求", async () => {
-    let loginCalls = 0;
-    let meCalls = 0;
-    server.use(
-      http.post("*/api/v1/auth/login", () => {
-        loginCalls += 1;
-        return HttpResponse.json(UNAUTHENTICATED_BODY, { status: 401 });
-      }),
-      http.get("*/api/v1/auth/me", () => {
-        meCalls += 1;
-        return HttpResponse.json(ME_RESPONSE);
-      }),
-    );
-
-    renderAuth();
-    await waitFor(() => expect(text("status")).toBe("anonymous"));
-    fireEvent.click(screen.getByRole("button", { name: "login" }));
-    await waitFor(() => expect(text("failure")).toBe("401:UNAUTHENTICATED"));
-
-    expect(loginCalls).toBe(1);
-    expect(meCalls).toBe(0);
-    expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull();
-    expect(text("token")).toBe("-");
-    expect(text("status")).toBe("anonymous");
-  });
-
-  it("刷新：已有令牌先验活，成功则恢复身份（username 取本地缓存）", async () => {
-    window.localStorage.setItem(TOKEN_STORAGE_KEY, ACCESS_TOKEN);
-    window.localStorage.setItem(USERNAME_STORAGE_KEY, "alice");
-    server.use(http.get("*/api/v1/auth/me", () => HttpResponse.json(ME_RESPONSE)));
-
-    renderAuth();
-    await waitFor(() => expect(text("status")).toBe("authenticated"));
-
-    expect(text("token")).toBe(ACCESS_TOKEN);
-    expect(text("username")).toBe("alice");
-    expect(text("permissions")).toBe("document.read,document.write");
-  });
-
-  it("刷新后 401：清掉本地令牌并转 anonymous，不自动重试", async () => {
-    window.localStorage.setItem(TOKEN_STORAGE_KEY, ACCESS_TOKEN);
+  it("首屏无会话：总是打一次 /auth/me，401 后进入 anonymous", async () => {
     let meCalls = 0;
     server.use(
       http.get("*/api/v1/auth/me", () => {
@@ -178,24 +94,88 @@ describe("features/auth/auth-context", () => {
     await waitFor(() => expect(text("status")).toBe("anonymous"));
 
     expect(meCalls).toBe(1);
-    expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull();
-    expect(text("token")).toBe("-");
+    expect(text("session-error")).toBe("-");
   });
 
-  it("刷新后网络失败：保留令牌但转 anonymous，并给出可读原因", async () => {
-    window.localStorage.setItem(TOKEN_STORAGE_KEY, ACCESS_TOKEN);
+  it("登录成功：Cookie 会话 + /auth/me 建身份，登录名写入本地缓存", async () => {
+    let sentBody: unknown = null;
+    let meAuthorization: string | null = "sentinel";
+    let signedIn = false;
+    server.use(
+      http.post("*/api/v1/auth/login", async ({ request }) => {
+        sentBody = await request.json();
+        signedIn = true;
+        return HttpResponse.json(TOKEN_RESPONSE);
+      }),
+      http.get("*/api/v1/auth/me", ({ request }) => {
+        meAuthorization = request.headers.get("authorization");
+        return signedIn
+          ? HttpResponse.json(ME_RESPONSE)
+          : HttpResponse.json(UNAUTHENTICATED_BODY, { status: 401 });
+      }),
+    );
+
+    renderAuth();
+    await waitFor(() => expect(text("status")).toBe("anonymous"));
+    fireEvent.click(screen.getByRole("button", { name: "login" }));
+    await waitFor(() => expect(text("status")).toBe("authenticated"));
+
+    expect(sentBody).toEqual({ username: "alice", password: "password123" });
+    expect(window.localStorage.getItem(USERNAME_STORAGE_KEY)).toBe("alice");
+    // /auth/me 省略 token → 走 Cookie 会话，不发 Authorization 头。
+    expect(meAuthorization).toBeNull();
+    expect(text("username")).toBe("alice");
+    expect(text("workspace")).toBe(WORKSPACE_ID);
+    expect(text("permissions")).toBe("document.read,document.write");
+    expect(text("session-error")).toBe("-");
+  });
+
+  it("登录 401：不验活、状态保持 anonymous，且只打一次登录请求", async () => {
+    let loginCalls = 0;
+    let meCalls = 0;
+    server.use(
+      http.post("*/api/v1/auth/login", () => {
+        loginCalls += 1;
+        return HttpResponse.json(UNAUTHENTICATED_BODY, { status: 401 });
+      }),
+      http.get("*/api/v1/auth/me", () => {
+        meCalls += 1;
+        return HttpResponse.json(UNAUTHENTICATED_BODY, { status: 401 });
+      }),
+    );
+
+    renderAuth();
+    await waitFor(() => expect(text("status")).toBe("anonymous"));
+    fireEvent.click(screen.getByRole("button", { name: "login" }));
+    await waitFor(() => expect(text("failure")).toBe("401:UNAUTHENTICATED"));
+
+    expect(loginCalls).toBe(1);
+    // 只有首屏那一次探活；登录失败后再没有额外的 /auth/me。
+    expect(meCalls).toBe(1);
+    expect(text("status")).toBe("anonymous");
+  });
+
+  it("首屏验活成功（已有会话 Cookie）：恢复身份，username 取本地缓存", async () => {
+    window.localStorage.setItem(USERNAME_STORAGE_KEY, "alice");
+    server.use(http.get("*/api/v1/auth/me", () => HttpResponse.json(ME_RESPONSE)));
+
+    renderAuth();
+    await waitFor(() => expect(text("status")).toBe("authenticated"));
+
+    expect(text("username")).toBe("alice");
+    expect(text("permissions")).toBe("document.read,document.write");
+  });
+
+  it("首屏网络失败：转 anonymous 并给出可读原因", async () => {
     server.use(http.get("*/api/v1/auth/me", () => HttpResponse.error()));
 
     renderAuth();
     await waitFor(() => expect(text("status")).toBe("anonymous"));
 
-    // 一次网络抖动不该把令牌删掉（用户下次打开可能就好了）。
-    expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBe(ACCESS_TOKEN);
     expect(text("session-error")).toContain("无法连接服务");
   });
 
-  it("logout：清掉令牌、身份与登录名缓存", async () => {
-    window.localStorage.setItem(TOKEN_STORAGE_KEY, ACCESS_TOKEN);
+  it("logout：清掉登录名缓存与身份，状态转 anonymous", async () => {
     window.localStorage.setItem(USERNAME_STORAGE_KEY, "alice");
     server.use(http.get("*/api/v1/auth/me", () => HttpResponse.json(ME_RESPONSE)));
 
@@ -204,9 +184,7 @@ describe("features/auth/auth-context", () => {
     fireEvent.click(screen.getByRole("button", { name: "logout" }));
 
     await waitFor(() => expect(text("status")).toBe("anonymous"));
-    expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull();
     expect(window.localStorage.getItem(USERNAME_STORAGE_KEY)).toBeNull();
-    expect(text("token")).toBe("-");
     expect(text("username")).toBe("-");
   });
 });

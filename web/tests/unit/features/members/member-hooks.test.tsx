@@ -46,7 +46,7 @@ function createWrapper(): ({ children }: { children: ReactNode }) => ReactNode {
 }
 
 describe("features/members/hooks", () => {
-  it("没有 token 时三个查询都保持 disabled，一个请求也不发", async () => {
+  it("没有 workspaceId 时三个查询都保持 disabled，一个请求也不发", async () => {
     let calls = 0;
     server.use(
       http.get("*/api/v1/workspaces/*/members", () => {
@@ -57,9 +57,10 @@ describe("features/members/hooks", () => {
 
     const { result } = renderHook(
       () => ({
-        members: useMembers({ workspaceId: TEST_WORKSPACE_ID, token: null }),
-        roles: useRoleCatalog({ workspaceId: TEST_WORKSPACE_ID, token: null }),
-        permissions: useMyPermissions({ workspaceId: TEST_WORKSPACE_ID, token: null }),
+        // Cookie 化之后就绪判据只剩 workspaceId：token 不再是前端可读的登录态信号。
+        members: useMembers({}),
+        roles: useRoleCatalog({}),
+        permissions: useMyPermissions({}),
       }),
       { wrapper: createWrapper() },
     );

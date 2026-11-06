@@ -4,26 +4,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "./browser-storage";
 
-import { TOKEN_STORAGE_KEY } from "@/lib/auth/token-store";
-
 import { AuthProvider, useAuth } from "@/features/auth/auth-context";
 import { useAuthForm, type AuthMode } from "@/features/auth/use-auth-form";
 
 import { server } from "@/tests/msw/server";
 
-import {
-  ACCESS_TOKEN,
-  CONFLICT_BODY,
-  ME_RESPONSE,
-  TOKEN_RESPONSE,
-  UNAUTHENTICATED_BODY,
-} from "./fixtures";
+import { CONFLICT_BODY, ME_RESPONSE, TOKEN_RESPONSE, UNAUTHENTICATED_BODY } from "./fixtures";
 
 /**
  * `useAuthForm` 的行为契约（登录页的行为核心）。
  *
  * 跳转用 `router.replace`：登录后再按后退不该回到登录页。这里把 `next/navigation`
  * 整个替换成假实现，断言"跳到哪里、跳了几次"，不关心 Next 内部。
+ *
+ * Cookie 会话版：前端不写本地令牌，登录成功的判据是 status=authenticated +
+ * router.replace('/kbs')。首屏总是打一次 /auth/me（默认无会话 → 401）。
  */
 const routerMock = vi.hoisted(() => ({
   replace: vi.fn(),
@@ -42,7 +37,7 @@ vi.mock("next/navigation", () => ({
 
 function Form({ mode }: { mode: AuthMode }) {
   const { values, errors, formError, pending, setField, submit } = useAuthForm(mode);
-  const { token, status } = useAuth();
+  const { status } = useAuth();
   const messages = [errors.username, errors.email, errors.password, formError].filter(
     (message): message is string => typeof message === "string",
   );
@@ -78,7 +73,6 @@ function Form({ mode }: { mode: AuthMode }) {
       {messages.length === 0 ? null : <p role="alert">{messages.join(" / ")}</p>}
 
       <p data-testid="status">{status}</p>
-      <p data-testid="token">{token ?? "-"}</p>
       <p data-testid="pending">{pending ? "yes" : "no"}</p>
       <button type="submit">提交</button>
     </form>
@@ -115,12 +109,25 @@ describe("features/auth/use-auth-form", () => {
   beforeEach(() => {
     routerMock.replace.mockClear();
     routerMock.push.mockClear();
+    // 首屏总是探活：默认没有会话（401）。成功登录的用例会在用例内覆盖成 200。
+    server.use(
+      http.get("*/api/v1/auth/me", () => HttpResponse.json(UNAUTHENTICATED_BODY, { status: 401 })),
+      http.post("*/api/v1/auth/logout", () => new HttpResponse(null, { status: 204 })),
+    );
   });
 
-  it("登录成功：写入令牌并 router.replace('/kbs')", async () => {
+  it("登录成功：status=authenticated 并 router.replace('/kbs')", async () => {
+    let signedIn = false;
     server.use(
-      http.post("*/api/v1/auth/login", () => HttpResponse.json(TOKEN_RESPONSE)),
-      http.get("*/api/v1/auth/me", () => HttpResponse.json(ME_RESPONSE)),
+      http.post("*/api/v1/auth/login", () => {
+        signedIn = true;
+        return HttpResponse.json(TOKEN_RESPONSE);
+      }),
+      http.get("*/api/v1/auth/me", () =>
+        signedIn
+          ? HttpResponse.json(ME_RESPONSE)
+          : HttpResponse.json(UNAUTHENTICATED_BODY, { status: 401 }),
+      ),
     );
 
     renderForm("login");
@@ -129,13 +136,11 @@ describe("features/auth/use-auth-form", () => {
 
     await waitFor(() => expect(routerMock.replace).toHaveBeenCalledWith("/kbs"));
     expect(routerMock.push).not.toHaveBeenCalled();
-    expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBe(ACCESS_TOKEN);
     expect(text("status")).toBe("authenticated");
-    expect(text("token")).toBe(ACCESS_TOKEN);
     expect(text("pending")).toBe("no");
   });
 
-  it("登录 401：显示『用户名或密码错误』，不跳转、不写令牌", async () => {
+  it("登录 401：显示『用户名或密码错误』，不跳转、状态保持 anonymous", async () => {
     server.use(
       http.post("*/api/v1/auth/login", () =>
         HttpResponse.json(UNAUTHENTICATED_BODY, { status: 401 }),
@@ -150,7 +155,6 @@ describe("features/auth/use-auth-form", () => {
       expect(screen.getByRole("alert").textContent).toContain("用户名或密码错误"),
     );
     expect(routerMock.replace).not.toHaveBeenCalled();
-    expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull();
     expect(text("status")).toBe("anonymous");
   });
 
@@ -167,7 +171,6 @@ describe("features/auth/use-auth-form", () => {
       expect(screen.getByRole("alert").textContent).toContain("该用户名或邮箱已被注册"),
     );
     expect(routerMock.replace).not.toHaveBeenCalled();
-    expect(window.localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull();
   });
 
   it("注册密码不足 8 位：本地拦截，一个请求都不发", async () => {
