@@ -354,3 +354,26 @@ class RoleGrantRow(Base):
     permission: Mapped[str] = mapped_column(String(128), nullable=False)
 
     __table_args__ = (UniqueConstraint("role_id", "permission"),)
+
+
+# ---------- 会话令牌（migrations/0015_refresh_tokens.sql） ----------
+# 追加在末尾，不重排上面的类。token_hash 是 sha256(刷新串) 的主键；明文只经
+# Set-Cookie 回一次，不落库。expires_at 是绝对过期，轮换时原样复制不滑动。
+
+
+class RefreshTokenRow(Base):
+    __tablename__ = "refresh_tokens"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    family_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    principal_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    csrf_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    replaced_by: Mapped[str | None] = mapped_column(String(64))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("refresh_tokens_family_idx", "family_id"),)

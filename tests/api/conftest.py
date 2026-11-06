@@ -45,6 +45,8 @@ TABLES = (
     "embedding_cache",
     "knowledge_bases",
     "index_migrations",
+    # 会话令牌表：用例间一并清掉，避免家族/CSRF 哈希在用例间串味。
+    "refresh_tokens",
 )
 
 
