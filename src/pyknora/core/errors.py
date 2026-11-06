@@ -35,11 +35,16 @@ class ErrorCode:
     # "解析器没在预算内跑完"（可能是机器慢/文件过大），前端提示与排查方向都不同。
     # 但两者的**重试语义一致**：重试同样会超时，所以不可重试、直接终态。
     PARSE_TIMEOUT = "PARSE_TIMEOUT"
+    # 双提交 CSRF 校验失败。单列一个码而不是复用 FORBIDDEN：后者在前端的语义是
+    # 「不是本空间成员」（见 deps.get_scope），混用会把「请重新提交」显示成「无权访问」；
+    # 也不能用 UNAUTHENTICATED(401)，那会触发前端的刷新单飞，而 CSRF 失败刷新救不回来。
+    CSRF_FAILED = "CSRF_FAILED"
 
 
 _HTTP_STATUS: dict[str, int] = {
     ErrorCode.UNAUTHENTICATED: 401,
     ErrorCode.FORBIDDEN: 403,
+    ErrorCode.CSRF_FAILED: 403,
     ErrorCode.RESOURCE_NOT_FOUND: 404,
     ErrorCode.CURSOR_EXPIRED: 410,
     ErrorCode.DEPENDENCY_UNAVAILABLE: 503,

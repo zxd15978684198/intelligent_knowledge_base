@@ -121,6 +121,10 @@ class Settings(BaseSettings):
     # 非开发环境退到默认值会在构造时直接失败，而不是启动后默默接受伪造令牌。
     jwt_secret: str = ""
 
+    # 浏览器会话：刷新串的绝对有效期（秒，默认 7 天）。轮换时原样复制
+    # expires_at，绝不滑动延长——否则偷到一次刷新串就能无限续期。
+    refresh_ttl_seconds: int = 7 * 24 * 60 * 60
+
     # 游标：签名防篡改，默认 24 小时失效。生产必须覆盖开发密钥。
     cursor_secret: str = DEV_CURSOR_SECRET
     cursor_ttl_seconds: int = 24 * 60 * 60
@@ -145,6 +149,15 @@ class Settings(BaseSettings):
                 "否则分页游标可被伪造（危害低于 JWT，但不该带上生产）"
             )
         return self
+
+    @property
+    def cookie_secure(self) -> bool:
+        """会话 Cookie 是否强制 Secure。
+
+        dev/test/local 走 http://127.0.0.1，强开 Secure 浏览器不会回传，
+        表现是「登录成功但下一个请求仍 401」，所以按环境判定。
+        """
+        return self.env.strip().lower() not in _INSECURE_ENVS
 
     def resolve_vision(self) -> tuple[str, str, str]:
         """返回视觉通道的 `(base_url, api_key, model)`，空串项逐个回落到 `chat_*`。

@@ -15,19 +15,27 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
+import secrets
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pyknora.api.deps import get_scope, get_session
+from pyknora.api.deps import get_scope, get_session, require_csrf
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.scope import Scope
+from pyknora.core.settings import settings
 from pyknora.db.repos.principals import SqlIdentityRepo
+from pyknora.db.repos.refresh_tokens import SqlRefreshTokenRepo
+from pyknora.models.tables import RefreshTokenRow
 from pyknora.services.auth.jwt import DEFAULT_TTL_SECONDS, issue_token
 from pyknora.services.auth.membership import (
     create_default_workspace_for,
@@ -120,6 +128,104 @@ def _constraint_name(exc: IntegrityError) -> str | None:
     return match.group(1) if match else None
 
 
+class RefreshResponse(BaseModel):
+    """刷新成功只回有效期；访问令牌只在 HttpOnly Cookie 里，不回响应体。
+
+    与 `TokenResponse` 刻意不同：注册/登录要把令牌回给命令行工具，刷新则只服务
+    浏览器会话，把令牌回进响应体等于把 HttpOnly 的价值在刷新那一刻又漏回 JS。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    expires_in: int = DEFAULT_TTL_SECONDS
+
+
+_ACCESS_COOKIE = "pyknora_access"
+_REFRESH_COOKIE = "pyknora_refresh"
+_CSRF_COOKIE = "pyknora_csrf"
+_AUTH_PATH = "/api/v1/auth"
+# 同一个旧刷新串在宽限内被重复投递（连接抖动/浏览器重发）不算盗用。
+_REPLAY_GRACE_SECONDS = 10
+
+
+def _set_session_cookies(
+    response: Response, *, access: str, refresh: str | None, csrf: str | None
+) -> None:
+    """下发三件套；刷新端点只重发前两个，CSRF 按会话稳定、不随刷新轮换。"""
+    secure = settings.cookie_secure
+    response.set_cookie(
+        _ACCESS_COOKIE,
+        access,
+        max_age=DEFAULT_TTL_SECONDS,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+    )
+    if refresh is not None:
+        response.set_cookie(
+            _REFRESH_COOKIE,
+            refresh,
+            max_age=settings.refresh_ttl_seconds,
+            path=_AUTH_PATH,
+            httponly=True,
+            samesite="lax",
+            secure=secure,
+        )
+    if csrf is not None:
+        response.set_cookie(
+            _CSRF_COOKIE,
+            csrf,
+            max_age=settings.refresh_ttl_seconds,
+            path="/",
+            httponly=False,
+            samesite="lax",
+            secure=secure,
+        )
+
+
+def _clear_session_cookies(response: Response) -> None:
+    for name, path in (
+        (_ACCESS_COOKIE, "/"),
+        (_REFRESH_COOKIE, _AUTH_PATH),
+        (_CSRF_COOKIE, "/"),
+    ):
+        response.delete_cookie(name, path=path, samesite="lax", secure=settings.cookie_secure)
+
+
+async def _new_session(session: AsyncSession, *, principal_id: UUID) -> tuple[str, str]:
+    """建一个会话家族，返回 (刷新串明文, CSRF 明文)——明文只经 Set-Cookie 回一次。
+
+    顺带按主体清掉已过绝对期的行，不引调度器：长期不登录的账号留下的过期行
+    由 `scripts/purge_refresh_tokens.py` 手动清。
+    """
+    refresh = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(32)
+    await SqlRefreshTokenRepo(session).purge_expired_for(principal_id)
+    session.add(
+        RefreshTokenRow(
+            token_hash=hashlib.sha256(refresh.encode()).hexdigest(),
+            family_id=uuid4(),
+            principal_id=principal_id,
+            csrf_hash=hashlib.sha256(csrf.encode()).hexdigest(),
+            expires_at=datetime.now(UTC) + timedelta(seconds=settings.refresh_ttl_seconds),
+        )
+    )
+    await session.flush()
+    return refresh, csrf
+
+
+async def _deny(session: AsyncSession, family_id: UUID) -> None:
+    """撤销整族并**显式提交**，再抛 401。
+
+    会话作用域在异常路径会 rollback；不先 commit，撤销会被一起回滚掉，盗用者
+    手里同族的其它刷新串就还能用。这是「失败分支也要提交」的唯一原因。
+    """
+    await SqlRefreshTokenRepo(session).revoke_family(family_id)
+    await session.commit()
+    raise AppError(ErrorCode.UNAUTHENTICATED, "invalid refresh token")
+
+
 @router.post(
     "/auth/register",
     status_code=status.HTTP_201_CREATED,
@@ -128,6 +234,7 @@ def _constraint_name(exc: IntegrityError) -> str | None:
 )
 async def register(
     payload: RegisterRequest,
+    response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TokenResponse:
     repo = SqlIdentityRepo(session)
@@ -166,8 +273,14 @@ async def register(
             ) from exc
         raise _duplicate() from exc
 
+    # 会话与账号分两笔事务：账号 + 默认工作区必须同生共死（上面的 try），
+    # 会话行插入失败只是「这次没发出 Cookie」，重新登录即可，不该把账号一起回滚。
+    access = issue_token(principal.principal_id, workspace.workspace_id)
+    refresh, csrf = await _new_session(session, principal_id=principal.principal_id)
+    await session.commit()
+    _set_session_cookies(response, access=access, refresh=refresh, csrf=csrf)
     return TokenResponse(
-        access_token=issue_token(principal.principal_id, workspace.workspace_id),
+        access_token=access,
         principal_id=principal.principal_id,
         workspace_id=workspace.workspace_id,
         display_name=principal.display_name,
@@ -181,6 +294,7 @@ async def register(
 )
 async def login(
     payload: LoginRequest,
+    response: Response,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TokenResponse:
     repo = SqlIdentityRepo(session)
@@ -199,10 +313,13 @@ async def login(
         raise AppError(ErrorCode.FORBIDDEN, "principal has no workspace membership")
 
     await repo.touch_last_login(principal.principal_id)
+    refresh, csrf = await _new_session(session, principal_id=principal.principal_id)
     await session.commit()
 
+    access = issue_token(principal.principal_id, workspace_id)
+    _set_session_cookies(response, access=access, refresh=refresh, csrf=csrf)
     return TokenResponse(
-        access_token=issue_token(principal.principal_id, workspace_id),
+        access_token=access,
         principal_id=principal.principal_id,
         workspace_id=workspace_id,
         display_name=principal.display_name,
@@ -260,3 +377,93 @@ async def me(
         role=membership.role,
         permissions=sorted(permissions),
     )
+
+
+@router.post(
+    "/auth/refresh",
+    response_model=RefreshResponse,
+    dependencies=[Depends(require_csrf)],
+    summary="轮换会话（单次轮换 + 重用检测）",
+)
+async def refresh_session(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """用刷新串换一对新 Cookie；旧串单次作废，再用就撤整个家族。
+
+    不挂 `get_scope`：访问令牌过期正是刷新的正常前提，挂了会先 401。
+    失败分支由 `_deny` 先提交撤销再抛 401；服务端不清 Cookie，交给前端的
+    失效流程走幂等登出——异常处理器会重建响应，端点上 delete_cookie 会被丢掉。
+    """
+    refresh = request.cookies.get(_REFRESH_COOKIE)
+    csrf = request.cookies.get(_CSRF_COOKIE, "")
+    repo = SqlRefreshTokenRepo(session)
+    row = (
+        await repo.get_for_update(hashlib.sha256(refresh.encode()).hexdigest()) if refresh else None
+    )
+    if row is None:
+        raise AppError(ErrorCode.UNAUTHENTICATED, "invalid refresh token")
+
+    family = row.family_id
+    now = datetime.now(UTC)
+
+    # 与库里绑定的 CSRF 哈希核对：防止把别人的 CSRF Cookie 注进本会话。
+    if not hmac.compare_digest(hashlib.sha256(csrf.encode()).hexdigest(), row.csrf_hash):
+        await _deny(session, family)
+    if row.revoked_at is not None or row.expires_at <= now:
+        await _deny(session, family)
+    if row.replaced_by is not None:
+        grace = (
+            row.rotated_at is not None
+            and (now - row.rotated_at).total_seconds() <= _REPLAY_GRACE_SECONDS
+        )
+        if grace and await repo.has_live_successor(family):
+            # 同一旧串在宽限内被重复投递：已经有人成功轮换过了，幂等放行。
+            # 204 不是 401，前端不会误判成「会话失效」，也不带任何 Set-Cookie。
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        await _deny(session, family)
+
+    principal = await SqlIdentityRepo(session).find_principal(row.principal_id)
+    if principal is None or principal.status != "active":
+        await _deny(session, family)
+    workspace_id = await resolve_default_workspace(session, row.principal_id)
+    if workspace_id is None:
+        raise AppError(ErrorCode.FORBIDDEN, "principal has no workspace membership")
+
+    new_refresh = secrets.token_urlsafe(32)
+    new_hash = hashlib.sha256(new_refresh.encode()).hexdigest()
+    await repo.insert_successor(row, new_hash)
+    await repo.mark_rotated(row.token_hash, new_hash)
+    await session.commit()
+
+    result = JSONResponse(content={"expires_in": DEFAULT_TTL_SECONDS})
+    _set_session_cookies(
+        result,
+        access=issue_token(row.principal_id, workspace_id),
+        refresh=new_refresh,
+        csrf=None,
+    )
+    return result
+
+
+@router.post(
+    "/auth/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_csrf)],
+    summary="登出（撤销整个会话家族，幂等）",
+)
+async def logout(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> Response:
+    """撤销刷新串所属的整个家族并清三件套；没有 Cookie 也照样 204（幂等）。"""
+    refresh = request.cookies.get(_REFRESH_COOKIE)
+    if refresh:
+        repo = SqlRefreshTokenRepo(session)
+        row = await repo.get_for_update(hashlib.sha256(refresh.encode()).hexdigest())
+        if row is not None:
+            await repo.revoke_family(row.family_id)
+            await session.commit()
+    out = Response(status_code=status.HTTP_204_NO_CONTENT)
+    _clear_session_cookies(out)
+    return out

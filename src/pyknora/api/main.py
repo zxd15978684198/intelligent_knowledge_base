@@ -25,11 +25,12 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from pyknora.api.deps import require_csrf
 from pyknora.core.errors import AppError, ErrorCode
 from pyknora.core.settings import settings
 from pyknora.db.session import dispose_engine
@@ -313,17 +314,49 @@ def create_app() -> FastAPI:
     from pyknora.api.v1 import query as query_router
     from pyknora.api.v1 import workspaces as workspaces_router
 
-    app.include_router(documents_router.router, prefix="/api/v1")
-    app.include_router(jobs_router.router, prefix="/api/v1")
+    app.include_router(
+        documents_router.router,
+        prefix="/api/v1",
+        dependencies=[Depends(require_csrf)],
+    )
+    app.include_router(
+        jobs_router.router,
+        prefix="/api/v1",
+        dependencies=[Depends(require_csrf)],
+    )
     # 成员4：注册/登录必须在其它业务路由之前可用——它们是所有鉴权的前置。
     app.include_router(auth_router.router, prefix="/api/v1")
-    app.include_router(workspaces_router.router, prefix="/api/v1")
+    app.include_router(
+        workspaces_router.router,
+        prefix="/api/v1",
+        dependencies=[Depends(require_csrf)],
+    )
 
-    app.include_router(query_router.router, prefix="/api/v1")
-    app.include_router(chat_router.router, prefix="/api/v1")
-    app.include_router(knowledge_bases_router.router, prefix="/api/v1")
-    app.include_router(lineage_router.router, prefix="/api/v1")
-    app.include_router(admin_router.router, prefix="/api/v1")
+    app.include_router(
+        query_router.router,
+        prefix="/api/v1",
+        dependencies=[Depends(require_csrf)],
+    )
+    app.include_router(
+        chat_router.router,
+        prefix="/api/v1",
+        dependencies=[Depends(require_csrf)],
+    )
+    app.include_router(
+        knowledge_bases_router.router,
+        prefix="/api/v1",
+        dependencies=[Depends(require_csrf)],
+    )
+    app.include_router(
+        lineage_router.router,
+        prefix="/api/v1",
+        dependencies=[Depends(require_csrf)],
+    )
+    app.include_router(
+        admin_router.router,
+        prefix="/api/v1",
+        dependencies=[Depends(require_csrf)],
+    )
 
     return app
 

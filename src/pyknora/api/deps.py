@@ -2,9 +2,10 @@
 
 这一层是**权限边界的唯一入口**。三条规则写在这里而不是散在路由里：
 
-1. `Scope` 只从 `Authorization: Bearer <jwt>` 解出来。请求体里的 `workspace_id`
-   / `principal_id` / 查询串里的 `user_id` **一律不读**——读了就等于把授权交给
-   调用方自己声明。这条在 `docs/tdd/07_Data_API_Security.md:103` 有明确要求。
+1. `Scope` 只从**服务端下发的凭证**解出来：优先读会话 Cookie 里的访问令牌，
+   没有 Cookie 才回退到 `Authorization: Bearer <jwt>`（命令行工具与评测脚本）。
+   请求体里的 `workspace_id` / `principal_id` / 查询串里的 `user_id` **一律不读**
+   ——读了就等于把授权交给调用方自己声明。
 2. `X-Workspace-ID` 头只用来"在这人已加入的多个空间里选一个"，它**不能**凭空
    造出一个他本不属于的空间。未提供时用 JWT 里的 `default_workspace_id`。
 3. 解析失败一律 401 `UNAUTHENTICATED`，不区分"没带 token / token 过期 / 签名错"
@@ -21,11 +22,12 @@
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Depends, Header, Request
+from fastapi import Cookie, Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pyknora.core.errors import AppError, ErrorCode, not_found
@@ -58,11 +60,20 @@ async def get_scope(
     session: Annotated[AsyncSession, Depends(get_session)],
     authorization: str | None = Header(default=None),
     x_workspace_id: str | None = Header(default=None, alias="X-Workspace-ID"),
+    pyknora_access: Annotated[str | None, Cookie()] = None,
 ) -> Scope:
-    """解析可信 Scope。所有业务路由的第一个依赖。"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise AppError(ErrorCode.UNAUTHENTICATED, "missing bearer token")
-    payload = decode_token(authorization.removeprefix("Bearer ").strip())
+    """解析可信 Scope。所有业务路由的第一个依赖。
+
+    会话 Cookie 优先：浏览器登录后访问令牌在 HttpOnly Cookie 里；没有 Cookie
+    才回退到 Bearer 头，供命令行工具与评测脚本继续使用。两者都不带 = 401。
+    把 Cookie 做成带默认值的尾参数，既有单元测试的四参数直接调用仍走 Bearer 兜底。
+    """
+    raw = pyknora_access
+    if not raw:
+        if not authorization or not authorization.startswith("Bearer "):
+            raise AppError(ErrorCode.UNAUTHENTICATED, "missing bearer token")
+        raw = authorization.removeprefix("Bearer ").strip()
+    payload = decode_token(raw)
 
     sub = payload.get("sub")
     if not sub:
@@ -225,3 +236,36 @@ def require_permission(permission: str) -> Callable[..., Awaitable[frozenset[str
     _require.__name__ = "require_" + permission.replace(".", "_")
     _require.__doc__ = f"要求权限点 {permission}"
     return _require
+
+
+# --------------------------------------------------------------------------- #
+# 双提交 CSRF（只保护「浏览器会话 + 写方法」）
+# --------------------------------------------------------------------------- #
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+_ACCESS_COOKIE = "pyknora_access"
+_REFRESH_COOKIE = "pyknora_refresh"
+_CSRF_COOKIE = "pyknora_csrf"
+_CSRF_HEADER = "X-CSRF-Token"
+
+
+async def require_csrf(request: Request) -> None:
+    """校验双提交 CSRF；不通过抛 `CSRF_FAILED`（403，不可重试）。
+
+    三条豁免都刻意不引入第二套身份判断：
+    - 安全方法（GET/HEAD/OPTIONS/TRACE）不改写状态；
+    - 没有会话 Cookie：匿名注册/登录，或命令行 Bearer（跨站表单塞不进自定义
+      Cookie，也读不到别人的 Cookie），不存在伪造面；
+    - `pyknora_csrf` 本身前端可读，攻击者能读同源 Cookie 就等于已经 XSS 了。
+
+    判定「有没有会话」只看 Cookie，与 `get_scope` 的「Cookie 存在即忽略 Bearer」
+    完全一致；否则攻击者附一个 Bearer 头就能让本依赖误判成命令行请求。
+    """
+    if request.method in _SAFE_METHODS:
+        return
+    if _ACCESS_COOKIE not in request.cookies and _REFRESH_COOKIE not in request.cookies:
+        return
+    sent = request.headers.get(_CSRF_HEADER, "")
+    expected = request.cookies.get(_CSRF_COOKIE, "")
+    if not expected or not hmac.compare_digest(sent, expected):
+        raise AppError(ErrorCode.CSRF_FAILED, "csrf token mismatch")
