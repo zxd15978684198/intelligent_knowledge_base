@@ -5,7 +5,6 @@ import * as React from "react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { invalidateSession } from "@/lib/auth/session";
-import { getToken } from "@/lib/auth/token-store";
 
 import { ChatComposer } from "./ChatComposer";
 import { ChatTurn } from "./ChatTurn";
@@ -72,8 +71,8 @@ export function ChatScreen({ kbId, workspaceId = null, topK }: ChatScreenProps):
       setTab("answer");
       const input: StreamChatInput =
         topK === undefined
-          ? { kbId, query, token: getToken(), workspaceId }
-          : { kbId, query, topK, token: getToken(), workspaceId };
+          ? { kbId, query, workspaceId }
+          : { kbId, query, topK, workspaceId };
       void streamChat(
         input,
         (event) => {

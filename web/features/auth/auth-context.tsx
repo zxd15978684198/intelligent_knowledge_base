@@ -13,8 +13,11 @@ import {
 import { apiRequest } from "@/lib/api/client";
 import { cacheUsername, readCachedUsername } from "@/lib/auth/identity-cache";
 import { normalizePermissions } from "@/lib/auth/permissions";
-import { invalidateSession, isUnauthenticated } from "@/lib/auth/session";
-import { getToken, setToken, subscribeToken } from "@/lib/auth/token-store";
+import {
+  invalidateSession,
+  isUnauthenticated,
+  subscribeSessionEvents,
+} from "@/lib/auth/session";
 import { shortId } from "@/lib/utils";
 
 import type { MeResponse, TokenResponse } from "./api-types";
@@ -55,26 +58,26 @@ export interface RegisterInput {
 }
 
 export interface AuthContextValue {
-  token: string | null;
   identity: Identity | null;
   status: AuthStatus;
   login: (username: string, password: string) => Promise<void>;
   register: (input: RegisterInput) => Promise<void>;
   logout: () => void;
   /**
-   * 刷新页面验活时**非 401** 失败的原因（网络断开 / 5xx / 403 非本区成员）。
+   * 首屏探活时**非 401** 失败的原因（网络断开 / 5xx / 403 非本区成员）。
    *
    * `status` 仍是 `"anonymous"`：前端不假装已登录。之所以要单独一个字段，
-   * 是因为页面需要区分"从没登录过"和"上次登录态这次没验成"——后者要提示用户
-   * 重新登录的原因（例如令牌所属工作区已失效）。401 不产生原因：那是正常未登录。
+   * 是因为页面需要区分「从没登录过」和「上次登录态这次没验成」——后者要提示用户
+   * 重新登录的原因。401 不产生原因：那是正常未登录。
    */
   sessionError: string | null;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-function requestMe(token: string): Promise<MeResponse> {
-  return apiRequest<MeResponse>(ME_ENDPOINT, { token });
+/** 探活。Cookie 会话下不带 `token`：后端从 HttpOnly Cookie 解身份。 */
+function requestMe(): Promise<MeResponse> {
+  return apiRequest<MeResponse>(ME_ENDPOINT);
 }
 
 /** `/auth/me` + 已知登录名 → `Identity`。`usernameHint` 为空时逐级兜底。 */
@@ -94,44 +97,42 @@ function buildIdentity(me: MeResponse, usernameHint: string | null): Identity {
   };
 }
 
-function readAccessToken(response: TokenResponse): string {
-  const accessToken = response.access_token.trim();
-  if (accessToken.length === 0) {
+/**
+ * 登录/注册响应体仍保留 `access_token`（命令行 / 评测脚本从响应体取令牌的兼容通道）。
+ * 但浏览器**不**把它存进本地存储：Cookie 已由后端在 201/200 响应里下发。
+ * 这里只做「响应体非空」的契约校验，值本身随即丢弃。
+ */
+function assertTokenResponse(response: TokenResponse): void {
+  if (response.access_token.trim().length === 0) {
     // 200 却没有令牌 = 契约被破坏。静默当成功会让后续每个请求都 401，不如当场炸给日志。
     throw new Error("登录响应缺少 access_token");
   }
-  return accessToken;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setTokenState] = useState<string | null>(null);
   const [identity, setIdentityState] = useState<Identity | null>(null);
   const [status, setStatusState] = useState<AuthStatus>("loading");
   const [sessionError, setSessionError] = useState<string | null>(null);
 
   /**
-   * 令牌到手后的统一收尾：先落盘再验活，`/auth/me` 成功才算登录完成。
+   * 登录/注册统一收尾：Cookie 已在后端响应里下发，这里只探活建身份。
    *
    * 为什么必须先验活：`TokenResponse` 不含权限，而 `AuthGuard`/`PermissionGate`
    * 全靠 `identity.permissions` 决定渲染什么。若先把 status 置成 authenticated 再拉
-   * `/me`，会出现"已登录但没有任何权限"的瞬间，所有按钮闪一下禁用态。
-   * 反之若 `/me` 失败，把刚落盘的令牌回滚掉并 rethrow——不留"有令牌无身份"的幽灵态。
+   * `/me`，会出现「已登录但没有任何权限」的瞬间，所有按钮闪一下禁用态。
    */
   const completeSignIn = useCallback(
     async (response: TokenResponse, submittedUsername: string): Promise<void> => {
-      const accessToken = readAccessToken(response);
+      assertTokenResponse(response);
       setStatusState("loading");
-      setToken(accessToken);
       cacheUsername(submittedUsername);
       try {
-        const me = await requestMe(accessToken);
-        setTokenState(accessToken);
+        const me = await requestMe();
         setIdentityState(buildIdentity(me, submittedUsername));
         setSessionError(null);
         setStatusState("authenticated");
       } catch (error: unknown) {
         invalidateSession();
-        setTokenState(null);
         setIdentityState(null);
         setStatusState("anonymous");
         throw error;
@@ -175,19 +176,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback((): void => {
-    // 后端没有 logout 端点（JWT 无状态），登出 = 丢令牌 + 清缓存。
+    // 幂等登出端点会撤销服务端会话家族；广播让所有标签页一起转 anonymous。
     invalidateSession();
-    setTokenState(null);
     setIdentityState(null);
     setSessionError(null);
     setStatusState("anonymous");
   }, []);
 
-  // 跨标签页 / 程序内登出：令牌一旦被清掉，身份立刻失效（不留着"已登录"的空壳）。
+  // 跨标签页：其它标签页登出 / 刷新失败时，本页立刻失效（不留「已登录」空壳）。
+  // 刷新成功（`refreshed`）不改动本页状态——它的 401 单飞已自行重放原请求。
   useEffect(() => {
-    return subscribeToken((next) => {
-      setTokenState(next);
-      if (next === null) {
+    return subscribeSessionEvents((kind) => {
+      if (kind === "invalidated") {
         setIdentityState(null);
         setSessionError(null);
         setStatusState("anonymous");
@@ -195,20 +195,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // 首屏：有令牌就先验活。401 → 清令牌转 anonymous，且**不重试**（重试只会再 401 一次）。
+  // 首屏**总是**探活一次：有会话 Cookie 就能验成，没有就 401 → anonymous。
+  // 不再读本地令牌，登录态唯一真值源是服务端 `/auth/me`。401 不重试。
   useEffect(() => {
     let cancelled = false;
-    const stored = getToken();
-    if (stored === null) {
-      setStatusState("anonymous");
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setTokenState(stored);
     setStatusState("loading");
-    requestMe(stored)
+    requestMe()
       .then((me) => {
         if (cancelled) return;
         setIdentityState(buildIdentity(me, readCachedUsername()));
@@ -218,14 +210,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .catch((error: unknown) => {
         if (cancelled) return;
         if (isUnauthenticated(error)) {
-          invalidateSession();
-          setTokenState(null);
+          // 401 是正常「未登录」。不调 invalidateSession()：那会向其它标签页广播
+          // 一次登出，而这里只是「本页没有会话」，不是「会话被作废」。
           setIdentityState(null);
+          setSessionError(null);
           setStatusState("anonymous");
           return;
         }
-        // 非 401：令牌**不删**（它可能仍然有效，只是这次没验成），但不假装已登录。
-        // 清掉的话，一次网络抖动就会把用户踢下线并把令牌弄丢，重连后还得重新输密码。
+        // 非 401：不假装已登录，但保留原因文案（网络抖动不把用户判成从未登录）。
         setIdentityState(null);
         setStatusState("anonymous");
         setSessionError(describeAuthError(error, "session"));
@@ -237,8 +229,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ token, identity, status, login, register, logout, sessionError }),
-    [token, identity, status, login, register, logout, sessionError],
+    () => ({ identity, status, login, register, logout, sessionError }),
+    [identity, status, login, register, logout, sessionError],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

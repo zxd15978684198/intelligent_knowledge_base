@@ -18,6 +18,9 @@ import { invalidateSession, isUnauthenticated } from "./session";
  * 兜底路径：identity 存在但 `permissions` 不是字符串数组（旧快照、外部注入的 identity、
  * 后端将来字段改名）时，本 hook 自己补拉一次 `/auth/me`。补拉失败**不重试**：
  * 401 → 清会话；其他错误 → 空权限（少显示入口，不白屏、不反复打接口）。
+ *
+ * Cookie 化之后没有「令牌」可判：是否该补拉由 `status === "authenticated"` 决定，
+ * 请求本身不带 token（身份在 HttpOnly Cookie 里）。
  */
 
 export interface PermissionsApi {
@@ -34,7 +37,7 @@ export interface PermissionsApi {
 const EMPTY: readonly string[] = [];
 
 export function usePermissions(): PermissionsApi {
-  const { identity, status, token } = useAuth();
+  const { identity, status } = useAuth();
 
   const fromIdentity = useMemo(
     () => normalizePermissions(identity?.permissions),
@@ -46,10 +49,11 @@ export function usePermissions(): PermissionsApi {
   useEffect(() => {
     // identity 里已经有可信权限列表 → 不请求。
     if (fromIdentity !== null) return;
-    if (token === null) return;
+    // 只有明确「已登录」才值得补拉；loading/anonymous 下补拉只会拿到 401。
+    if (status !== "authenticated") return;
 
     let active = true;
-    apiRequest<MeResponse>("/api/v1/auth/me", { token })
+    apiRequest<MeResponse>("/api/v1/auth/me")
       .then((me) => {
         if (!active) return;
         setFetched(normalizePermissions(me.permissions) ?? EMPTY);
@@ -63,7 +67,7 @@ export function usePermissions(): PermissionsApi {
     return () => {
       active = false;
     };
-  }, [fromIdentity, token]);
+  }, [fromIdentity, status]);
 
   const permissions = fromIdentity ?? fetched ?? EMPTY;
 

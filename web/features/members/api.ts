@@ -13,8 +13,9 @@ import type { MemberAdd, MemberPage, MembershipDetail } from "@/lib/contracts";
  * 4. 列表响应的键是 `members`，没有分页，**不含用户名/邮箱**（后端刻意只回 `user_id`，
  *    避免把成员列表变成撞库接口）。
  *
- * 认证：`apiRequest` 只在显式传入 `token` 时才加 `Authorization`（`web/lib/api/client.ts`），
- * 所以每个函数都要拿到 `useAuth().token` 往下传，否则真实浏览器一律 401。
+ * 认证：浏览器走会话 Cookie（`apiRequest` 省略 `token` 时带 credentials + CSRF 头），
+ * 因此页面不必再传身份。`MemberAuth.token` 只保留给命令行 / 评测 / 换账号的 Bearer
+ * 兼容通道：传字符串时由 `apiRequest` 加 `Authorization`，其余情况一律走 Cookie。
  */
 
 const WORKSPACES_PATH = "/api/v1/workspaces";

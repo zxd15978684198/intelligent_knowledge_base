@@ -45,19 +45,20 @@ export interface MemberMutationScope extends MemberAuth {
   readonly workspaceId?: MemberWorkspaceId;
 }
 
-function hasToken(token: string | null): token is string {
-  return token !== null && token.length > 0;
-}
-
-function isScopeReady(workspaceId: string | null, token: string | null): boolean {
-  return workspaceId !== null && hasToken(token);
+/**
+ * 工作区就绪判定。
+ *
+ * Cookie 化之后**不再要求 token**：身份在 HttpOnly Cookie 里、登录态由
+ * `AuthProvider.status` 决定，前端没有可读令牌可判。只要页面传了 workspaceId
+ * （`useAuth().identity.default_workspace_id`）就允许发请求；未登录时后端会 401，
+ * 由 `apiRequest` 的 401 单飞刷新 / 跳登录接管，不会像旧版那样「因为没 token 而永远空列表」。
+ */
+function isScopeReady(workspaceId: string | null): boolean {
+  return workspaceId !== null;
 }
 
 function scopeEnabled(scope: MemberQueryScope): boolean {
-  return (
-    (scope.enabled ?? true) &&
-    isScopeReady(scope.workspaceId ?? null, scope.token ?? null)
-  );
+  return (scope.enabled ?? true) && isScopeReady(scope.workspaceId ?? null);
 }
 
 /** 成员列表。鉴权/工作区未就绪时 disabled，页面用 `isPending` 显示骨架。 */

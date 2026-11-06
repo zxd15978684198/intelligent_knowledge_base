@@ -24,7 +24,7 @@ import type { RolePermissionView } from "@/features/members/api";
  * 短 UUID + 复制完整 ID。
  */
 export default function MembersPage() {
-  const { identity, token } = useAuth();
+  const { identity } = useAuth();
   const permissions = usePermissions();
 
   const workspaceId = identity?.default_workspace_id ?? null;
@@ -33,8 +33,8 @@ export default function MembersPage() {
 
   // 列表与角色目录都需要 workspace.manage_members（后端对两者都回 403）；
   // 没有权限时保持 disabled，避免把 403 渲染成"加载失败"。
-  const membersQuery = useMembers({ workspaceId, token, enabled: canManage });
-  const rolesQuery = useRoleCatalog({ workspaceId, token, enabled: canManage });
+  const membersQuery = useMembers({ workspaceId, enabled: canManage });
+  const rolesQuery = useRoleCatalog({ workspaceId, enabled: canManage });
 
   const members = membersQuery.data?.members ?? null;
   const roles = rolesQuery.data?.roles ?? null;
@@ -82,13 +82,13 @@ export default function MembersPage() {
             <div className="flex flex-wrap items-start gap-3">
               <MemberAddDialog
                 workspaceId={workspaceId}
-                token={token}
+                token={null}
                 roles={roles}
                 canManage={canManage}
               />
               <OwnerTransferDialog
                 workspaceId={workspaceId}
-                token={token}
+                token={null}
                 members={members ?? []}
                 currentUserId={currentUserId}
                 isOwner={isOwner}
@@ -114,7 +114,6 @@ export default function MembersPage() {
             }}
             roles={roles}
             workspaceId={workspaceId}
-            token={token}
             canManage={canManage}
             currentUserId={currentUserId}
           />
@@ -132,7 +131,6 @@ interface MemberListSectionProps {
   readonly onRetry: () => void;
   readonly roles: readonly RolePermissionView[] | null;
   readonly workspaceId: string | null;
-  readonly token: string | null;
   readonly canManage: boolean;
   readonly currentUserId: string | null;
 }
@@ -145,7 +143,6 @@ function MemberListSection({
   onRetry,
   roles,
   workspaceId,
-  token,
   canManage,
   currentUserId,
 }: MemberListSectionProps) {
@@ -192,7 +189,7 @@ function MemberListSection({
         members={members}
         roles={roles}
         workspaceId={workspaceId}
-        token={token}
+        token={null}
         canManage={canManage}
         currentUserId={currentUserId}
       />

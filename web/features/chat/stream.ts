@@ -4,6 +4,7 @@ import {
   NETWORK_ERROR_STATUS,
   resolveApiPath,
 } from "@/lib/api/client";
+import { readCsrfToken } from "@/lib/auth/session";
 import { errorEnvelopeSchema } from "@/lib/contracts";
 import { SseParseError, parseSseStream } from "@/lib/contracts/sse";
 
@@ -14,7 +15,8 @@ import { chatEventFromSse, type ChatEvent, type ChatStreamError } from "./events
  *
  * 这里**不走** `apiRequest()`：它统一按 JSON 解析响应体，而本接口返回
  * `text/event-stream`，用它会得到 `INVALID_RESPONSE`。所以只复用它导出的
- * `resolveApiPath` / 错误码常量，fetch 自己做。
+ * `resolveApiPath` / 错误码常量，fetch 自己做。凭据与 CSRF 头按会话模型自己补：
+ * `credentials: "include"` + 写方法 `X-CSRF-Token`（值来自可读 Cookie）。
  *
  * 三条必须先判、不能拖进流里的失败（建流前就能知道，后端也是这么做的）：
  * 1. `!response.ok` → 解析统一错误信封（后端 503 `DEPENDENCY_UNAVAILABLE`：
@@ -52,7 +54,7 @@ export interface StreamChatInput {
   readonly query: string;
   /** 取回并引用多少条片段；省略时用后端默认值。 */
   readonly topK?: number;
-  /** 访问令牌；`null` 表示匿名（后端会回 401 → 走建流前失败）。 */
+  /** Bearer 兼容通道（命令行 / 换账号）；省略时走会话 Cookie。 */
   readonly token?: string | null;
   /** 显式工作区；省略时后端按 token 里的默认工作区解析。 */
   readonly workspaceId?: string | null;
@@ -93,6 +95,12 @@ export async function streamChat(
   };
   if (input.token !== undefined && input.token !== null) {
     headers.Authorization = `Bearer ${input.token}`;
+  } else {
+    // Cookie 会话：POST 是写方法，必须补双提交 CSRF 头（后端对会话 Cookie 校验）。
+    const csrf = readCsrfToken();
+    if (csrf !== "") {
+      headers["X-CSRF-Token"] = csrf;
+    }
   }
   if (input.workspaceId !== undefined && input.workspaceId !== null && input.workspaceId !== "") {
     headers["X-Workspace-Id"] = input.workspaceId;
@@ -102,6 +110,7 @@ export async function streamChat(
   try {
     response = await fetch(resolveApiPath(`/knowledge-bases/${encodeURIComponent(input.kbId)}/chat`), {
       method: "POST",
+      credentials: "include",
       headers,
       body: JSON.stringify(body),
     });

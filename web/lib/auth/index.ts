@@ -4,16 +4,10 @@
  * 原因：`usePermissions`（`./use-permissions.ts`）依赖 `features/auth` 的
  * `useAuth`，属于客户端边界；把它塞进这个桶会让服务端组件 import `hasPermission`
  * 时顺带拉进客户端模块图。客户端侧请从 `@/features/auth` 取 `usePermissions`。
+ *
+ * 会话模型（Cookie 化之后）：本桶不再导出任何令牌存取函数——访问/刷新令牌在
+ * HttpOnly Cookie 里，前端读不到。会话事件、CSRF 值读取、失效统一走 `./session`。
  */
-
-export {
-  TOKEN_STORAGE_KEY,
-  clearToken,
-  getToken,
-  setToken,
-  subscribeToken,
-  type TokenListener,
-} from "./token-store";
 
 export {
   USERNAME_STORAGE_KEY,
@@ -22,7 +16,14 @@ export {
   readCachedUsername,
 } from "./identity-cache";
 
-export { invalidateSession, isUnauthenticated } from "./session";
+export {
+  invalidateSession,
+  isUnauthenticated,
+  postSession,
+  readCsrfToken,
+  subscribeSessionEvents,
+  type SessionEvent,
+} from "./session";
 
 export {
   ALL_PERMISSIONS,

@@ -6,7 +6,8 @@
  * 当成客户端导出，服务端组件引用时会出问题。
  *
  * 稳定面（改了要通知依赖方）：
- * - `useAuth` 的返回形状（token / identity / status / login / register / logout，另有 sessionError）
+ * - `useAuth` 的返回形状（identity / status / login / register / logout，另有 sessionError）
+ *   ——不再有 token：会话凭据在 HttpOnly Cookie 里，登录态由 status 唯一表达。
  * - `Identity` 的字段（principal_id / username / default_workspace_id / permissions + display_name / role）
  * - `PermissionGate` / `DisabledReason` / `usePermissions` 的 props 与返回值
  */
