@@ -102,11 +102,12 @@ PAYLOAD = json.loads(
 STAGES = PAYLOAD["stages"]
 PROJECT_NAME = PAYLOAD["projectName"]
 
-# security 单独定义、**不进 `all`**：pip-audit 要联网比对 OSV，结论随远端漏洞库变化，
-# 挂到 pre-commit 上等于让网络抖动决定能不能提交。显式 `--stage security`，由人工/CI 跑。
-SECURITY_STAGE = {
-    "id": "security",
-    "title": "Security audit",
+# IR 把「密钥扫描」放在 security、「依赖漏洞」放在 audit（可选阶段）。旧版我把 pip-audit
+# 叫成 security，只是名字错位；这里按 IR 归位。pip-audit 仍是可选阶段：它要联网比对 OSV，
+# 结论随远端漏洞库变化，放进默认门禁等于让网络抖动决定能不能提交。
+AUDIT_STAGE = {
+    "id": "audit",
+    "title": "Dependency audit",
     "why": (
         "pip-audit checks the resolved dependency set against OSV. It runs outside the commit "
         "gate because it is the slowest check and the only one whose answer depends on a "
@@ -124,7 +125,355 @@ SECURITY_STAGE = {
     ],
 }
 
-ALL_STAGES = [*STAGES, SECURITY_STAGE]
+LOCK_STAGE = {
+    "id": "lock",
+    "title": "Lock check",
+    "why": (
+        "`uv lock --check` proves uv.lock still matches pyproject.toml. Without it a stale lock "
+        "file is only discovered later, as an install that quietly resolves something else."
+    ),
+    "steps": [
+        {
+            "id": "lock-check",
+            "label": "uv lock --check",
+            "argv": ["uv", "lock", "--check"],
+            "run": "uv lock --check",
+            # 与 build 同一坑：stdout 是管道时 uv 初始化 `D:\uv-cache` 会
+            # "拒绝访问 (os error 5)"，把缓存与临时目录钉在仓库内。
+            "env": {
+                "UV_CACHE_DIR": "{base}/uv-cache",
+                "TMP": "{base}/tmp",
+                "TEMP": "{base}/tmp",
+            },
+            "timeoutSeconds": 300,
+            "always": False,
+        }
+    ],
+}
+
+SYNC_STAGE = {
+    "id": "sync",
+    "title": "Sync",
+    "why": (
+        "Syncs the environment from the lock file before anything is measured. It is the stage "
+        "that turns 'it fails on my machine' into 'it fails in a known environment'. Deviation "
+        "from the IR: this project keeps the heavy embedder in the `local-embed` extra, so the "
+        "gate syncs `--extra dev` instead of `--all-extras`."
+    ),
+    "steps": [
+        {
+            "id": "uv-sync",
+            "label": "uv sync --locked --extra dev",
+            "argv": ["uv", "sync", "--locked", "--extra", "dev"],
+            "run": "uv sync --locked --extra dev",
+            # 与 build 同一坑：stdout 是管道时 uv 初始化 `D:\uv-cache` 会
+            # "拒绝访问 (os error 5)"，把缓存与临时目录钉在仓库内。
+            "env": {
+                "UV_CACHE_DIR": "{base}/uv-cache",
+                "TMP": "{base}/tmp",
+                "TEMP": "{base}/tmp",
+            },
+            "timeoutSeconds": 900,
+            "always": False,
+        }
+    ],
+}
+
+TYPE_STAGE = {
+    "id": "type",
+    "title": "Type check",
+    "advisory": True,
+    "why": (
+        "ty checks the source tree against the annotations this project already writes. It runs "
+        "outside the commit gate because it needs the dev extra and is slower than ruff. "
+        "Advisory today: `ty check src` reports 31 diagnostics (Result.rowcount, "
+        "Request[State] defaults, `aclose` on AsyncIterator, one invalid return annotation) "
+        "-- known and tracked, not silently passed. Deviation from the IR, which hardcodes "
+        "mypy: this project's type checker is ty."
+    ),
+    "steps": [
+        {
+            "id": "ty",
+            "label": "ty check src",
+            "argv": ["uv", "run", "ty", "check", "src"],
+            "run": "uv run ty check src",
+            "timeoutSeconds": 900,
+            "always": False,
+        }
+    ],
+}
+
+SECURITY_STAGE = {
+    "id": "security",
+    "title": "Secret scan",
+    "advisory": True,
+    "why": (
+        "detect-secrets over every tracked file. Advisory (`--report-only`): this repo's dev DSNs, "
+        "test placeholder keys and doc examples trip the hook at ~40 sites, and `detect-secrets "
+        "scan` cannot reproduce the hook's verdict here, so a blocking gate would be permanently "
+        "red and teach everyone to ignore gates. To make it blocking: add "
+        "`# pragma: allowlist secret` per site, or rebuild the baseline on a host where both "
+        "commands agree."
+    ),
+    "steps": [
+        {
+            "id": "secret-scan",
+            "label": "secret_scan.py",
+            "argv": ["uv", "run", "python", "scripts/secret_scan.py", "--report-only"],
+            "run": "uv run python scripts/secret_scan.py --report-only",
+            "timeoutSeconds": 900,
+            "always": False,
+        }
+    ],
+}
+
+MANIFEST_STAGE = {
+    "id": "manifest",
+    "title": "Version manifest",
+    "why": (
+        "Validates release/agent_versions.json against the components that actually shipped. A "
+        "check, never a generator: version numbers and hashes are a human decision."
+    ),
+    "steps": [
+        {
+            "id": "version-manifest",
+            "label": "validate_version_manifest.py",
+            "argv": ["uv", "run", "python", "scripts/validate_version_manifest.py"],
+            "run": "uv run python scripts/validate_version_manifest.py",
+            # 清单记的是「已发布版本」，只有真发过版才有这个文件。缺文件 = 未配置，
+            # 既不是通过也不是失败；靠 skipIfMissing 打 SKIP，别让门禁假装绿。
+            "skipIfMissing": "release/agent_versions.json",
+            "timeoutSeconds": 900,
+            "always": False,
+        }
+    ],
+}
+
+BUILD_STAGE = {
+    "id": "build",
+    "title": "Build distributions",
+    "why": (
+        "`uv build` is the packaging check: it proves the sdist and wheel build from what is committed, "
+        "which tests run from a source checkout never do. It runs before the integration stage so a "
+        "release reuses exactly this `dist/`. The clean step is not hygiene theatre — a stale wheel "
+        "left in `dist/` is what a later upload or release step would ship when this build fails."
+    ),
+    "steps": [
+        {
+            "id": "clean-dist",
+            "label": "clear dist/",
+            "argv": [
+                "uv",
+                "run",
+                "python",
+                "-c",
+                "import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)",
+                "dist",
+            ],
+            "run": (
+                "uv run python -c "
+                "'import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' dist"
+            ),
+            "timeoutSeconds": 120,
+            "always": False,
+        },
+        {
+            "id": "uv-build",
+            "label": "uv build --out-dir dist",
+            "argv": ["uv", "build", "--out-dir", "dist"],
+            "run": "uv build --out-dir dist",
+            # See `_step_env`: on this host `uv build` cannot write its build
+            # environment when stdout is a pipe, so both dirs are pinned locally.
+            "env": {"UV_CACHE_DIR": "{base}/uv-cache", "TMP": "{base}/tmp", "TEMP": "{base}/tmp"},
+            "timeoutSeconds": 900,
+            "always": False,
+        },
+    ],
+}
+
+INTEGRATION_STAGE = {
+    "id": "integration",
+    "title": "Integration tests (real PostgreSQL)",
+    "why": (
+        "The 218 cases that touch a real database. They are excluded from `all` because they need "
+        "a live PostgreSQL with pgvector, and because TRUNCATE needs ACCESS EXCLUSIVE: a running "
+        "worker will deadlock against them."
+    ),
+    "steps": [
+        {
+            "id": "pytest-integration",
+            "label": "pytest tests/integration tests/api",
+            "argv": ["uv", "run", "pytest", "-q", "tests/integration", "tests/api"],
+            "run": "uv run pytest -q tests/integration tests/api",
+            "timeoutSeconds": 1800,
+            "always": False,
+        }
+    ],
+}
+
+# 容器阶段按「便宜的先跑」排序，任一失败即停：config 0.5s → build --check 1s →
+# up --wait 几十秒 → ps -a 0.2s → 镜像体检 0.2s。理由见 python-ci-container 技能文档。
+CONTAINER_STAGE = {
+    "id": "container",
+    "title": "Container validation",
+    "why": (
+        "Five gates in cost order: compose file is a valid composition, the Dockerfile is valid "
+        "to the builder, the declared health conditions are reached, the observed end state is "
+        "readable, and the image is not running as root."
+    ),
+    "steps": [
+        {
+            "id": "compose-config",
+            "label": "docker compose config --quiet",
+            "argv": ["docker", "compose", "config", "--quiet"],
+            "run": "docker compose config --quiet",
+            "timeoutSeconds": 120,
+            "always": False,
+        },
+        {
+            "id": "dockerfile-check",
+            "label": "docker build --check .",
+            "argv": ["docker", "build", "--check", "."],
+            "run": "docker build --check .",
+            "timeoutSeconds": 300,
+            "always": False,
+        },
+        {
+            "id": "compose-build",
+            "label": "docker compose build",
+            "argv": ["docker", "compose", "build"],
+            "run": "docker compose build",
+            "timeoutSeconds": 1800,
+            "always": False,
+        },
+        {
+            "id": "compose-up",
+            "label": "docker compose up --build --wait",
+            "argv": ["docker", "compose", "up", "--build", "--wait"],
+            "run": "docker compose up --build --wait",
+            "timeoutSeconds": 1800,
+            "always": False,
+        },
+        {
+            "id": "compose-ps",
+            "label": "docker compose ps -a",
+            "argv": ["docker", "compose", "ps", "-a"],
+            "run": "docker compose ps -a",
+            "timeoutSeconds": 120,
+            "always": True,
+        },
+        {
+            "id": "container-report",
+            "label": "container_report.py",
+            "argv": ["uv", "run", "python", "scripts/container_report.py"],
+            "run": "uv run python scripts/container_report.py",
+            "timeoutSeconds": 300,
+            "always": True,
+        },
+        {
+            # IR 还有第 8 步 `docker compose down -v`。`-v` 会删命名卷——本仓库那个卷里是
+            # 用户的语料，本地门禁不该有这种副作用。所以只 down 不 down -v，且用 always
+            # 保证失败时也收拾干净。
+            "id": "compose-down",
+            "label": "docker compose down",
+            "argv": ["docker", "compose", "down"],
+            "run": "docker compose down",
+            "timeoutSeconds": 300,
+            "always": True,
+        },
+    ],
+}
+
+RELEASE_STAGE = {
+    "id": "release",
+    "title": "Release",
+    "why": (
+        "Tag-gated publishing: build once, attest the artifacts, publish. It exists in the IR so "
+        "the pipeline shape is visible; locally it is a SKIP because it needs a `v*` tag and a "
+        "GitHub token. The real implementation lives in .github/workflows/ci.yml."
+    ),
+    "steps": [
+        {
+            "id": "release-gh",
+            "label": "gh release create <tag> dist/*",
+            "argv": ["gh", "release", "create", "--generate-notes", "--verify-tag"],
+            "run": "gh release create ${{ github.ref_name }} dist/* --generate-notes --verify-tag",
+            "timeoutSeconds": 300,
+            "ciOnly": "需要 v* tag 与 GitHub 凭据，只在 CI 的 release job 里跑",
+            "always": False,
+        }
+    ],
+}
+
+DEPLOY_STAGE = {
+    "id": "deploy",
+    "title": "Deploy",
+    "why": (
+        "Runs only after a release exists: verify the release assets, then probe the deployed "
+        "health URL. Locally it is a SKIP because there is no deploy target to probe."
+    ),
+    "steps": [
+        {
+            "id": "deploy-smoke",
+            "label": "curl -fsS $DEPLOY_HEALTH_URL",
+            "argv": ["curl", "-fsS", "--retry", "5", "--retry-delay", "3"],
+            "run": "curl -fsS --retry 5 --retry-delay 3 ${{ vars.DEPLOY_HEALTH_URL }}",
+            "timeoutSeconds": 120,
+            "ciOnly": "需要已部署的目标地址（vars.DEPLOY_HEALTH_URL）",
+            "always": False,
+        }
+    ],
+}
+
+# IR 的 13 阶段顺序（ir.js 的 STAGE_IDS）。本地按同一顺序暴露，
+# 否则「本地绿、CI 红」只是被顺序藏起来的差异。
+STAGE_ORDER = [
+    "lock",
+    "sync",
+    "lint",
+    "type",
+    "manifest",
+    "test",
+    "security",
+    "build",
+    "integration",
+    "audit",
+    "container",
+    "release",
+    "deploy",
+]
+
+# IR 的 DEFAULT_STAGE_IDS：插件面板里勾选的前八步就是这条推送流水线。
+DEFAULT_STAGE_IDS = ["lock", "sync", "lint", "type", "manifest", "test", "security", "build"]
+
+# IR 的 COMMIT_STAGE_IDS：提交钩子只跑这三步，快是它唯一的设计目标。
+COMMIT_STAGE_IDS = ["lock", "lint", "manifest"]
+
+PROFILES: dict[str, list[str]] = {
+    "commit": COMMIT_STAGE_IDS,
+    "default": DEFAULT_STAGE_IDS,
+    "full": STAGE_ORDER,
+}
+
+_BY_ID = {
+    stage["id"]: stage
+    for stage in (
+        LOCK_STAGE,
+        SYNC_STAGE,
+        *STAGES,
+        TYPE_STAGE,
+        MANIFEST_STAGE,
+        SECURITY_STAGE,
+        BUILD_STAGE,
+        INTEGRATION_STAGE,
+        AUDIT_STAGE,
+        CONTAINER_STAGE,
+        RELEASE_STAGE,
+        DEPLOY_STAGE,
+    )
+}
+
+ALL_STAGES = [_BY_ID[stage_id] for stage_id in STAGE_ORDER]
 
 
 def _utf8_stdio() -> None:
@@ -138,17 +487,21 @@ def _utf8_stdio() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
 
 
-def _select(stage_arg: str) -> list[dict]:
+def _select(stage_arg: str, profile: str = "") -> list[dict]:
     wanted: list[str] = []
-    for part in stage_arg.split(","):
-        name = part.strip().lower()
-        if not name:
-            continue
-        if name == "all":
-            # `all` 只扩到提交门禁里的阶段；security 必须显式点名。
-            wanted.extend(stage["id"] for stage in STAGES)
-            continue
-        wanted.append(name)
+    if profile:
+        wanted.extend(PROFILES[profile])
+    else:
+        for part in stage_arg.split(","):
+            name = part.strip().lower()
+            if not name:
+                continue
+            if name == "all":
+                # `all` = IR 的 DEFAULT（勾选的前八步），不是 lint+test 那个历史别名。
+                # 要跑全部 13 个阶段用 `--profile full`。
+                wanted.extend(DEFAULT_STAGE_IDS)
+                continue
+            wanted.append(name)
     by_id = {stage["id"]: stage for stage in ALL_STAGES}
     unknown = [name for name in wanted if name not in by_id]
     if unknown:
@@ -194,11 +547,57 @@ def _resolve_argv(argv: list[str], root: str) -> list[str]:
     return list(argv)
 
 
-def _run_step(step: dict, root: str, timeout: float) -> tuple[bool, float, int]:
+def _step_env(step: dict, root: str) -> dict[str, str] | None:
+    """Build the child env, or None to inherit.
+
+    Some steps need their own cache and temp dirs: `uv build` creates a build
+    environment, and on this host those writes fail with "拒绝访问 (os error 5)"
+    when uv's output is a pipe (the .git marker under `D:\\uv-cache\\sdists-v9`, or
+    the %TEMP% dir under `--no-cache`). Interactive `uv build` works, so it is a
+    host quirk, not a project defect — pin both dirs inside the workspace and the
+    step behaves the same in a shell and under a gate.
+    """
+    overrides = step.get("env")
+    if not overrides:
+        return None
+    base = os.path.join(root, ".tmp_ref")
+    mapping = {"{root}": root, "{base}": base}
+    env = dict(os.environ)
+    for key, value in overrides.items():
+        for token, replacement in mapping.items():
+            value = value.replace(token, replacement)
+        target = os.path.join(root, value) if not os.path.isabs(value) else value
+        os.makedirs(target, exist_ok=True)
+        env[key] = target
+    return env
+
+
+def _run_step(step: dict, root: str, timeout: float) -> tuple[str, float, int]:
+    """Run one step and classify it: ok / fail / warn / skip.
+
+    Four states, because "green" and "red" cannot express the two things that
+    actually happen in this repo:
+    - `advisory`: the step is known-red for a documented reason; it prints its
+      findings and must not block the gate (a permanently red gate teaches people
+      to ignore gates).
+    - `skipIfMissing`: the step needs a file that only exists after a real
+      release; missing file is "not configured", which is neither pass nor fail.
+    """
+    if step.get("ciOnly"):
+        print(f"\n==> {step['label']}\n    SKIP: 只在 CI 跑（{step['ciOnly']}）", flush=True)
+        return "skip", 0.0, 0
+    missing = step.get("skipIfMissing")
+    if missing and not os.path.exists(os.path.join(root, missing)):
+        print(
+            f"\n==> {step['label']}\n    SKIP: {missing} 不存在 —— 未配置，不是通过",
+            flush=True,
+        )
+        return "skip", 0.0, 0
     argv = _resolve_argv(step["argv"], root)
     shown = step["run"] if argv == list(step["argv"]) else subprocess.list2cmdline(argv)
     print(f"\n==> {step['label']}\n    $ {shown}", flush=True)
     started = time.monotonic()
+    child_env = _step_env(step, root)
     try:
         completed = subprocess.run(
             argv,
@@ -209,6 +608,7 @@ def _run_step(step: dict, root: str, timeout: float) -> tuple[bool, float, int]:
             encoding="utf-8",
             errors="replace",
             shell=False,
+            env=child_env,
         )
         code = completed.returncode
     except FileNotFoundError:
@@ -219,7 +619,12 @@ def _run_step(step: dict, root: str, timeout: float) -> tuple[bool, float, int]:
         code = 124
     elapsed = time.monotonic() - started
     print(f"    -> exit {code} in {elapsed:.1f}s", flush=True)
-    return code == 0, elapsed, code
+    if code == 0:
+        return "ok", elapsed, code
+    if step.get("advisory"):
+        print(f"    WARN: exit {code}（advisory，只报不拦）", flush=True)
+        return "warn", elapsed, code
+    return "fail", elapsed, code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -228,7 +633,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--stage",
         default="all",
-        help="all (lint,test), or a comma list; security must be named explicitly",
+        help=(
+            "all = the 8-stage push pipeline (lock,sync,lint,type,manifest,test,security,build), "
+            "or a comma list of ids. Use --profile full for all 13."
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        default="",
+        choices=["", *PROFILES],
+        help=(
+            "commit = lock,lint,manifest (hook); default = the 8-stage push pipeline; "
+            "full = all 13 stages (integration/audit/container included, release/deploy SKIP)"
+        ),
     )
     parser.add_argument(
         "--root", default=".", help="project root to run in (default: this directory)"
@@ -241,7 +658,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="machine-readable result on stdout")
     args = parser.parse_args(argv)
 
-    stages = _select(args.stage)
+    stages = _select(args.stage, args.profile)
     if args.list:
         _print_plan(stages)
         return 0
@@ -260,19 +677,25 @@ def main(argv: list[str] | None = None) -> int:
         for step in stage["steps"]:
             if not stage_ok and not step.get("always"):
                 continue
+            if stage.get("advisory"):
+                # advisory 是阶段级声明（type：31 条已知诊断；security：报告式扫描），
+                # 但拦截判定在 step 粒度发生，所以下发一次。
+                step = {**step, "advisory": True}
             timeout = args.timeout if args.timeout > 0 else float(step.get("timeoutSeconds", 900))
-            ok, elapsed, code = _run_step(step, root, timeout)
+            status, elapsed, code = _run_step(step, root, timeout)
             total += elapsed
             results.append(
                 {
                     "stage": stage["id"],
                     "step": step["id"],
-                    "ok": ok,
+                    "status": status,
                     "code": code,
                     "seconds": round(elapsed, 1),
                 }
             )
-            if not ok:
+            # 只有 fail 阻断。warn（advisory 的已知红）与 skip（未配置 / 只在 CI）
+            # 都不改 exit code —— 但它们也不是 PASS，summary 里各自有独立标记。
+            if status == "fail":
                 stage_ok = False
                 failed = True
                 overall = overall or (code or 1)
@@ -280,12 +703,26 @@ def main(argv: list[str] | None = None) -> int:
             break
 
     print("\n--- summary ---")
+    marks = {"ok": "PASS", "fail": "FAIL", "warn": "WARN", "skip": "SKIP"}
+    counts = {"ok": 0, "fail": 0, "warn": 0, "skip": 0}
     for item in results:
-        mark = "PASS" if item["ok"] else "FAIL"
-        print(f"{mark}  {item['stage']}/{item['step']}  {item['seconds']}s")
-    print(f"total {total:.1f}s")
+        counts[item["status"]] += 1
+        print(f"{marks[item['status']]}  {item['stage']}/{item['step']}  {item['seconds']}s")
+    print(
+        f"total {total:.1f}s  (pass {counts['ok']}, fail {counts['fail']}, "
+        f"warn {counts['warn']}, skip {counts['skip']})"
+    )
     if args.json:
-        print(json.dumps({"ok": overall == 0, "results": results, "seconds": round(total, 1)}))
+        print(
+            json.dumps(
+                {
+                    "ok": overall == 0,
+                    "counts": counts,
+                    "results": results,
+                    "seconds": round(total, 1),
+                }
+            )
+        )
     return overall
 
 

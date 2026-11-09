@@ -1,24 +1,31 @@
 # PyKnora CI —— GitHub Actions
 #
 # 设计取舍（与本地门禁 `scripts/ci.py` 对齐，但不照搬）：
-#   1. lint / unit 两个 job 并行，先给最快反馈；integration 依赖 unit 通过后才起 PG，
+#   1. lint / unit / secrets 三个 job 并行，先给最快反馈；integration 依赖 unit 通过后才起 PG，
 #      否则白烧 3 分钟装库；
-#   2. integration 用 service container 起 pgvector，**真跑 SQL 与外键断言**——
+#   2. integration 用 service container 起 pgvector，**真跑全部迁移 + 外键断言**——
 #      这是本地 pre-commit 故意不跑的部分（见 AGENTS.md §6.1）；
 #   3. security 独立 job：pip-audit 要联网、结果随 OSV 变化，不该卡提交，
-#      也不该让它的网络抖动把 PR 判红——
-#   4. 不跑 pre-commit 钩子套件（prek 会 stash 未暂存改动，在 CI 里没有意义）。
+#      也不该让它的网络抖动把 PR 判红；
+#   4. docker job 只验"镜像与编排定义是自洽的、能构建"，不跑 `up`（要下 torch 与模型，太重）；
+#   5. release job 只在 tag 上触发，产物带 attestation；PyPI/registry 的推送**故意留注释**，
+#      发布目标属于团队决策，不在脚手架里替人猜；
+#   6. 不跑 pre-commit 钩子套件（prek 会 stash 未暂存改动，在 CI 里没有意义）。
 #
 # 与本地门禁的对应关系：
-#   本地 `uv run python scripts/ci.py --stage all`      ≈ lint + unit
-#   本地 `uv run python scripts/ci.py --stage security` ≈ security
-#   本地 `uv run pytest -q tests/integration tests/api` ≈ integration（需真 PG）
+#   本地 `uv run python scripts/ci.py --stage all`            ≈ lint + unit
+#   本地 `uv run python scripts/ci.py --stage security`       ≈ security
+#   本地 `uv run python scripts/ci.py --stage secrets`        ≈ secrets
+#   本地 `uv run python scripts/ci.py --stage integration`    ≈ integration（需真 PG）
+#   本地 `uv run python scripts/ci.py --stage container`      ≈ docker（需 Docker）
+#   `type`（ty check）目前**故意不进 CI**：真实诊断 31 条，先清再接。
 
 name: CI
 
 on:
   push:
     branches: [master, main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -46,6 +53,9 @@ jobs:
           enable-cache: true
           python-version: "3.12"
 
+      - name: Verify lock file matches pyproject
+        run: uv lock --check
+
       - name: Install dependencies
         run: uv sync --frozen --extra dev
 
@@ -56,6 +66,12 @@ jobs:
 
       - name: ruff format --check
         run: uv run ruff format --check .
+
+      # CI 侧语法检查：workflow 自己写错时，别等到都跑完了才发现。
+      - name: actionlint (workflow syntax)
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
 
   unit:
     name: Unit tests (no database)
@@ -73,9 +89,51 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --extra dev
 
-      # 27 个用例，不需要数据库；覆盖率门槛暂不设（见 AGENTS.md §6）。
-      - name: pytest
-        run: uv run pytest -q tests/unit
+      # 覆盖率门槛 70%：2026-11-03 实测 `tests/unit` 对 `src/pyknora` 是 74%。
+      # 门槛低于实测是刻意的——它是防"删测试换绿灯"的底线，不是质量 KPI；
+      # 想提高就提这个数字，别用 --cov-omit 把难测的模块排除掉。
+      - name: pytest + coverage
+        run: |
+          mkdir -p reports
+          uv run pytest -q tests/unit \
+            --cov=pyknora --cov-report=term-missing --cov-report=xml \
+            --cov-fail-under=70 \
+            --junitxml=reports/unit-junit.xml
+
+      # 失败时的现场比"看日志"值钱：junit 有逐用例耗时与断言原文，
+      # coverage.xml 能看出是"没测到"还是"测了但挂了"。
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-reports
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7
+
+  security:
+    name: Secret scan (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # 与本地同一个入口：scripts/secret_scan.py 比对 .secrets.baseline。
+      # **advisory（--report-only）**：本仓库的开发 DSN、测试占位 key、文档示例会在
+      # 约 40 处命中，而 `detect-secrets scan` 在本机复现不出 hook 的口径、
+      # 生成不出 hook 认的 baseline。先让它可见而不阻断；要阻断就逐处加
+      # `# pragma: allowlist secret`（见 docs/部署与回滚.md §3）。
+      - name: secret scan (advisory)
+        run: uv run python scripts/secret_scan.py --report-only
 
   integration:
     name: Integration tests (pgvector)
@@ -117,29 +175,51 @@ jobs:
 
       # migrations/*.sql 是 psql 脚本（`\set` 与 `:dim`），不是纯 SQL：
       # 必须用 psql 客户端 + `-v dim=512` 喂，不能用 asyncpg 直接执行。
-      # ubuntu-latest 自带 psql，不额外装。
-      - name: Apply schema
+      # 按文件名顺序全量执行——只跑 0001 会让后面 13 个迁移（含视图、RLS、游标列）
+      # 在 CI 里完全没被验证过。
+      - name: Apply all migrations
         run: |
-          psql "$PYKNORA_PSQL_URL" -v dim=512 -v ON_ERROR_STOP=1 -f migrations/0001_init.sql
+          set -euo pipefail
+          shopt -s nullglob
+          files=(migrations/*.sql)
+          echo "migrations: ${#files[@]}"
+          for f in "${files[@]}"; do
+            echo "==> $f"
+            psql "$PYKNORA_PSQL_URL" -v ON_ERROR_STOP=1 -v dim=512 -f "$f" >/dev/null
+          done
 
       # 防"文档说有关联、库里没有"：复合外键必须真的在。
-      - name: Assert composite foreign keys
+      # 期望值不写死，直接数迁移文件里的 FOREIGN KEY 声明（排除注释行）——
+      # 写死 7 时后面 13 个迁移的外键就从没被断言过。
+      - name: Assert foreign keys match migrations
         run: |
-          count=$(psql "$PYKNORA_PSQL_URL" -tAc "SELECT count(*) FROM pg_constraint WHERE contype = 'f'")
-          echo "foreign keys in schema: $count"
-          if [ "$count" -ne 7 ]; then
-            echo "::error::期望 7 条外键（见 docs/plans/全员模块实现路径.md §4.3），实际 $count 条"
+          set -euo pipefail
+          expected=$(grep -h 'FOREIGN KEY' migrations/*.sql | grep -v -E '^[[:space:]]*--' | wc -l)
+          actual=$(psql "$PYKNORA_PSQL_URL" -tAc "SELECT count(*) FROM pg_constraint WHERE contype = 'f'")
+          echo "foreign keys: migrations=$expected database=$actual"
+          if [ "$expected" -ne "$actual" ]; then
+            echo "::error::外键数与 migrations 声明不一致（migrations=$expected db=$actual）"
             psql "$PYKNORA_PSQL_URL" -c "\d documents"
             exit 1
           fi
 
-      # tests/api 与 tests/integration 都连真库：前者 34 个 HTTP 层用例，后者 24 个。
-      # tests/contract 尚未建（空目录），等 C1–C3 落地后加进来。
+      # tests/api 与 tests/integration 都连真库。
       - name: pytest (integration + api)
-        run: uv run pytest -q tests/integration tests/api
+        run: |
+          mkdir -p reports
+          uv run pytest -q tests/integration tests/api --junitxml=reports/integration-junit.xml
 
-  security:
-    name: Security audit (pip-audit)
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-reports
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7
+
+  audit:
+    name: Dependency audit (pip-audit)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -159,10 +239,151 @@ jobs:
       - name: pip-audit
         run: uv run --with pip-audit pip-audit --progress-spinner off
 
-      # 硬编码密钥：报告式（有命中也 exit 0），失败与否由人看输出判断。
-      # 要变成门禁，得先提交 .secrets.baseline 再上 detect-secrets-hook——团队策略，别偷偷加。
-      - name: detect-secrets (report only)
+  docker:
+    name: Docker (compose + image build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1) 编排定义自洽：语法、变量插值、依赖条件都在这一步暴露，不用等构建
+      - name: docker compose config
+        run: docker compose config --quiet
+
+      # 2) Dockerfile 静态检查（不执行构建，秒级）
+      - name: docker build --check (api)
+        run: docker build --check .
+
+      - name: docker build --check (web)
+        run: docker build --check ./web
+
+      # 3) 真构建，但**不带 local-embed**：torch 一层就几百 MB，
+      #    PR 上没必要每次烤一遍；容器里只用远端 embedding 时的路径也要能构建。
+      - name: Build api image (no local-embed)
+        run: docker build --build-arg INSTALL_LOCAL_EMBED=false -t pyknora-api:ci .
+
+      - name: Build web image (standalone)
+        run: docker build --build-arg API_PROXY_TARGET=http://api:8010 -t pyknora-web:ci ./web
+
+      # 4) 镜像体检：非 root 与体积上限。report 模式（默认）不阻断，
+      #    要变成门禁就在 pyproject 里加 [tool.gatekeeper.image] max_size_mb。
+      - name: Container report
+        run: uv run python scripts/container_report.py pyknora-api:ci
+
+  build:
+    name: Package (sdist + wheel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [lint]
+    # 构建产物是这条流水线的公共产物：release 直接下载它，不重复 build ——
+    # 两次构建会产出两个哈希不同的 wheel，attestation 与 Release 就对不上。
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # 先清空 dist/：构建失败时若还留着旧 wheel，后面的上传/发布就会把它发出去。
+      - name: Clear dist/
+        run: uv run python -c "import shutil; shutil.rmtree('dist', ignore_errors=True)"
+
+      - name: Build sdist + wheel
+        run: uv build --out-dir dist
+
+      - name: Verify dist contents
         run: |
-          uv run --with detect-secrets detect-secrets scan --no-verify \
-            src scripts migrations tests > /tmp/secrets.json
-          uv run python -c "import json,sys; r=json.load(open('/tmp/secrets.json'))['results']; n=sum(len(v) for v in r.values()); print(f'detect-secrets hits: {n}'); [print(f'  {p}:{i.get(\"line_number\")} {i.get(\"type\")}') for p,v in r.items() for i in v]; sys.exit(0)"
+          set -euo pipefail
+          ls -l dist/
+          test -n "$(ls dist/*.whl)" || { echo "::error::没有 wheel"; exit 1; }
+          test -n "$(ls dist/*.tar.gz)" || { echo "::error::没有 sdist"; exit 1; }
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Release (tag only)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [unit, integration, lint, build]
+    # 发布要写：创建 Release 与 attestation 都需要写权限；其余 job 只有 read。
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      # persist-credentials: false —— 后续步骤不需要用这个 token 推代码
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # 版本一致性：tag 与 pyproject 的 version 必须对得上（scripts/validate_version_manifest.py 只校验清单）
+      - name: Check tag matches pyproject version
+        run: |
+          set -euo pipefail
+          version=$(uv run python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          echo "pyproject=$version tag=$tag"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 与 pyproject version $version 不一致"
+            exit 1
+          fi
+
+      # 复用 build job 的产物：一次构建、一个哈希，attestation 与 Release 指向同一份字节。
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      # 创建 Release（带 --verify-tag：tag 不存在就报错，不偷偷建）
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+
+      # --- 下面两步故意留注释：发布到 PyPI 还是私有索引、镜像推哪个 registry，
+      #     属于团队决策，脚手架不替人猜。
+      #
+      # - name: Publish to PyPI
+      #   run: uv publish --token ${{ secrets.PYPI_TOKEN }}
+      #
+      # - name: Push image to registry
+      #   run: |
+      #     echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${{ secrets.REGISTRY_HOST }}" -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+      #     docker tag pyknora-api:ci "${{ secrets.REGISTRY_HOST }}/pyknora-api:${GITHUB_REF_NAME}"
+      #     docker push "${{ secrets.REGISTRY_HOST }}/pyknora-api:${GITHUB_REF_NAME}"

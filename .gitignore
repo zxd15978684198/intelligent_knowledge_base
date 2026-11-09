@@ -106,3 +106,8 @@ eval/reports/
 #    当前工作目录建 pytest-of-<用户名>/，里面全是临时产物，不该入库。
 #    用 pytest-of-*/ 而不是固定用户名，换机器（Administrator / runner / dev）都覆盖。
 /pytest-of-*/
+
+# ── 一次性探针脚本/截图/日志（2026-11-03 清理后仍可能出现，统一兜底）
+#    已确认 `git ls-files` 里没有 .tmp* 跟踪文件，加通配不会误伤
+/.tmp*
+/web/.tmp*

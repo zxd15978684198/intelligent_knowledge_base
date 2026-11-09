@@ -29,8 +29,10 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> PyKnora 本地门禁：scripts/ci.py --stage all"
-if uv run python scripts/ci.py --stage all; then
+echo "==> PyKnora 本地门禁：scripts/ci.py --profile commit（lock,lint,manifest）"
+# 只跑 IR 的 COMMIT_STAGE_IDS（lock,lint,manifest）：钩子的唯一设计目标是快。
+# 八步推送流水线交给 pre-push，或手动 `--profile default`。
+if uv run python scripts/ci.py --profile commit; then
     echo "==> 门禁通过"
     exit 0
 fi
@@ -40,12 +42,16 @@ cat >&2 <<'EOF'
 ==> 门禁未通过，提交已阻止。
 
 怎么修：
+  uv lock --check                            # 锁文件与 pyproject 不一致
   uv run ruff check src tests scripts        # 静态问题（不改文件）
   uv run ruff format src tests scripts       # 格式问题（会改文件，改完 git add）
   uv run pytest -q tests/unit                # 单元测试，不需要数据库
 
 注意：ruff 只查 src tests scripts —— 全仓 `ruff check .` 会把未入库的对标源码
 .tmp_ref/ 一起扫进来，报 47 个与本次提交无关的历史错误。
+
+完整八步流水线（推送前应过）：uv run python scripts/ci.py --profile default
+全部十三阶段（含集成/审计/容器）：uv run python scripts/ci.py --profile full
 
 确需跳过（仅限文档/紧急）：git commit --no-verify，并在提交说明里写明原因。
 EOF
