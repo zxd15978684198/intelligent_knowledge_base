@@ -13,10 +13,16 @@ runner 是 HTTP-only 的（不 import 被测模块、不直连数据库）——
 | --- | --- | --- | --- | --- |
 | 1 | `eval/corpus_manifest.json` | 人工登记，`corpus.py --verify-only` 复核 | 5 份语料的身份：文件名 / 字节数 / sha256 / `target`（`main` 4 份，`forbidden` 1 份） | 是 |
 | 2 | `eval/corpus.py` | — | 语料准备与校验：`--prepare` 幂等落位 5 份语料并写清单、`--verify-only` 按清单重算 sha256（不一致 exit 1）、`--list` 只打印清单 | 是 |
-| 3 | `eval/build_eval_set.py` | — | 生成评测集：`--build`（默认）走 API 回填 `gold_chunks` 并写产物，`--check` 只校验已有产物的配额/字段/gold，不发 HTTP | 是 |
-| 4 | `eval/eval_set_v0.1.jsonl` | `build_eval_set.py --build` | 20 条样本：6 类 category，`expect` ∈ {answer, abstain, deny} | 是 |
+| 3 | `eval/build_eval_set.py` | — | 生成评测集：`--build`（默认）走 API 回填 `gold_chunks` 并写产物；`--emit` 离线重生成（种子来自脚本，gold 复用 `--from` 指向的既有产物，不发 HTTP）；`--check` 只校验已有产物的配额/字段/gold，不发 HTTP | 是 |
+| 4 | `eval/eval_set_v0.1.jsonl` | `build_eval_set.py --build` | 30 条样本：8 类 category，`expect` ∈ {answer, abstain, deny} | 是 |
 | 5 | `eval/make_configs.py` → `baseline_config.yaml` / `candidate_config.yaml` | `make_configs.py` | 两组实验口径。**yaml 是生成物，不手改**；两份之间只允许一个主因素不同 | 是 |
 | 6 | `eval/run_eval.py` | — | runner：登录 → 逐条打 `/query` 与 `/chat` → 写 `raw.jsonl` / `summary.json` / `report.md` | 是 |
+
+8 类 category 的后三类是安全组，口径按 `build_eval_set.py` 的 `EXPECT_OF`：
+`injection`（提示注入）/ `poison`（污染来源）的 `expect == "abstain"`（拒答）；
+`privilege`（越权）的 `expect == "deny"`（403/404 探针）。`abstain`（没证据）与
+`deny`（没权限）**绝不混用**——harness 只有 privilege 走越权探针，注入/污染一律拒答。
+老样本 `deny-01` / `deny-02` 保留原 id，只把 `category` 归到 `privilege`。
 
 `eval/results/` 是**输出目录**，不是产物：每次运行一个子目录（建议 `base-<日期>` / `cand-<日期>`），
 按计划约定**不入库**。`.gitignore` 已追加 `eval/results/` 与 `eval/reports/`（2026-10-30），

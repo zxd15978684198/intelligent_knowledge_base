@@ -109,6 +109,53 @@ MAX_CONTENT_CHARS = 120
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8010"
 
+#: 服务端每个响应都会回写的请求 ID（`api/main.py` 的中间件 `_attach_request_id`）。
+#: raw 里只从**响应头**取：错误体 `{"error":{...},"request_id":...}` 里也有一份，但那是
+#: 失败路径的副本（`body_leaks` 的注释已说明），成功响应里没有 body 可读，从两个来源
+#: 各取一次只会让同一个字段有两套取值规则。
+REQUEST_ID_HEADER = "X-Request-ID"
+
+#: `/chat` 的四段耗时。字段名照计划 P2 的落盘契约；服务端还没有这四项时整体写 null，
+#: **不许**用 0 补齐——0 会被下游当成「这一段没耗时」而不是「没测」。
+STAGE_TIMING_KEYS: tuple[str, ...] = (
+    "retrieval_ms",
+    "evidence_check_ms",
+    "model_ttft_ms",
+    "generation_ms",
+)
+
+#: 四段之和与 `chat_total_ms` 的相对误差容忍度。超过只写 warning，不 fail：
+#: 服务端与 runner 的计时起点本来就可能差一个网络往返。
+STAGE_TIMING_TOLERANCE = 0.05
+
+#: P3/P4 的对抗样本按 `category` 计数。评测集的 category 是自由短 slug（现状是
+#: fact / exact_term / synonym / no_evidence / deny / version），新增类别可能写成
+#: `injection`、`prompt_injection`、`poisoned_doc`、`privilege_escalation`，所以按
+#: 「包含判定词」计数；钉死精确字符串会让新类别静默计成 0。
+#: 注意 `deny` 类别本身就是越权探针，但它已由 `counts.deny_samples` 按 `expect` 统计，
+#: 这里不重复计入 privilege，避免一个样本同时进两个分母被读成两件事。
+ADVERSARIAL_CATEGORY_MARKERS: dict[str, tuple[str, ...]] = {
+    "injection_samples": ("injection",),
+    "poison_samples": ("poison",),
+    "privilege_samples": ("privilege",),
+}
+
+#: 写进 summary 的门槛口径（计划 P4/P5）。**不是** gate.py 的兜底默认值：gate.py 只从
+#: 基线 summary 的 `thresholds` 段读阈值，脚本里不写死（`eval/gate.py::_load_thresholds`
+#: 是唯一读取点）。这里做的是「每份产物自述它产生时生效的口径」，否则事后没人说得清
+#: 当时按什么判的——历史上两轮产物都没有这一段，`gate.py` 只能走兜底并把这个来源写进
+#: reasons，就是踩到这个坑。
+#:
+#: - `max_null_ratio` = 0.20：`review` 三项全 null 的比例上限（计划 P4 硬口径）。
+#: - `max_metric_drop` = 0.0：允许的指标跌幅，0 = 任何下降都算退化（Day5 §5.5
+#:   「候选三项不低于基线」）。
+#:
+#: 只许在跑基线**之前**改这里，不许为迁就某个候选事后放宽（计划 P5 第 4 条）。
+SUMMARY_THRESHOLDS: dict[str, float] = {
+    "max_null_ratio": 0.20,
+    "max_metric_drop": 0.0,
+}
+
 #: 引用核验失败原因 → 计划 §3.7 的二级 code。计划那张表列的是示例（原文「如 ...」），
 #: 所以这里把三条规则拆成更细的 code，方便下一轮按失败类型统计。
 CITATION_CODE_MAP: dict[str, str] = {
@@ -305,6 +352,19 @@ class EvalSample:
     expect_facts: list[str] = field(default_factory=list)
     gold_chunks: list[dict[str, Any]] = field(default_factory=list)
     notes: str | None = None
+    #: 计划 P0-G1 的稳定样本编号。评测集正在加这个字段；没加的样本回退 `sample_id`，
+    #: 回退这件事必须在 raw/summary 里显式标出来（`case_id_source`），否则「按 case_id
+    #: 对齐两轮结果」会在一条悄悄回退的样本上给出错误结论。
+    case_id: str | None = None
+
+    @property
+    def effective_case_id(self) -> str:
+        """对外用的 case_id：有就用，没有回退 sample_id（绝不拼一个假编号）。"""
+        return self.case_id or self.sample_id
+
+    @property
+    def case_id_source(self) -> str:
+        return "sample" if self.case_id else "sample_id_fallback"
 
     @property
     def gold_sha1_8(self) -> list[str]:
@@ -359,6 +419,9 @@ def load_eval_set(path: Path) -> list[EvalSample]:
                 expect_facts=[str(item) for item in (raw.get("expect_facts") or [])],
                 gold_chunks=list(raw.get("gold_chunks") or []),
                 notes=raw.get("notes"),
+                # 只收非空字符串：`case_id: ""` 与缺失等价，落成 None 才能让
+                # `case_id_source` 如实记成回退，而不是留下一个空编号。
+                case_id=(str(raw.get("case_id")).strip() or None) if raw.get("case_id") else None,
             )
         )
     if not samples:
@@ -481,6 +544,9 @@ class QueryOutcome:
     error_code: str | None
     body_leaked: bool
     retrieval_strategy: str | None = None
+    #: 响应头 `X-Request-ID` 的原值。拿不到（旧服务端、连接层异常）保持 None——
+    #: 空串会让「有 ID」与「没 ID」在 jsonl 里长得一样，0 更是个不存在的编号。
+    request_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -504,6 +570,38 @@ class SampleRun:
     deny: dict[str, Any] | None = None
     response_strategy: str | None = None
     response_prompt_version: str | None = None
+    #: 计划 P0-G3：两个端点各自的 `X-Request-ID`。分开记，因为一次样本打了两个请求，
+    #: 合成一个字段后就没法拿它去查「到底是检索那次还是生成那次出错」。
+    query_request_id: str | None = None
+    chat_request_id: str | None = None
+    #: 计划 P2：`/chat` 的四段耗时。服务端没回这四项时整体为 None（见 STAGE_TIMING_KEYS）。
+    stage_timings: dict[str, float] | None = None
+
+
+def _header_request_id(response: httpx.Response) -> str | None:
+    """从响应头取 `X-Request-ID`；缺失或空白一律 None（不落空串）。"""
+    value = response.headers.get(REQUEST_ID_HEADER)
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+def _stage_timings_of(payload: Any) -> dict[str, float] | None:
+    """从 `done` / `retrieval` 事件体里抠出四段耗时。
+
+    四项**必须齐全且都是真数字**才返回对象：缺一项就得补 0，而 0 会被读成
+    「这一段不耗时」而不是「没测到」，所以宁可整体 None。bool 是 int 的子类，
+    `True` 混进来会变成 1ms，单独排掉。
+    """
+    if not isinstance(payload, dict):
+        return None
+    timings: dict[str, float] = {}
+    for key in STAGE_TIMING_KEYS:
+        value = payload.get(key)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        timings[key] = float(value)
+    return timings
 
 
 class EvalClient:
@@ -598,6 +696,7 @@ class EvalClient:
             )
         latency_ms = (time.perf_counter() - started) * 1000.0
         payload = safe_json(response.text)
+        request_id = _header_request_id(response)
         if response.status_code != 200:
             return QueryOutcome(
                 http_status=response.status_code,
@@ -605,6 +704,7 @@ class EvalClient:
                 latency_ms=latency_ms,
                 error_code=error_code_of(payload),
                 body_leaked=body_leaks(response.text),
+                request_id=request_id,
             )
         raw_results = payload.get("results") if isinstance(payload, dict) else None
         rows = [_result_row(item) for item in (raw_results or []) if isinstance(item, dict)]
@@ -619,6 +719,7 @@ class EvalClient:
             error_code=None,
             body_leaked=body_leaks(response.text),
             retrieval_strategy=str(strategy) if strategy else None,
+            request_id=request_id,
         )
 
     async def chat(
@@ -640,6 +741,8 @@ class EvalClient:
             headers=self._headers(workspace_id),
         ) as response:
             run.chat_http_status = response.status_code
+            # 头在流开始前就到达了，失败响应同样带这个头，所以两条路径都取。
+            run.chat_request_id = _header_request_id(response)
             if response.status_code != 200:
                 body = (await response.aread()).decode("utf-8", errors="replace")
                 run.error_code = error_code_of(safe_json(body))
@@ -659,6 +762,11 @@ class EvalClient:
                         strategy = data.get("retrieval_strategy")
                         if strategy:
                             run.response_strategy = str(strategy)
+                        # 四段耗时的首选来源是 `done`；检索事件里若有就先收下，
+                        # done 里再出现会覆盖它（见下面 done 分支）。
+                        timings = _stage_timings_of(data)
+                        if timings is not None:
+                            run.stage_timings = timings
                 elif event == "token":
                     if run.chat_ttft_ms is None:
                         run.chat_ttft_ms = (time.perf_counter() - started) * 1000.0
@@ -680,6 +788,9 @@ class EvalClient:
                         prompt_version = data.get("prompt_version")
                         if prompt_version:
                             run.response_prompt_version = str(prompt_version)
+                        timings = _stage_timings_of(data)
+                        if timings is not None:
+                            run.stage_timings = timings
                 elif event == "error" and isinstance(data, dict):
                     run.error_code = str(data.get("code") or "STREAM_ERROR")
         run.chat_total_ms = (time.perf_counter() - started) * 1000.0
@@ -752,6 +863,9 @@ async def run_sample(client: EvalClient, sample: EvalSample, cfg: dict[str, Any]
         degraded=chat_run.degraded,
         response_strategy=outcome.retrieval_strategy or chat_run.response_strategy,
         response_prompt_version=chat_run.response_prompt_version,
+        query_request_id=outcome.request_id,
+        chat_request_id=chat_run.chat_request_id,
+        stage_timings=chat_run.stage_timings,
     )
 
     if sample.expect == "deny":
@@ -800,11 +914,18 @@ def build_raw_record(
     与 `DoneEvent` 现在都带这两个字段），没有才退回配置：退回时必须显式——用
     `*_source` 标出这个数是「服务端说的」还是「配置声明的」，否则报告里写「候选
     策略那一轮」可能其实是配置写错了。
+
+    本函数只**追加**字段，不改既有键名与类型（`eval/report.py` 与历史结果解析都按
+    既有键读）。`review` 三项是 P4 的人工/自动复核占位，初值一律 null——写 False
+    会在还没有复核结果时把「未复核」洗成「不通过」。
     """
     strategy = run.response_strategy or cfg.get("retrieval_strategy")
     prompt_version = run.response_prompt_version or cfg.get("prompt_version")
     return {
         "sample_id": sample.sample_id,
+        # P0-G1：case_id 是跨轮对齐的稳定键；回退来源写在下一行，别让读者猜。
+        "case_id": sample.effective_case_id,
+        "case_id_source": sample.case_id_source,
         "category": sample.category,
         "expect": sample.expect,
         "repeat": repeat,
@@ -822,9 +943,17 @@ def build_raw_record(
         "chat_http_status": run.chat_http_status,
         "chat_ttft_ms": None if run.chat_ttft_ms is None else round(run.chat_ttft_ms, 2),
         "chat_total_ms": None if run.chat_total_ms is None else round(run.chat_total_ms, 2),
+        # P0-G3：两个端点各自的响应头 ID。取不到就是 null（不写空串/0）。
+        "request_id": run.query_request_id,
+        "chat_request_id": run.chat_request_id,
+        # P2：四段耗时。服务端没回齐就是整体 null（见 `_stage_timings_of`）。
+        "stage_timings": run.stage_timings,
         "error_code": run.error_code,
         "degraded": run.degraded,
         "deny": run.deny,
+        # P4：复核初值。三项全 null 的条数占总条数的比例会写进 summary.null_ratio，
+        # 这个比例就是「这一轮到底有多少条被复核过」的唯一凭据。
+        "review": {"fact_pass": None, "citation_pass": None, "security_pass": None},
         "gold_sha1_8": sample.gold_sha1_8,
         "gold_document_ids": sample.gold_document_ids,
         "expect_facts": sample.expect_facts,
@@ -837,18 +966,132 @@ def build_raw_record(
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def percentile_p95(values: Iterable[float]) -> float | None:
-    """nearest-rank 的 P95：排序后取 `ceil(0.95n)-1`。
+def _nearest_rank(values: Iterable[float], percentile: int) -> float | None:
+    """nearest-rank 分位：排序后取 `ceil(p/100·n)-1`，空集返回 None。
 
-    用整数运算 `(95*n+99)//100` 求 ceil，避免浮点误差把 n=20 算成 20（那样 P95
+    用整数运算 `(p*n+99)//100` 求 ceil，避免浮点误差把 n=20 算成 20（那样 P95
     会静默变成 max）。不做线性插值：20 条样本插出来的「95 分位」其实是两个点的
     加权平均，看着精确反而误导；nearest-rank 至少取到的是真实观测值。
     """
     ordered = sorted(value for value in values if value is not None)
     if not ordered:
         return None
-    rank = (95 * len(ordered) + 99) // 100
+    rank = (percentile * len(ordered) + 99) // 100
     return ordered[min(max(rank - 1, 0), len(ordered) - 1)]
+
+
+def percentile_p95(values: Iterable[float]) -> float | None:
+    """P95（nearest-rank）。口径见 `_nearest_rank`，不要在这里单独改。"""
+    return _nearest_rank(values, 95)
+
+
+def percentile_p50(values: Iterable[float]) -> float | None:
+    """P50（nearest-rank），与 `percentile_p95` 同一口径。
+
+    四段耗时是右偏分布，均值会被单条慢样本拉走；中位数先回答「一般这条有多慢」，
+    P95 再回答「最慢的那档有多慢」，两个数一起看才不会把偶发拖长读成常态。
+    """
+    return _nearest_rank(values, 50)
+
+
+def stage_timings_deviation(record: dict[str, Any]) -> float | None:
+    """四段之和与 `chat_total_ms` 的相对偏差；任一缺失返回 None（不能算的部分不算）。
+
+    偏差不是误差 bug 的证明，而是「服务端记的四段是不是这次请求的」的体检：
+    计时起点差一个网络往返、或者某段漏计，都会在这里显形。
+    """
+    timings = record.get("stage_timings")
+    total = record.get("chat_total_ms")
+    if not isinstance(timings, dict) or not isinstance(total, int | float) or total <= 0:
+        return None
+    if any(not isinstance(timings.get(key), int | float) for key in STAGE_TIMING_KEYS):
+        return None
+    total_of_stages = sum(float(timings[key]) for key in STAGE_TIMING_KEYS)
+    return abs(total_of_stages - float(total)) / float(total)
+
+
+def stage_percentiles(records: Sequence[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """四段耗时各自的 P50 / P95。没有一条带 stage_timings 时四项全 None（不是 0）。"""
+    per_key = {
+        key: [
+            float(record["stage_timings"][key])
+            for record in records
+            if isinstance(record.get("stage_timings"), dict)
+            and isinstance(record["stage_timings"].get(key), int | float)
+        ]
+        for key in STAGE_TIMING_KEYS
+    }
+    return (
+        {key: percentile_p50(values) for key, values in per_key.items()},
+        {key: percentile_p95(values) for key, values in per_key.items()},
+    )
+
+
+def review_verdict_counts(records: Sequence[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """把 `review` 三项各自数成 pass / fail / null，供报告与门禁直接读。
+
+    为什么不复用 `null_ratio`：`null_ratio` 只回答"整体复核了多少"（三项全 null 的
+    条数占比），回答不了"事实这一项错了几条"。发表格时最常被问的恰恰是后者。
+
+    三态口径与 `review_null_ratio` 一致：`true`=通过、`false`=不通过、**其余一律
+    记 null（未评）**。未评不进 fail：把"没人看"算成"看过了不通过"会让准确率凭空
+    掉一截，也会让"补做复核"这件事失去意义。
+    """
+    dimensions = (
+        ("fact", "fact_pass"),
+        ("citation", "citation_pass"),
+        ("security", "security_pass"),
+    )
+    counts: dict[str, dict[str, int]] = {
+        name: {"pass": 0, "fail": 0, "null": 0} for name, _ in dimensions
+    }
+    for record in records:
+        review = record.get("review")
+        for name, key in dimensions:
+            value = review.get(key) if isinstance(review, dict) else None
+            if value is True:
+                counts[name]["pass"] += 1
+            elif value is False:
+                counts[name]["fail"] += 1
+            else:
+                counts[name]["null"] += 1
+    return counts
+
+
+def review_null_ratio(records: Sequence[dict[str, Any]]) -> float | None:
+    """`review` 三项全 null 的条数 / 总条数，保留 4 位小数。
+
+    「未复核」必须是可量的：报告里引用准确率再高，只要这一项是 1.0，就说明复核
+    一格都没填，那些数只是自动判定的结果。
+    """
+    if not records:
+        return None
+    unreviewed = 0
+    for record in records:
+        review = record.get("review")
+        if not isinstance(review, dict):
+            unreviewed += 1
+            continue
+        if all(review.get(key) is None for key in ("fact_pass", "citation_pass", "security_pass")):
+            unreviewed += 1
+    return round(unreviewed / len(records), 4)
+
+
+def stage_timing_warnings(records: Sequence[dict[str, Any]]) -> list[str]:
+    """把「四段之和 ≠ chat_total_ms」的样本点名写进 warnings（只告警，不 fail）。"""
+    offenders: list[str] = []
+    for record in records:
+        deviation = stage_timings_deviation(record)
+        if deviation is not None and deviation > STAGE_TIMING_TOLERANCE:
+            offenders.append(f"{record.get('case_id') or record.get('sample_id')}({deviation:.1%})")
+    if not offenders:
+        return []
+    return [
+        f"{len(offenders)} 条样本的四段耗时之和与 chat_total_ms 偏差超过 "
+        f"{STAGE_TIMING_TOLERANCE:.0%}：{'、'.join(offenders[:5])}"
+        f"{' 等' if len(offenders) > 5 else ''}——"
+        "stage_timings 可能不是同一次请求的计时，按耗时分段下结论前先看 raw。"
+    ]
 
 
 #: 明确「不是拒答」的 status。前四个是 `schemas/chat.py::RunStatus` 的全部非
@@ -986,6 +1229,22 @@ def mean_or_none(values: Sequence[float]) -> float | None:
     return None if not values else sum(values) / len(values)
 
 
+def adversarial_counts(records: Sequence[dict[str, Any]]) -> dict[str, int]:
+    """P3/P4：按 `category` 里是否含判定词统计对抗样本条数（判定词见上）。
+
+    raw 行数口径（含 repeats），与 `counts.samples` 一致——混用「样本条数」和
+    「raw 行数」会让 repeats=3 时的占比看上去只有 1/3。
+    """
+    return {
+        key: sum(
+            1
+            for record in records
+            if any(marker in str(record.get("category") or "").lower() for marker in markers)
+        )
+        for key, markers in ADVERSARIAL_CATEGORY_MARKERS.items()
+    }
+
+
 def compute_metrics(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """一轮内的指标。返回数值 + 各自的分母，供跨轮聚合与报告共用。"""
     recalls = [value for value in (recall_at_5(item) for item in records) if value is not None]
@@ -1038,6 +1297,23 @@ def compute_metrics(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 for item in abstain_samples
                 if str(item.get("status") or "UNKNOWN").upper() not in {"ABSTAINED", "ANSWERED"}
             ),
+            # P0-G1：case_id 回退到 sample_id 的行数。>0 说明评测集还没补齐 case_id，
+            # 跨轮按 case_id 对齐时这几条走的是宽松匹配。
+            "case_id_fallback_samples": sum(
+                1 for item in records if item.get("case_id_source") == "sample_id_fallback"
+            ),
+            # P2：带四段耗时的行数，以及自检超差的行数（超差不算失败，只进 warnings）。
+            "stage_timings_present": sum(
+                1 for item in records if isinstance(item.get("stage_timings"), dict)
+            ),
+            "stage_timings_mismatch": sum(
+                1
+                for item in records
+                if (deviation := stage_timings_deviation(item)) is not None
+                and deviation > STAGE_TIMING_TOLERANCE
+            ),
+            # P3/P4：对抗样本按 category 计数（当前评测集里还是 0，新增类别后自动生效）。
+            **adversarial_counts(records),
         },
     }
 
@@ -1323,6 +1599,14 @@ def build_warnings(
             f"{counts['citations_skipped']} 条引用因 gold 文档集或 expect_facts 为空而无法核验，"
             "已记为 skipped，未计入引用准确率。"
         )
+    fallback = counts.get("case_id_fallback_samples", 0)
+    if 0 < fallback < counts["samples"]:
+        # 全部回退是「评测集还没补 case_id」的常态（summary.case_id_source 已标）；
+        # 只有**一半有、一半没有**才是隐患：同一份报告里两种对齐口径混用。
+        warnings.append(
+            f"{fallback}/{counts['samples']} 行 raw 的 case_id 回退成了 sample_id："
+            "评测集只补了一部分 case_id，跨轮按 case_id 对齐时这几条口径不同。"
+        )
     if counts["deny_samples"] == 0:
         warnings.append("本轮没有 deny 样本：权限拦截率是 None，安全项未被验证。")
     return warnings
@@ -1486,6 +1770,15 @@ def dry_run_runs() -> list[SampleRun]:
             query_latency_ms=42.0,
             chat_ttft_ms=180.0,
             chat_total_ms=900.0,
+            # 四段之和 = 900ms，与 chat_total_ms 对齐（偏差 0），自检不该告警。
+            stage_timings={
+                "retrieval_ms": 220.0,
+                "evidence_check_ms": 80.0,
+                "model_ttft_ms": 180.0,
+                "generation_ms": 420.0,
+            },
+            query_request_id="dry-run-req-0001",
+            chat_request_id="dry-run-req-0002",
             query_http_status=200,
             chat_http_status=200,
             query_body_leaked=False,
@@ -1500,6 +1793,14 @@ def dry_run_runs() -> list[SampleRun]:
             query_latency_ms=38.5,
             chat_ttft_ms=210.0,
             chat_total_ms=1100.0,
+            stage_timings={
+                "retrieval_ms": 200.0,
+                "evidence_check_ms": 90.0,
+                "model_ttft_ms": 210.0,
+                "generation_ms": 600.0,
+            },
+            query_request_id="dry-run-req-0003",
+            chat_request_id="dry-run-req-0004",
             query_http_status=200,
             chat_http_status=200,
             query_body_leaked=False,
@@ -1515,6 +1816,16 @@ def dry_run_runs() -> list[SampleRun]:
             query_latency_ms=12.0,
             chat_ttft_ms=95.0,
             chat_total_ms=140.0,
+            # 故意让四段之和（180ms）偏离 chat_total_ms（140ms）：验证自检告警这条路
+            # 在 dry-run 里真的会被执行到，且只进 warnings 不改 exit code。
+            stage_timings={
+                "retrieval_ms": 60.0,
+                "evidence_check_ms": 20.0,
+                "model_ttft_ms": 95.0,
+                "generation_ms": 5.0,
+            },
+            query_request_id="dry-run-req-0005",
+            chat_request_id="dry-run-req-0006",
             query_http_status=200,
             chat_http_status=200,
         ),
@@ -1536,6 +1847,39 @@ def dry_run_runs() -> list[SampleRun]:
             },
         ),
     ]
+
+
+def summary_case_id_source(records: Sequence[dict[str, Any]]) -> str | None:
+    """summary 级的 `case_id_source`：全样本都带 case_id 才记 `sample`。
+
+    只要有一条回退，整体就记 `sample_id_fallback`——summary 是「这份结果能不能按
+    case_id 对齐」的总开关，部分回退时记 `sample` 会让读者以为全都能对齐。
+    """
+    if not records:
+        return None
+    if all(record.get("case_id_source") == "sample" for record in records):
+        return "sample"
+    return "sample_id_fallback"
+
+
+def load_manifest_sha256(path: Path | None = None) -> str | None:
+    """读 `eval/day/manifest.json` 顶层的 `manifest_sha256`；读不到就是 None。
+
+    **不现算、不补值**：runner 不是语料清单的生产者（那是 `eval/make_manifest.py`），
+    这里算一个 sha256 出来只会和真清单不一致却长得一样。文件不在、不是对象、字段
+    缺失或不是非空字符串，一律 null，让 summary 自己承认「这轮没有清单可对齐」。
+    """
+    manifest_path = path or (Path(__file__).resolve().parent / "day" / "manifest.json")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("manifest_sha256")
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
 
 
 def build_summary(
@@ -1562,6 +1906,8 @@ def build_summary(
             "**存在 deny 样本返回 200 或泄漏片段：权限拦截率不参与平均，"
             "本轮整体判失败（exit 3）。**",
         )
+    stage_p50, stage_p95 = stage_percentiles(records)
+    warnings.extend(stage_timing_warnings(records))
     return {
         "experiment_id": cfg.get("experiment_id"),
         "app_commit": cfg.get("app_commit"),
@@ -1579,6 +1925,21 @@ def build_summary(
         "failures": collect_failures(records),
         "warnings": warnings,
         "config": cfg,
+        # ── 以下全部是追加字段，老键名与类型不改（history 结果仍可读） ──
+        # P0-G1：这份 summary 的 case_id 从哪来（sample / sample_id_fallback）。
+        "case_id_source": summary_case_id_source(records),
+        # P2：四段耗时的中位与尾部。没有一条带 stage_timings 时四项是 None。
+        "stage_p50": stage_p50,
+        "stage_p95": stage_p95,
+        # P4：review 三项全 null 的比例（1.0 = 一条都没复核）。
+        "null_ratio": review_null_ratio(records),
+        # P4：三项各自 pass/fail/null 的条数——`null_ratio` 只说"复核了多少"，
+        # 这张表说"错在哪一项"。
+        "verdicts": review_verdict_counts(records),
+        # 语料清单的 sha256；没有 eval/day/manifest.json 时是 null，绝不现算。
+        "manifest_sha256": load_manifest_sha256(),
+        # P4/P5：这份产物自述它产生时生效的门槛；gate.py 只认这一段，不认脚本常量。
+        "thresholds": dict(SUMMARY_THRESHOLDS),
     }
 
 
@@ -1861,6 +2222,77 @@ async def run_real(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     return EXIT_OK
 
 
+def load_raw_jsonl(path: Path) -> list[dict[str, Any]]:
+    """读回一轮已经落盘的 raw.jsonl（用于重算 summary，不再发请求）。
+
+    为什么复用文件而不是内存：人工复核（`eval/review.py`）是在跑完之后往 raw 里回填
+    `review` 的，重算 summary 必须看见回填后的那一份。所以这里**只读不写**，写回 raw
+    会把复核结果冲掉。
+    """
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for lineno, line in enumerate(handle, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise RuntimeFailure(f"{path}:{lineno} 不是合法 JSON：{exc}") from exc
+            if not isinstance(payload, dict):
+                raise RuntimeFailure(f"{path}:{lineno} 顶层不是对象")
+            records.append(payload)
+    if not records:
+        raise RuntimeFailure(f"{path} 里没有任何记录")
+    return records
+
+
+def run_recompute_summary(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    """只重算 summary.json / report.md：读回 raw.jsonl，不发一次请求。
+
+    存在理由：`null_ratio`、`verdicts` 依赖 raw 里的 `review`，而人工复核发生在跑完
+    之后。没有这条路径时，唯一能让 summary 反映复核结果的办法是重跑一整轮——既浪费
+    又会让「这轮的数字」和「这轮复核的证据」分家。
+    """
+    out_dir = Path(args.out)
+    raw_path = out_dir / "raw.jsonl"
+    if not raw_path.is_file():
+        print(f"[recompute] 找不到 {raw_path}；--out 要指向已有产物目录", file=sys.stderr)
+        return EXIT_CONFIG
+
+    records = load_raw_jsonl(raw_path)
+    inferred_repeats = max(int(record.get("repeat") or 1) for record in records)
+    repeats = args.repeats if args.repeats and args.repeats > 1 else inferred_repeats
+    deny_leak = any(
+        isinstance(record.get("deny"), dict) and record["deny"].get("returned_200")
+        for record in records
+    )
+    head = git_head()
+    app_commit_mismatch = bool(head and str(cfg.get("app_commit")) != head)
+
+    summary = build_summary(
+        records,
+        cfg=cfg,
+        repeats=repeats,
+        base_url=args.base_url,
+        limit=None,
+        app_commit_mismatch=app_commit_mismatch,
+        deny_leak=deny_leak,
+    )
+    write_json(out_dir / "summary.json", summary)
+    (out_dir / "report.md").write_text(render_report(summary), encoding="utf-8")
+
+    print(f"[recompute] 读回 {len(records)} 行，repeats={repeats}；raw.jsonl 未改动")
+    for name in METRIC_ORDER:
+        print(f"  {name:22s} = {fmt_metric(summary['metrics'][name]['value'])}")
+    print(f"[recompute] null_ratio = {fmt_metric(summary['null_ratio'])}")
+    print(f"[recompute] verdicts   = {json.dumps(summary['verdicts'], ensure_ascii=False)}")
+    print(f"[recompute] 已重写：{out_dir.resolve()}/summary.json、report.md")
+    for warning in summary["warnings"]:
+        print(f"[recompute] 注意：{warning}")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Day3 可信 RAG 的 HTTP-only 评测 runner",
@@ -1885,6 +2317,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out", type=Path, help="产物目录（默认 eval/results/<experiment_id>）")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="被测服务地址")
+    parser.add_argument(
+        "--recompute-summary",
+        action="store_true",
+        help="只读回 --out 目录里的 raw.jsonl 重算 summary.json/report.md，不发请求"
+        "（用于把人工复核回填的 review 反映进 null_ratio/verdicts）",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -1960,6 +2398,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.check_config:
             print_config_report(cfg, args.config, head=head)
             return EXIT_OK
+
+        if args.recompute_summary:
+            if args.out is None:
+                print("--recompute-summary 需要 --out 指向已有产物目录", file=sys.stderr)
+                return EXIT_CONFIG
+            return run_recompute_summary(args, cfg)
 
         if args.eval_set is not None:
             args.eval_set_path = args.eval_set

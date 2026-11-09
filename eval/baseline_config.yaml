@@ -1,32 +1,42 @@
 # 由 eval/make_configs.py 生成，勿手改；改字段请改生成器后重跑。
-# 生成时间：2026-10-30T19:09:02+08:00
+# 生成时间：2026-11-08T19:51:34+08:00
 # 来源：.tmp_ref/eval_setup.json（snapshot）、pyknora.core.settings、git HEAD
 # A 组：库默认策略（baseline）；B 组见 candidate_config.yaml。
 experiment_id: day03-rag-ab
-app_commit: 4e16d652cea0f730244571dd92c16a1a112f0be4
+app_commit: db90d790a3b0cbd5a5c9789c29fa96879acf26d4
 prompt_version: pyknora-rag-v1
 eval_dataset: eval/eval_set_v0.1.jsonl
 snapshot:
-  workspace_id: d2c28dec-61ca-4799-82c2-e3ba4b7e037e
-  kb_id: 1556633e-fff3-4a27-8731-adc00d2ff5eb
+  workspace_id: b8544cbc-a0a9-424e-ad28-9494354f679e
+  kb_id: e4d84682-964d-4a25-aeb5-b4b63af37625
   documents:
-  - document_id: 8fc2223d-11af-4c49-b3dc-ff842d362cba
-    active_document_version_id: bb4becf1-b34a-49cd-a70e-9be266ef8568
-    active_build_id: 8a2b50a2-3947-4676-9b17-03b2f8ef6266
+  - document_id: c49d6388-3338-40ea-9485-e8837e12715b
+    active_document_version_id: 3cc1ef93-3a97-4f08-8635-f14d32f4a784
+    active_build_id: 5d43cfbb-6e1b-426a-af26-d30c763625a2
     active_index_version: 1
-    chunks: 61
-  - document_id: 2a72b9e0-aab3-4550-9bd9-875b58970100
-    active_document_version_id: 0548e2e3-ba92-4411-bd1d-0c96b81fc2ee
-    active_build_id: 41fc983c-fce7-418e-a4d9-83bf6739bcaa
-    active_index_version: 2
+    chunks: 57
+  - document_id: 19ebd174-9a74-4ab3-bee9-0553f1acea78
+    active_document_version_id: 62c83530-30b7-439f-a561-30d7ab3b19a4
+    active_build_id: 41fa847f-bab7-4ef0-a65a-d9ed6c43c8aa
+    active_index_version: 1
+    chunks: 47
+  - document_id: 89069c8b-9904-4570-a13e-9fe6ec24d462
+    active_document_version_id: ac48d73b-0ad3-427a-92b5-7f3c0dff6c5b
+    active_build_id: a0993947-6d3a-4984-bafd-bb7983a1db6a
+    active_index_version: 1
     chunks: 35
-  - document_id: e0bbf0d6-5b28-4abc-baa1-cc1c93269814
-    active_document_version_id: 0a2cadd4-aa5d-42f5-84ad-471f5194b3b6
-    active_build_id: 94a8fd3e-9ffc-4600-94c9-cca0a286b43a
+  - document_id: d43d9a86-5cb3-4394-b48c-55a6e38b6424
+    active_document_version_id: f2efeba1-70a4-475a-a8c9-b9c74d1ee345
+    active_build_id: 806f8dbd-566f-4f98-9ccf-0f7a31ab3e27
     active_index_version: 1
     chunks: 2
+  - document_id: eef9eab1-74e7-4c3b-bad6-8f43b7a3f77f
+    active_document_version_id: d0f3db1d-0d65-41f5-aa0f-9b606c98a550
+    active_build_id: 2386a031-26bf-467d-b21d-af4f6841e8b2
+    active_index_version: 1
+    chunks: 1
 chat_model: deeseek-v4.1-flash
-chat_base_url: https://opencode.ai/inference/go
+chat_base_url: https://opencode.ai/inference/go/v1
 chat_timeout_s: 60.0
 embedding_model_key: BAAI/bge-small-zh-v1.5
 embedding_dim: 512

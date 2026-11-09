@@ -184,23 +184,27 @@ def _seed(**overrides: Any) -> Any:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def test_quota_is_the_plan_quota_and_sums_to_twenty() -> None:
+def test_quota_is_the_plan_quota_and_sums_to_thirty() -> None:
+    # 计划 P3 把安全组从 2 条 deny 扩到 12 条（injection/poison/privilege 各 4），
+    # 所以总数 20 → 30；老两条 deny-01/02 保留 id，只把 category 归到 privilege。
     assert build_eval_set.QUOTA == {
         "fact": 6,
         "exact_term": 4,
         "synonym": 3,
         "no_evidence": 3,
-        "deny": 2,
         "version": 2,
+        "injection": 4,
+        "poison": 4,
+        "privilege": 4,
     }
-    assert sum(build_eval_set.QUOTA.values()) == 20
-    assert len(build_eval_set.SEEDS) == 20
+    assert sum(build_eval_set.QUOTA.values()) == 30
+    assert len(build_eval_set.SEEDS) == 30
     assert Counter(seed.category for seed in build_eval_set.SEEDS) == build_eval_set.QUOTA
 
 
 def test_seed_ids_are_unique_and_category_ids_are_stable() -> None:
     ids = [seed.sample_id for seed in build_eval_set.SEEDS]
-    assert len(set(ids)) == 20
+    assert len(set(ids)) == 30
     assert ids == [
         *(f"fact-{index:02d}" for index in range(1, 7)),
         *(f"exact-{index:02d}" for index in range(1, 5)),
@@ -208,13 +212,21 @@ def test_seed_ids_are_unique_and_category_ids_are_stable() -> None:
         *(f"noev-{index:02d}" for index in range(1, 4)),
         *(f"deny-{index:02d}" for index in range(1, 3)),
         *(f"ver-{index:02d}" for index in range(1, 3)),
+        *(f"injection-{index:02d}" for index in range(1, 5)),
+        *(f"poison-{index:02d}" for index in range(1, 5)),
+        *(f"priv-{index:02d}" for index in range(1, 3)),
     ]
 
 
 def test_expect_of_covers_every_category_without_mixing_deny_and_abstain() -> None:
     assert set(build_eval_set.EXPECT_OF) == set(build_eval_set.CATEGORIES)
     assert build_eval_set.EXPECT_OF["no_evidence"] == "abstain"
-    assert build_eval_set.EXPECT_OF["deny"] == "deny"
+    # 只有 privilege 走 deny（403/404 拦截）；injection / poison 的判据是「不照做」，
+    # 落到 abstain —— 混成一类会让「请求被拒」和「没照着注入内容回答」算成同一件事。
+    assert build_eval_set.EXPECT_OF["privilege"] == "deny"
+    assert "deny" not in build_eval_set.EXPECT_OF
+    for category in ("injection", "poison"):
+        assert build_eval_set.EXPECT_OF[category] == "abstain"
     for category in ("fact", "exact_term", "synonym", "version"):
         assert build_eval_set.EXPECT_OF[category] == "answer"
 
@@ -294,7 +306,8 @@ def test_every_seed_becomes_a_valid_record() -> None:
 
 
 def test_deny_record_shape() -> None:
-    record = _first("deny")
+    # `category` 已从 deny 改名为 privilege（计划 P3 扩安全组），判据仍是 expect=deny。
+    record = _first("privilege")
     assert record["expect"] == "deny"
     assert record["kb_id"] is None
     assert record["deny_kb_id"] == DENY_KB
@@ -429,19 +442,19 @@ def test_validate_record_rejects_bad_gold_shape(gold: Any, needle: str) -> None:
 
 
 def test_validate_record_deny_rules() -> None:
-    record = _first("deny")
+    record = _first("privilege")
     record["deny_kb_id"] = None
     assert any("deny 样本必须有 deny_kb_id" in item for item in _validate(record))
 
-    record = _first("deny")
+    record = _first("privilege")
     record["kb_id"] = KB
     assert any("deny 样本的 kb_id 必须是 null" in item for item in _validate(record))
 
-    record = _first("deny")
+    record = _first("privilege")
     record["gold_chunks"] = _gold(_seed())
     assert any("deny 样本的 gold_chunks 必须为空" in item for item in _validate(record))
 
-    record = _first("deny")
+    record = _first("privilege")
     record["expect_facts"] = ["上限 500 元"]
     assert any("deny 样本不该有 expect_facts" in item for item in _validate(record))
 
@@ -461,7 +474,7 @@ def test_validate_record_abstain_rules() -> None:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def test_cmd_check_accepts_exactly_twenty(
+def test_cmd_check_accepts_exactly_thirty(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = tmp_path / "set.jsonl"
@@ -472,7 +485,7 @@ def test_cmd_check_accepts_exactly_twenty(
 
     assert code == 0
     assert "[通过]" in captured.out
-    assert "20 条" in captured.out
+    assert "30 条" in captured.out
     assert captured.err == ""
 
 
@@ -489,7 +502,7 @@ def test_cmd_check_catches_one_extra_sample(
 
     assert code == 1
     assert "配额不符：fact 应为 6 条，实际 7 条" in captured.err
-    assert "样本总数应为 20，实际 21" in captured.err
+    assert "样本总数应为 30，实际 31" in captured.err
     assert "id 重复：['fact-01']" in captured.err
 
 
@@ -506,7 +519,7 @@ def test_cmd_check_catches_one_missing_sample(
 
     assert code == 1
     assert "配额不符：fact 应为 6 条，实际 5 条" in captured.err
-    assert "样本总数应为 20，实际 19" in captured.err
+    assert "样本总数应为 30，实际 29" in captured.err
 
 
 def test_cmd_check_catches_a_category_outside_the_quota_table(

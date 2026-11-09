@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-30T17:50:03+08:00",
+  "generated_at": "2026-11-08T19:31:53+08:00",
   "source_note": "基本财务管理制度.pdf 复制自课程资料桌面原件；员工手册v1/v2.docx 复制自仓库 .tmp_ref/ 根下；财务内部预算.md 与 团建与年会通知.md 由 eval/corpus.py 生成。语料不入库（.gitignore 的 .tmp_ref/），换机器需重新放文件并重跑 --prepare。target=main 进 workspace A 的评测 KB，target=forbidden 只上传到 workspace B，供 deny 样本证明「越权被拦」而非「库不存在」。",
   "files": [
     {
@@ -14,8 +14,8 @@
     {
       "name": "员工手册v1.docx",
       "path": ".tmp_ref/eval_corpus/员工手册v1.docx",
-      "bytes": 54545,
-      "sha256": "9bc608565bbfdcfe35904613ee36affaef3803a1fb71db9ebf0d9dfddb5c5123",
+      "bytes": 54140,
+      "sha256": "aac3909ad62268c3e8d445f5bd87253ba87c464805ae5fbd76c0881fa83b35b2",
       "kind": "docx",
       "target": "main",
       "description": "真实文档首版；与 v2 同名重传，用来把 active_index_version 顶到 2"
@@ -23,8 +23,8 @@
     {
       "name": "员工手册v2.docx",
       "path": ".tmp_ref/eval_corpus/员工手册v2.docx",
-      "bytes": 51097,
-      "sha256": "01919d1b2855f2d13f75a90aa27576d062cee31d0caac6757d360854356172bd",
+      "bytes": 51077,
+      "sha256": "548b78a77f66c52c96208b24f717ea1ba1793dde5e1d9e40109a11772cc9a41e",
       "kind": "docx",
       "target": "main",
       "description": "真实文档第二版；重传后 v1 的切片应被 retire，只有 v2 现行"

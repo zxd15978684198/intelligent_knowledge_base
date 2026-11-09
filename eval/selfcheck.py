@@ -279,7 +279,18 @@ def check_eval_set(build: ModuleType | None, build_error: str) -> list[Check]:
     """eval_set 的配额/字段/gold 形状（复用 --check）+ category/expect 分布。"""
     checks: list[Check] = []
     quota_name = "eval_set 配额/字段/gold 形状（复用 build_eval_set --check）"
-    dist_name = "eval_set category/expect 分布（20 条、5 类配额）"
+    # 展示名里的「条数 / 类别数 / expect 档数」一律从 build 算，不写死：
+    # 配额从 20 条 5 类扩到 30 条 8 类时，写死的名字会一直报旧口径。
+    if build is None:
+        dist_name = "eval_set category/expect 分布"
+    else:
+        # EXPECT_OF 是 category → expect 的映射，档数要取 values 的去重数（不能 len(dict)，
+        # 那等于类别数 8；expect 实际只有 answer/abstain/deny 三档）。
+        expect_tiers = len(set(build.EXPECT_OF.values()))
+        dist_name = (
+            f"eval_set category/expect 分布（{sum(build.QUOTA.values())} 条、"
+            f"{len(build.QUOTA)} 类配额、expect {expect_tiers} 档）"
+        )
 
     if not EVAL_SET.is_file():
         reason = f"缺文件 {_relative(EVAL_SET)}"

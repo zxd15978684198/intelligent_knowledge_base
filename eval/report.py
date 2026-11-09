@@ -137,10 +137,15 @@ SIGNAL_LABELS: dict[str, str] = {
 }
 
 #: 逐样本判据的参与范围（写进报告 §3，防止有人把「判据没覆盖」读成「没问题」）。
+#: `answer`/`abstain`/`deny` 是 expect 三档；`injection`/`poison`/`privilege` 是安全组
+#: category 三档的中文名（口径见 `build_eval_set.EXPECT_OF`：前两类归 abstain，后一类归 deny）。
 SIGNAL_SCOPE: dict[str, str] = {
     "answer": "Recall@5、Precision@5、引用通过率、事实命中",
     "abstain": "拒答成功",
     "deny": "权限拦截",
+    "injection": "提示注入",
+    "poison": "污染来源",
+    "privilege": "越权",
 }
 
 #: 浮点比较容差。两侧都来自同一批 JSON 浮点，除了舍入没有别的误差来源；
@@ -1384,8 +1389,11 @@ def _render_degradations(data: ReportData) -> list[str]:
         "逐样本判据（每侧按 repeats 取均值，公式复用 `run_eval`）：",
         f"- answer 类：{SIGNAL_SCOPE['answer']}"
         "（`fact_hit` 与 `FACT_MISSING` 同口径：任一 fact 命中即 1）",
-        f"- abstain 类：{SIGNAL_SCOPE['abstain']}（`is_abstained`，status 缺失时退回拒答文案）",
-        f"- deny 类：{SIGNAL_SCOPE['deny']}（`deny_intercepted`：两端点 403/404 且响应体无片段）",
+        f"- abstain 类：{SIGNAL_SCOPE['abstain']}"
+        f"（category ∈ no_evidence / {SIGNAL_SCOPE['injection']} / {SIGNAL_SCOPE['poison']}；"
+        "`is_abstained`，status 缺失时退回拒答文案）",
+        f"- deny 类：{SIGNAL_SCOPE['deny']}（category = {SIGNAL_SCOPE['privilege']}；"
+        "`deny_intercepted`：两端点 403/404 且响应体无片段）",
         f"- **下降即记为退化**（容差 {DEGRADE_EPS:g}）；不设复合分数、不做加权，"
         "避免把口径藏进权重。",
         "",
