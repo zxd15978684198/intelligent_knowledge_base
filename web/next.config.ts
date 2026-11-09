@@ -13,6 +13,15 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   /**
+   * 关掉 Next 自带的响应压缩。
+   *
+   * 实测：`/chat` 的 SSE 经 :3000 转发时被整段攒住（retrieval/token/done 全在同一
+   * 毫秒到达，且响应头带 `content-encoding: gzip`），直连 :8010 则是逐帧到达。
+   * gzip 压缩流会按块攒数据，SSE 这种"每帧只有几十字节"的响应发不出去。
+   * 生产环境的压缩交给反代/CDN 做，这里关掉不影响别的路径。
+   */
+  compress: false,
+  /**
    * 容器交付需要 standalone 产物：`next build` 默认输出要带着 node_modules
    * 一起跑，`output: "standalone"` 会把最小运行时（含 server.js）单独放进
    * `.next/standalone`，镜像里因此不需要 node_modules（本仓库约 500MB）。
