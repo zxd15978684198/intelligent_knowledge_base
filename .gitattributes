@@ -2,3 +2,12 @@
 # 这两行保证检出时钩子与 shell 脚本始终是 LF。
 .githooks/* text eol=lf
 *.sh       text eol=lf
+
+# 评测基线快照按原样入库，不做换行规范化。run_eval.py 在 Windows 上以文本模式写
+# 产物，落盘就是 CRLF；core.autocrlf=true 会在 add 时把它规范成 LF，于是 committed
+# blob 不再与 eval/results/<run>/ 逐字节一致，eval/baselines/README.md 登记的
+# sha256 锚点也会在 autocrlf=false 的机器上失效。快照的价值就在于"一个字节都没动"。
+# 只覆盖 2026-11-09 新增的两轮：baseline-20261030 / candidate-20261030 的 blob
+# 早已被规范成 LF，给它们加 -text 会改变检出字节、推翻 2026-11-02 的比对记录。
+eval/baselines/baseline-20261108-r3/**  -text
+eval/baselines/baseline-20261108-r3j/** -text
