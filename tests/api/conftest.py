@@ -172,8 +172,23 @@ def kb_repo() -> FakeKbRepo:
     return repo
 
 
+class _BearerOnlyTransport(httpx.ASGITransport):
+    """模拟 CLI / eval 脚本：只带 Bearer，绝不持久化服务端下发的会话 Cookie。
+
+    M3 起 register / login 会返回三件套 Set-Cookie；httpx 默认会把它们存进
+    cookie jar，后续的 Bearer 写请求就被 require_csrf 判成"有会话 Cookie 但缺
+    CSRF 头" → 403 CSRF_FAILED。这套夹具的语义是无 Cookie 的 Bearer 调用，
+    所以在传输层剥掉 set-cookie，让 cookie jar 始终为空（Cookie 会话另有专门用例）。
+    """
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await super().handle_async_request(request)
+        response.headers.pop("set-cookie", None)
+        return response
+
+
 def _make_client(app, *, strict: bool) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=strict)
+    transport = _BearerOnlyTransport(app=app, raise_app_exceptions=strict)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 

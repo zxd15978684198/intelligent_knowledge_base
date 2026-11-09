@@ -550,3 +550,60 @@ async def test_list_documents_rejects_bad_paging(client: httpx.AsyncClient) -> N
     )
     assert too_big.status_code == 422
     assert negative.status_code == 422
+
+
+# ---------------------------------------------------------------- filename（F0 唯一后端补项）
+
+
+async def test_document_filename_is_visible_in_detail_and_list(
+    client: httpx.AsyncClient, clean_db: None
+) -> None:
+    """上传时的原始文件名必须能从详情与列表里读回来。
+
+    来源是 `document_versions.object_key` 的末段（D3：不新增数据库列）。这条用例
+    守着两个容易漂的点：① 详情和列表必须给同一个名字（`_active_document` 共用映射）；
+    ② 中文文件名不能被编码/截断弄坏。
+    """
+    original = "员工手册v2.txt"
+    doc_id = (await _upload(client, filename=original, content="年假按工龄计算".encode())).json()[
+        "document_id"
+    ]
+
+    detail = (await client.get(f"/api/v1/documents/{doc_id}", headers=bearer())).json()
+    assert detail["filename"] == original
+
+    listing = (
+        await client.get(f"/api/v1/knowledge-bases/{KB_ID}/documents", headers=bearer())
+    ).json()
+    row = next(item for item in listing["items"] if item["document_id"] == doc_id)
+    assert row["filename"] == original, (
+        "列表与详情的 filename 必须一致，否则前端两个页面显示不同名字"
+    )
+
+
+async def test_document_detail_without_version_has_null_filename(
+    client: httpx.AsyncClient, clean_db: None
+) -> None:
+    """两个版本指针都为空时才返回 `filename=null`，而不是编一个假名字。
+
+    `desired_document_version_id` 也算"有版本"：上传只写 desired，发布后才写 active。
+    只看 active 的话，刚上传完、还在排队的文档会显示成短 id —— 而文件名在上传那
+    一刻就已确定，没有理由等发布。所以列表/详情取 `coalesce(desired, active)`。
+    """
+    doc_id = (await _upload(client, filename="edge.txt", content=b"edge")).json()["document_id"]
+    # 模拟"两个指针都为空"的极端状态（版本行已被 purge，文档只剩墓碑）。
+    from pyknora.db.session import get_session_factory  # 延迟导入，避免测试收集期建引擎
+
+    factory = get_session_factory()
+    async with factory() as session:
+        await session.execute(
+            text(
+                "UPDATE documents SET active_document_version_id = NULL, "
+                "desired_document_version_id = NULL WHERE document_id = :doc_id"
+            ),
+            {"doc_id": doc_id},
+        )
+        await session.commit()
+
+    detail = (await client.get(f"/api/v1/documents/{doc_id}", headers=bearer())).json()
+    assert detail["filename"] is None
