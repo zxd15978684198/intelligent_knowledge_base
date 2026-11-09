@@ -29,12 +29,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import httpx
 
 from pyknora.core.errors import AppError, ErrorCode
+from pyknora.core.logging import log_event
 from pyknora.core.settings import Settings
 from pyknora.schemas.query import RetrievedChunk
 from pyknora.services.rag.evidence import EvidenceAssessment, Verdict
@@ -365,6 +367,16 @@ async def stream_answer(
         yield "usage", {"prompt_tokens": 0, "completion_tokens": 0}
         return
 
+    # 上下文已定稿、马上就要进 payload：这是"提示词真的建起来了"的唯一时刻。上面几条
+    # 早退（门控拒答、空上下文）都在它之前就 return 了——它们没有调用模型，也就没有
+    # 提示词可指认，硬发一条 `prompt_built` 等于给日志造一个假事实。
+    log_event(
+        "prompt_built",
+        evidence_count=len(context),
+        retrieval_count=len(chunks),
+        prompt_version=PROMPT_VERSION,
+    )
+
     url = f"{settings.chat_base_url.rstrip('/')}/chat/completions"
     payload = {
         "model": settings.chat_model,
@@ -376,6 +388,10 @@ async def stream_answer(
     if settings.chat_session_id:
         # 网关约定头：不配就不发（标准 OpenAI 不需要，也不会被未知头影响）。
         headers["x-opencode-session"] = settings.chat_session_id
+    # 首 token 的计时锚点，紧贴真正发请求的那一行：再往前挪会把 payload 组装（含
+    # `_messages` 的序列化与转义）算进"模型多久吐第一个字"，那个数与别的实现不可比。
+    request_started = time.perf_counter()
+    first_token_ms: float | None = None
     try:
         async with (
             httpx.AsyncClient(timeout=_http_timeout(settings)) as client,
@@ -415,6 +431,12 @@ async def stream_answer(
                 for choice in event.get("choices", []):
                     text = choice.get("delta", {}).get("content")
                     if text:
+                        if first_token_ms is None:
+                            # 只发第一次：这是"服务端口径的 TTFT"，与客户端量到的
+                            # `chat_ttft_ms` 互校（计划 Day4 §8.3）。用 `is None` 判
+                            # 防重而不是判真值——一个真的 0.0ms 也是有效采样。
+                            first_token_ms = (time.perf_counter() - request_started) * 1000.0
+                            log_event("first_token", first_token_ms=first_token_ms)
                         yield "token", text
             # prompt_version 只跟"真的让模型说过话"的 usage 一起发：它回答的是
             # "这条答案出自哪版提示词"。没调模型的路径（没检索到资料、上游失败）
@@ -436,6 +458,20 @@ async def stream_answer(
         message = f"chat model request failed: HTTP {status}"
         if exc.detail:
             message += f" ({exc.detail})"
+        # 4xx 里最常见的是配置错，只回一句 "HTTP 404" 等于让用户去猜：
+        # 404 多半是模型名在新供应商上不存在（或 base_url 少了 /v1），
+        # 401/403 是 key 与 base_url 不是同一家。把该改的变量名直接写进文案。
+        hint = {
+            404: (
+                f"上游没有这个模型或路径：检查 PYKNORA_CHAT_MODEL（当前 "
+                f"{settings.chat_model}）与 PYKNORA_CHAT_BASE_URL 是否成对"
+            ),
+            401: "上游拒绝鉴权：检查 PYKNORA_CHAT_API_KEY 是否属于该 base_url",
+            403: "上游拒绝鉴权：key 存在但无权访问该模型",
+            429: "上游限流：稍后重试或换模型",
+        }.get(status)
+        if hint:
+            message += f"；{hint}"
         yield (
             "error",
             {
@@ -478,6 +514,23 @@ async def stream_answer(
             {
                 "code": ErrorCode.DEPENDENCY_UNAVAILABLE,
                 "message": f"chat model request failed ({type(exc).__name__})",
+                "retryable": True,
+            },
+        )
+        yield "usage", {}
+    except Exception as exc:  # noqa: BLE001 - 流已开始，任何异常都必须降级成事件
+        # 上面三个分支只覆盖 httpx 的异常家族。`httpx.InvalidURL` 直接继承 Exception，
+        # 在建 client 时就会抛（实测触发源：NO_PROXY 里的 `[::1]`），漏掉它等于让异常
+        # 穿出 SSE 生成器，客户端只看到连接被掐断。retryable 跟随 errors.py 的
+        # `_RETRYABLE`（INTERNAL_ERROR 在集合内），不在这里另造一套口径。
+        # 不接 BaseException：CancelledError / GeneratorExit 必须继续穿出去，
+        # 否则客户端断开后这个生成器会被强行续命。
+        logger.exception("chat stream failed unexpectedly: type=%s", type(exc).__name__)
+        yield (
+            "error",
+            {
+                "code": ErrorCode.INTERNAL_ERROR,
+                "message": f"chat stream failed unexpectedly ({type(exc).__name__})",
                 "retryable": True,
             },
         )
