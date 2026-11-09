@@ -114,9 +114,16 @@ class LocalHFEmbedder:
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:  # pragma: no cover - 环境相关
+            # 别只写「未安装」：真正的原因经常是**依赖树缺件**——例如 sentence-transformers
+            # 装上了，但它 import 链上的 huggingface_hub / regex / markupsafe 是半装的，
+            # 报出来的仍是 ImportError。2026-11-03 就踩过一次：worker 一直说「sentence-
+            # transformers 未安装」，实际是 `.venv` 里 regex 缺 __init__.py；照着这句话去
+            # `uv sync --extra local-embed` 修不好。所以把底层异常原样带出来，并给出真解药。
             raise AppError(
                 ErrorCode.INTERNAL_ERROR,
-                "sentence-transformers 未安装；请 uv sync --extra local-embed，"
+                "sentence-transformers 或其依赖不可用"
+                f"（{type(exc).__name__}: {exc}）；请 uv sync --extra dev --extra local-embed "
+                "--reinstall（依赖树半装时单加 --extra 修不好），"
                 "或把 embedding_backend 设为 openai",
             ) from exc
 

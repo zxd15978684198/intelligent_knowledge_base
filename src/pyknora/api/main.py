@@ -22,16 +22,20 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from pyknora.api.deps import require_csrf
 from pyknora.core.errors import AppError, ErrorCode
+from pyknora.core.logging import configure_logging
 from pyknora.core.settings import settings
 from pyknora.db.session import dispose_engine
 from pyknora.services.ingest.embedder import build_embedder
@@ -211,13 +215,74 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("pyknora api stopped")
 
 
+_SWAGGER_DIR = Path(__file__).resolve().parents[1] / "static" / "swagger"
+
+
+def _mount_api_docs(app: FastAPI) -> None:
+    """把 Swagger UI 与静态资源改成自托管。
+
+    FastAPI 默认的 `/docs` 是一段把 `swagger-ui-bundle.js` / `swagger-ui.css`
+    指向 jsDelivr CDN 的 HTML。国内网络下这两个请求被 reset，页面渲染成空白，
+    控制台只有 `ReferenceError: SwaggerUIBundle is not defined`——这不是接口坏了，
+    是静态资源取不到。这里做三件事：
+
+    1. `swagger-ui-dist` 的两个文件随仓库放在 `src/pyknora/static/swagger/`，
+       由本进程在 `/static/swagger/*` 上提供，不依赖任何外网；
+    2. `/docs` 用 `get_swagger_ui_html` 重挂，URL 全部指向本机；
+    3. `/redoc` 同一份 Redoc CDN 问题，直接 307 到 `/docs`，不给两个入口。
+
+    前端（Next）只代理了 `/api/*` 与 `/health`，所以浏览器从 `:3000` 打开时还要
+    `web/next.config.ts` 里那条 `/static/:path*` 转发才拿得到这两个文件。
+    """
+
+    app.mount(
+        "/static/swagger",
+        StaticFiles(directory=str(_SWAGGER_DIR)),
+        name="swagger-static",
+    )
+
+    @app.get("/docs", include_in_schema=False)
+    async def swagger_ui() -> HTMLResponse:
+        return get_swagger_ui_html(
+            openapi_url=app.openapi_url or "/openapi.json",
+            title=f"{app.title} - 接口文档",
+            swagger_js_url="/static/swagger/swagger-ui-bundle.js",
+            swagger_css_url="/static/swagger/swagger-ui.css",
+            swagger_favicon_url="/static/swagger/favicon-32x32.png",
+            swagger_ui_parameters={
+                # 登录一次后刷新不掉令牌：调试带 Bearer 的接口不用反复粘贴。
+                "persistAuthorization": True,
+                "filter": True,
+                "docExpansion": "list",
+                "defaultModelsExpandDepth": 1,
+                "displayRequestDuration": True,
+                "tryItOutEnabled": True,
+            },
+        )
+
+    @app.get("/redoc", include_in_schema=False)
+    async def redoc_redirect() -> RedirectResponse:
+        # Redoc 的 HTML 同样引 jsDelivr，本地网络下一样是空白；
+        # 与其维护第二份静态资源，不如只留 Swagger 一个入口。
+        return RedirectResponse(url="/docs", status_code=307)
+
+
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(
         title="PyKnora",
         version="0.1.0",
         description="企业知识库：增量索引与权限隔离（成员2 交付面：摄取与索引）",
         lifespan=_lifespan,
+        # 关掉 FastAPI 自带的 /docs 与 /redoc：它们的 HTML 把 swagger-ui 的 JS/CSS
+        # 指向 `cdn.jsdelivr.net`，在国内网络下是 ERR_CONNECTION_RESET，
+        # 结果就是"打开 /docs 一片空白、控制台报 SwaggerUIBundle is not defined"。
+        # 下面用本地静态资源重挂这两个路由（见 `_mount_api_docs`）。
+        docs_url=None,
+        redoc_url=None,
     )
+
+    _mount_api_docs(app)
 
     @app.middleware("http")
     async def _attach_request_id(request: Request, call_next):  # type: ignore[no-untyped-def]

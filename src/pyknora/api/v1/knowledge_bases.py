@@ -76,6 +76,8 @@ def _expected_version(if_match: str | None) -> int:
     "",
     status_code=status.HTTP_201_CREATED,
     response_model=KnowledgeBase,
+    summary="新建知识库",
+    description="创建时固化嵌入模型与切片参数（之后不可修改）。返回 201 与完整对象。",
     dependencies=[Depends(require_permission(KNOWLEDGE_BASE_WRITE))],
 )
 async def create(
@@ -102,6 +104,8 @@ async def create(
 @router.get(
     "",
     response_model=KnowledgeBasePage,
+    summary="知识库列表（游标分页）",
+    description="按创建时间倒序；`next_cursor` 为空表示已经到底，没有总数。",
     dependencies=[Depends(require_permission(KNOWLEDGE_BASE_READ))],
 )
 async def list_knowledge_bases(
@@ -131,6 +135,8 @@ async def list_knowledge_bases(
 @router.get(
     "/{kb_id}",
     response_model=KnowledgeBase,
+    summary="单个知识库详情",
+    description="跨工作区或已删除一律 404，不区分「不存在」与「无权访问」。",
     dependencies=[Depends(require_permission(KNOWLEDGE_BASE_READ))],
 )
 async def get_one(
@@ -147,6 +153,8 @@ async def get_one(
 @router.patch(
     "/{kb_id}",
     response_model=KnowledgeBase,
+    summary="知识库改名（需要 If-Match）",
+    description="只允许改 `name`。`If-Match` 传当前 `row_version`：缺头 428，版本不一致 409。",
     dependencies=[Depends(require_permission(KNOWLEDGE_BASE_WRITE))],
 )
 async def patch(
@@ -169,6 +177,8 @@ async def patch(
     "/{kb_id}",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=KnowledgeBaseDeleted,
+    summary="删除知识库（202 异步回收）",
+    description="立即阻断可见性，文档与切片由后台异步清理；同样需要 `If-Match`。",
     dependencies=[Depends(require_permission(KNOWLEDGE_BASE_DELETE))],
 )
 async def remove(

@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field
 from uuid import UUID
 
 from pyknora.core.errors import AppError, ErrorCode
+from pyknora.core.logging import log_event
 from pyknora.core.scope import Scope
 from pyknora.core.settings import (
     RETRIEVAL_STRATEGY_BASELINE,
@@ -127,6 +129,29 @@ def _resolve_candidate_k(*, top_k: int, strategy: str, explicit: int | None) -> 
     )
 
 
+#: `error_type` 的四类取值（计划 §6 / Day4 §8.3）。它是**给排障的人**做粗分类的，
+#: 不是错误码的翻版：错误码有 17 个，观测只关心四件事——要不要补权限、要不要重建
+#: 索引、是不是被过滤掉了、还是库里确实没有。映射不上的错误填 None，不猜。
+_ERROR_TYPE_BY_CODE: dict[ErrorCode, str] = {
+    ErrorCode.UNAUTHENTICATED: "no_permission",
+    ErrorCode.FORBIDDEN: "no_permission",
+    ErrorCode.RESOURCE_NOT_FOUND: "index_missing",
+    ErrorCode.DEPENDENCY_UNAVAILABLE: "index_missing",
+}
+
+
+def _elapsed_ms(since: float) -> float:
+    """从 `since` 到此刻的毫秒数。换算只写这一处，免得哪处漏乘 1000。"""
+    return (time.perf_counter() - since) * 1000.0
+
+
+def _error_type(error: BaseException) -> str | None:
+    """把一次检索失败折成 `error_type` 的一个取值；认不出就 None（不猜）。"""
+    if isinstance(error, AppError):
+        return _ERROR_TYPE_BY_CODE.get(error.code)
+    return None
+
+
 async def search_vector(
     scope: Scope,
     kb_id: UUID,
@@ -217,6 +242,10 @@ async def search_hybrid(
     if rrf_k < 1:
         raise AppError(ErrorCode.INVALID_REQUEST, "rrf_k must be greater than zero")
 
+    # 计时从"真要碰模型/数据库"这一刻起：上面几行都是参数校验，422 的耗时不属于检索，
+    # 混进来会把一次参数错误记成一次"很慢的检索"。
+    started = time.perf_counter()
+
     async def _vector_branch() -> Sequence[ScoredChunk]:
         # 复用 search_vector 而不是在这里再写一遍"embed → 校验维度 → 打库"：
         # 两条路必须对 embedding 的失败方式给出完全一致的处理。
@@ -228,40 +257,76 @@ async def search_hybrid(
         target = keyword_repo if keyword_repo is not None else repo
         return await target.search_keyword(scope, kb_id, normalized_query, limit=candidate_limit)
 
-    if keyword_repo is None:
-        vector_value, vector_error = await _settle(_vector_branch())
-        keyword_value, keyword_error = await _settle(_keyword_branch())
-    else:
-        (vector_value, vector_error), (keyword_value, keyword_error) = await asyncio.gather(
-            _settle(_vector_branch()),
-            _settle(_keyword_branch()),
+    try:
+        if keyword_repo is None:
+            vector_value, vector_error = await _settle(_vector_branch())
+            keyword_value, keyword_error = await _settle(_keyword_branch())
+        else:
+            (vector_value, vector_error), (keyword_value, keyword_error) = await asyncio.gather(
+                _settle(_vector_branch()),
+                _settle(_keyword_branch()),
+            )
+
+        degraded: dict[str, str] = {}
+        for branch, error in (("vector", vector_error), ("keyword", keyword_error)):
+            if error is None:
+                continue
+            if isinstance(error, AppError) and error.code == ErrorCode.INVALID_REQUEST:
+                raise error
+            code = error.code if isinstance(error, AppError) else type(error).__name__
+            degraded[branch] = code
+            logger.warning(
+                "retrieval branch degraded: branch=%s code=%s error=%s", branch, code, error
+            )
+
+        if vector_value is None and keyword_value is None:
+            first = vector_error or keyword_error
+            if isinstance(first, AppError):
+                raise first
+            raise AppError(
+                ErrorCode.INTERNAL_ERROR,
+                "all retrieval branches failed",
+                details={"branches": degraded},
+            ) from first
+
+        hits = reciprocal_rank_fusion(
+            vector_value or [],
+            keyword_value or [],
+            limit=top_k,
+            k=rrf_k,
         )
+    except Exception as exc:
+        # 失败分支也要发事件：`outcome=error` 是"N 次检索有几成直接失败"的唯一来源，
+        # 只在成功路径发等于把最该看见的那一半藏起来。计数写 0 是事实——这次调用一条
+        # 结果都没返回；时间是真测的，不写 0。
+        log_event(
+            "retrieval_completed",
+            retrieval_count=0,
+            duration_ms=_elapsed_ms(started),
+            stage="retrieve",
+            outcome="error",
+            error_type=_error_type(exc),
+        )
+        raise
 
-    degraded: dict[str, str] = {}
-    for branch, error in (("vector", vector_error), ("keyword", keyword_error)):
-        if error is None:
-            continue
-        if isinstance(error, AppError) and error.code == ErrorCode.INVALID_REQUEST:
-            raise error
-        code = error.code if isinstance(error, AppError) else type(error).__name__
-        degraded[branch] = code
-        logger.warning("retrieval branch degraded: branch=%s code=%s error=%s", branch, code, error)
+    if hits:
+        outcome = "ok"
+        error_type: str | None = None
+    else:
+        outcome = "empty"
+        # 两路都成功却一条不出，是"库里确实没有"；有候选却没活到融合结果里，才算
+        # 被过滤掉。后者当前不可达（RRF 不会把非空候选池清空），但这个分支必须留着：
+        # 以后谁在 search_hybrid 里加了打分阈值，标签会自动变成对的，而不是悄悄退化成
+        # `no_evidence` 去骗人。
+        error_type = "filtered_out" if (vector_value or keyword_value) else "no_evidence"
 
-    if vector_value is None and keyword_value is None:
-        first = vector_error or keyword_error
-        if isinstance(first, AppError):
-            raise first
-        raise AppError(
-            ErrorCode.INTERNAL_ERROR,
-            "all retrieval branches failed",
-            details={"branches": degraded},
-        ) from first
-
-    hits = reciprocal_rank_fusion(
-        vector_value or [],
-        keyword_value or [],
-        limit=top_k,
-        k=rrf_k,
+    log_event(
+        "retrieval_completed",
+        retrieval_count=len(hits),
+        duration_ms=_elapsed_ms(started),
+        stage="retrieve",
+        outcome=outcome,
+        error_type=error_type,
     )
     return HybridSearchResult(
         hits=hits,
