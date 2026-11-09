@@ -3,8 +3,11 @@
 企业知识库：增量索引与权限隔离。PDF/Markdown 上传 → 解析切片 → Embedding → 原子发布 →
 混合检索（向量 + 全文）→ 带引用问答（SSE 流式），全链路按 workspace 隔离。
 
-**当前状态全绿**：17 个任务（5 人分工）全部完成，`274` 个用例通过
-（unit 105 / contract 20 / api 96 / integration 53），端到端烟测 14/14，迁库演练通过。
+**当前状态**：17 个任务（5 人分工）**15 已完成 / 2 进行中**——任务 13、14 记 `进行中/75%`，
+Day03 增量待 api 级验收（回调理由见进度表 §3「v1.23 口径说明」）。
+测试规模 **1158** 条（unit 889 / contract 20 / api 170 / integration 79，2026-11-09 `--collect-only -q` 实测求和）。
+**本轮真跑过哪些、哪些未验证**见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) 顶部当轮段——
+本行不写"全绿"：api 与 integration 每例 `TRUNCATE` 全表，在装着评测语料的库上跑会清掉语料。
 进度以 [docs/plans/成员任务进度表.md](docs/plans/成员任务进度表.md) 为准。
 
 ## 目录
@@ -14,8 +17,8 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| `migrations/` | 手写数字号段 SQL（0001–0006），不用 alembic；**只追加不改历史** |
-| `src/pyknora/core/` | `Settings`、`Scope`（身份只从 JWT 来）、17 个统一错误码 |
+| `migrations/` | 手写数字号段 SQL（0001–0016），不用 alembic；**只追加不改历史** |
+| `src/pyknora/core/` | `Settings`、`Scope`（身份只从 JWT 来）、19 个统一错误码 |
 | `src/pyknora/api/` | FastAPI 交付面；`deps.py` 是权限唯一入口，`main.py` 是应用工厂 |
 | `src/pyknora/api/v1/` | 9 组路由：`auth`/`workspaces`/`knowledge_bases`/`documents`/`jobs`/`query`/`chat`/`lineage`/`admin` |
 | `src/pyknora/services/ingest/` | 解析、切片、Embedding（含缓存）、上传、原子发布 |
@@ -101,7 +104,7 @@ docker compose down -v                # 连数据一起删，只在确认要重�
 | 地址 | 内容 |
 | --- | --- |
 | http://127.0.0.1:3000/docs | **Swagger UI**（可交互调试，能直接填 Bearer 令牌试接口） |
-| http://127.0.0.1:3000/api-docs | 中文说明书（31 个动作分组、SSE 四帧、17 个错误码、16 个权限点） |
+| http://127.0.0.1:3000/api-docs | 中文说明书（31 个动作分组、SSE 四帧、17 个错误码、16 个权限点）。**该页内容落后于后端**：SSE 缺 `refusal` 帧、错误码缺 `PARSE_TIMEOUT`/`CSRF_FAILED`（后端 19 个）、认证段仍写「无刷新端点 / 退出只是前端丢弃令牌」而 M3/M4 已落 Cookie 会话 + `/auth/refresh` + 退出撤销全族。以 `docs/tdd/07` 与代码为准，待修 |
 | http://127.0.0.1:8010/docs | 与第一条同一个页面，绕过前端直连后端时的入口 |
 
 Swagger 的 JS/CSS 由后端自托管在 `src/pyknora/static/swagger/`（`swagger-ui-dist` 5.29.0，
@@ -222,9 +225,9 @@ cd web && pnpm typecheck && pnpm test     # 前端类型与单测
 | --- | --- |
 | `uv run ruff check src tests scripts` | 静态检查（**别查全仓**，`.tmp_ref/` 有历史噪音） |
 | `uv run ruff format --check src tests scripts` | 格式检查 |
-| `uv run pytest -q tests/unit` | 876 个，不需要数据库 |
+| `uv run pytest -q tests/unit` | 889 个，不需要数据库 |
 | `uv run pytest -q tests/contract` | 20 个，跨模块契约 |
-| `uv run pytest -q tests/api` | 161 个，ASGI 打真库 |
+| `uv run pytest -q tests/api` | 170 个，ASGI 打真库 |
 | `uv run pytest -q tests/integration` | 79 个，需真 PG |
 | `uv run python scripts/ci.py --profile commit` | 提交门禁三步（lock + lint + manifest，0.1s） |
 | `uv run python scripts/ci.py --stage all` | 推送门禁八步（= `--profile default`，约 50s） |

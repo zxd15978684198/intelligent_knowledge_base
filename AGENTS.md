@@ -44,10 +44,10 @@
 | 明确**不用** | Redis、Celery、alembic（队列=PG 表 + `SKIP LOCKED`，迁移=手写数字号段 SQL） |
 | `lxml` 口径（2026-11-02 改写） | 禁止**直接 `import lxml`** 做 HTML/XML 解析（用 stdlib `ElementTree` 或正则）；OOXML 库的依赖除外——`lxml` 本就是 `uv.lock` 里已声明的直接依赖，`python-pptx` 需要它。理由见 `docs/adr/0008_Document_Parsing_Contract.md` 后果 7 |
 | 本地库 | 容器名与端口以 `.env` 的 `PYKNORA_DB_CONTAINER` / `PYKNORA_DATABASE_URL` 为准；契约默认 `pyknora-pg`，宿主端口 **5433**，库名/用户名 `postgres`，密码 `dev`。**别人的机器上常见 5434 + `pyknora-pg-p0`，先 `docker ps` 再改 `.env`，别改代码默认值** |
-| 库结构 | `migrations/0001_init.sql` 建 **9 张表 + 1 个视图**；`0001–0005` 合计 **16 张表 + `v_active_chunks`**；ORM 只映射 15 个 Row（`outbox` 走原生 SQL、`index_migrations` 走 repo 内的 SQLAlchemy Core） |
-| 错误码 | `src/pyknora/core/errors.py` 的 **17 个** `ErrorCode`；响应体统一 `{"error":{code,message,retryable,details},"request_id"}`。其中 `CONFLICT`/`CURSOR_EXPIRED`/`DEPENDENCY_UNAVAILABLE`/`INTERNAL_ERROR` 是实现期新增、`docs/tdd/07` 原表未列，已在该文 §7 登记为**提议** |
-| 测试 | `tests/unit`（88，不需要数据库）、`tests/contract`（20）、`tests/api`（80，ASGI 打真 PG）、`tests/integration`（48，需真 PG）；合计 236 |
-| 本地门禁 | `.githooks/pre-commit` → `scripts/ci.py --stage all`；激活命令 `git config core.hooksPath .githooks`（见 §6.1） |
+| 库结构 | `migrations/0001_init.sql` 建 **9 张表 + 1 个视图**；`0001–0016`（16 个文件）合计 **17 张表 + `v_active_chunks`**（`0015` 加 `refresh_tokens`，`0016` 只加列不建表）；ORM 映射 **16 个 Row**，只有 `outbox` 无 Row、走原生 SQL（`index_migrations` 有 `IndexMigrationRow`，repo 用的就是它，不是 Core `table()`）。2026-11-09 按 `__tablename__` 与 `CREATE TABLE` 实测 |
+| 错误码 | `src/pyknora/core/errors.py:13-41` 的 **19 个** `ErrorCode`（2026-11-09 实测）；响应体统一 `{"error":{code,message,retryable,details},"request_id"}`。其中 6 个是实现期新增、`docs/tdd/07` 原表未列：`CONFLICT`/`CURSOR_EXPIRED`/`DEPENDENCY_UNAVAILABLE`/`INTERNAL_ERROR` 已在该文 §7 登记为**提议**；`PARSE_TIMEOUT`（422、不可重试，见 `docs/adr/0008` D7）与 `CSRF_FAILED`（403、不可重试，Cookie 会话双提交校验）登记在该文 §7.9，同为**提议** |
+| 测试 | `tests/unit`（889，不需要数据库）、`tests/contract`（20）、`tests/api`（170，ASGI 打真 PG）、`tests/integration`（79，需真 PG）；合计 1158。**数字以 `uv run pytest --collect-only -q <目录>` 实测为准**（2026-11-09 重测：unit 48 文件 / contract 2 / api 15 / integration 14；`-q` 只打印每文件条数、不打印合计行，需自行求和） |
+| 本地门禁 | `.githooks/pre-commit` → `scripts/ci.py --profile commit`（lock,lint,manifest）；`.githooks/pre-push` → `--profile default`（八步）；激活命令 `git config core.hooksPath .githooks`（见 §6.1） |
 
 **两套编号，别混**：`S01–S16` 是实现步骤（计划书），`1–17` 是课件任务编号（进度表/xlsx）。写进度时两个都写清楚。
 
@@ -199,37 +199,50 @@ uv run pytest -q                        # 全量
 
 ### 6.1 本地门禁（提交时自动跑）
 
-门禁只有一处定义：`scripts/ci.py`。`--stage all` = `ruff check` → `ruff format --check` → `pytest -q tests/unit`，
-按"便宜的先跑"排序，任一步失败即停。
+门禁只有一处定义：`scripts/ci.py`，阶段表与顺序**对齐 GateKeeper 插件的 13 阶段 IR**
+（`lock, sync, lint, type, manifest, test, security, build, integration, audit, container, release, deploy`）。
+三个 profile，按"便宜的先跑"排序，任一步失败即停：
+
+| profile | 阶段 | 谁跑 |
+| --- | --- | --- |
+| `commit` | `lock, lint, manifest` | `.githooks/pre-commit` 自动（0.1s 量级） |
+| `default` | `lock, sync, lint, type, manifest, test, security, build`（插件面板里勾的前八步） | `.githooks/pre-push` 自动；`--stage all` 等价于此 |
+| `full` | 全 13 阶段（含 integration/audit/container，release/deploy 本地 SKIP） | 手动 |
 
 ```bash
-git config core.hooksPath .githooks    # 克隆后执行一次：激活钩子
-git hook run pre-commit                # 手动跑一次（等价于提交时那次；实测 7.2s）
+git config core.hooksPath .githooks    # 克隆后执行一次：激活 pre-commit 与 pre-push
+git hook run pre-commit                # 三步（实测 0.1s）
+git hook run pre-push                   # 八步（实测 54.1s）
 uv run python scripts/ci.py --list     # 只看计划，不执行
-uv run python scripts/ci.py --stage lint,test   # 只跑部分阶段
+uv run python scripts/ci.py --profile full --list      # 看 13 阶段全表
+uv run python scripts/ci.py --stage lint,test          # 只跑部分阶段
 ```
+
+结果是**四态**：`PASS` / `FAIL` / `WARN`（advisory：已知红但只报不拦，当前 `type` 31 条诊断、`security` 报告式密钥扫描）/ `SKIP`（未配置或只在 CI，如 `manifest` 缺 `release/agent_versions.json`、`release`/`deploy`）。只有 `FAIL` 改退出码。
 
 - 钩子在 `.githooks/pre-commit`（入库），`git commit` 前自动执行，未通过即中止提交；
 - **不用 prek / pre-commit 管钩子**：它们先 stash 未暂存改动，`pyproject.toml` 会被还原成 HEAD 版本
   （`dependencies = []`、没有 `[tool.ruff]` 表），门禁就跑在错误的项目元数据上——已实测出现假失败（13 个假错）；
 - 钩子必须 LF 换行，`.gitattributes` 已锁 `.githooks/*` 与 `*.sh` 为 `eol=lf`；Windows 上是 CRLF 会报 `bad interpreter`；
-- 门禁**不跑集成测试**（需真 PG），集成层按本节手工跑，后续再接云端 CI。
+- `default` profile 仍**不跑集成测试**（需真 PG），集成层按本节手工跑，或 `--profile full`（它含 integration/audit/container）。
 
 ### 6.2 安全检查（不进提交门禁）
 
-`--stage all` **故意不含 security**：pip-audit 要联网比对 OSV 数据库，结论随远端变化，
-挂到 pre-commit 上等于让网络抖动决定你能不能提交。所以它单独一刀，人工/CI 跑：
+`default` profile 里与安全相关的只有 `security`（密钥扫描，advisory）。**依赖漏洞审计是 `audit`，不在任何 profile 的默认集合里**：
+pip-audit 要联网比对 OSV 数据库，结论随远端变化，挂到 pre-commit 上等于让网络抖动决定你能不能提交。
+所以它单独一刀，人工/CI 跑：
 
 ```bash
-uv run python scripts/ci.py --stage security    # 依赖漏洞：uv run --with pip-audit pip-audit
-uv run --with detect-secrets detect-secrets scan --no-verify src scripts migrations tests   # 硬编码密钥
+uv run python scripts/ci.py --stage audit       # 依赖漏洞：uv run --with pip-audit pip-audit
+uv run python scripts/ci.py --stage security    # 密钥扫描（与 default 里那条相同，advisory）
+uv run --with detect-secrets detect-secrets scan --no-verify src scripts migrations tests   # 硬编码密钥（一次性排查）
 ```
 
 - 2026-10-28 实测：pip-audit → `No known vulnerabilities found`（exit 0）；detect-secrets → `results: {}`；
 - `pip-audit` 不在项目依赖里，必须走 `uv run --with pip-audit`，直接 `uv run pip-audit` 会 `program not found`；
 - detect-secrets 是**报告式**（有命中也 exit 0），要当门禁用得先 `detect-secrets scan > .secrets.baseline`，
   再把 `detect-secrets-hook --baseline` 接进来——这属于团队策略，别偷偷加；
-- 改依赖锁文件（`uv.lock`）、升级镜像、或每月固定日，跑一次 `--stage security`。
+- 改依赖锁文件（`uv.lock`）、升级镜像、或每月固定日，跑一次 `--stage audit`。
 
 ---
 
@@ -238,7 +251,8 @@ uv run --with detect-secrets detect-secrets scan --no-verify src scripts migrati
 提交前依次确认：
 
 1. 本地门禁已通过——`git commit` 时钩子会自动跑；想先自查就 `git hook run pre-commit`
-   （= `ruff check` + `ruff format --check` + `pytest -q tests/unit`，约 7s）；
+   （= `uv lock --check` + `ruff check` + `ruff format --check` + 版本清单，实测 0.1s）；
+   推送前跑 `git hook run pre-push`（八步，实测 54.1s）；
 2. `git status --short` 只含本轮文件（别把 `.idea/`、`.venv/`、`.tmp_ref/` 带进去）；
 3. 只 `git add` 本轮文件，不 `commit --amend` 别人的提交，不改写历史；
 4. 进度文件已按 §3 更新（这是提交的一部分，不是附带）。

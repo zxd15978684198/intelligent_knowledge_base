@@ -224,8 +224,8 @@ terminal 事件每 run 最多一个（UNIQUE terminal fact key），completed/fa
 | `DEPENDENCY_UNAVAILABLE` | 503，是 | 上游（Embedding / LLM / 模型文件）不可用，属于**可重试**的临时故障，必须与 500 区分，否则客户端会放弃重试 |
 | `INTERNAL_ERROR` | 500，是 | 兜底未分类异常；标记 retryable 是为了让 SSE 的 `error` 事件能告诉前端"可重试" |
 
-> 与实现的对账：当前实现共 **17 个** `ErrorCode`，其中 13 个在本表原版内，
-> 上述 4 个为新增。表内其余设计期码（`RUN_CONFLICT`/`APPROVAL_*`/`BUDGET_EXCEEDED`/
+> 与实现的对账（2026-11-09 重测 `src/pyknora/core/errors.py:13-41`）：当前实现共 **19 个** `ErrorCode`，其中 13 个在本表原版内，
+> 6 个为新增——上述 4 个见本表下方，另 2 个（`PARSE_TIMEOUT` / `CSRF_FAILED`）见文末偏差登记 **§7.9**。表内其余设计期码（`RUN_CONFLICT`/`APPROVAL_*`/`BUDGET_EXCEEDED`/
 > `SSRF_BLOCKED`/`BROWSER_*` 等）**未实现**，因为 PyKnora 当前范围不含此类能力——
 > 别照着这张表数"应该有 30 多个码"。
 
@@ -286,4 +286,31 @@ HTTP 状态码保留原值。**两条口径要记住**：① 422 的 `details.er
 把新列列进去，否则迁库/恢复之后引用又只剩起始页——这正是加这一列要修的问题，而且是**静默
 的**（行数、校验项都一致，只是信息丢了）。`schemas/chunk.py` 增加「`page_end_no` 不得小于
 `page_no`」的模型校验：引用范围反对比缺信息更糟。
+
+**7.9 错误码再补 2 个（登记滞后，2026-11-09 回填）**：`PARSE_TIMEOUT` 与 `CSRF_FAILED` 早已在
+`src/pyknora/core/errors.py:37`、`:41` 落地，但本节此前只登记了 4 个新增码，`AGENTS.md` §2 也仍写
+「17 个」——本轮按实测改为 **19 个**。两者状态同为**提议**，待用户接受。
+
+| code | HTTP / retryable | 为什么不能复用已有码 | 决策出处 |
+| --- | --- | --- | --- |
+| `PARSE_TIMEOUT` | 422，**否** | `PARSE_FAILED` 是"这份文件本身坏了"（坏字节，重试仍坏），本码是"解析器没在 60s 预算内跑完"（可能机器慢/文件过大），前端提示与排查方向不同。**重试语义与 `PARSE_FAILED` 一致**：重试同样会超时，故不进 `_RETRYABLE`、直接终态 | `docs/adr/0008_Document_Parsing_Contract.md` D7 |
+| `CSRF_FAILED` | 403，**否** | 复用 `FORBIDDEN` 会把"请重新提交"显示成"不是本空间成员"（`deps.get_scope` 里 403 的既有语义）；复用 `UNAUTHENTICATED`(401) 会触发前端的刷新单飞，而 CSRF 失败刷新救不回来 | `docs/plans/前端架构重设计_进度记录.md` M3 |
+
+> **"不可重试"的实现方式是缺席**：`AppError.retryable` 就是 `code in _RETRYABLE`
+> （`core/errors.py:68-73`，集合内只有 `STALE_ATTEMPT`/`INDEX_INCOMPLETE`/`DEPENDENCY_UNAVAILABLE`/`INTERNAL_ERROR`）。
+> 新增码若要求不可重试，**不要**往任何集合里加它——加进去反而变成可重试。
+
+**7.10 SSE 流内兜底扩到全部异常（2026-11-09）**：§6 的顺序契约不变（`retrieval` → `token`/`refusal` → `error` → `done`），
+变的是**哪些失败会被降级成 `error` 事件**。`services/rag/answer.py` 原先只有三个 except 分支
+（`_UpstreamRejected` / `httpx.TimeoutException` / `httpx.HTTPError`），只覆盖 httpx 的异常家族；
+而 `httpx.InvalidURL` **直接继承 `Exception`、不是 `HTTPError`**，且在 `AsyncClient` 构造阶段就抛
+（实测触发源：本机 `NO_PROXY` 含 `[::1]`，httpx 0.28.1 解析成 `Invalid port: ':1]'`）。
+漏掉它等于让异常穿出已开始发送的生成器，Starlette 撞 `"response already started"`，客户端只看到连接被掐断、
+连错误体都拿不到（`AGENTS.md` §8 第 9 条）。现在末尾追加 `except Exception` 兜底，产出
+`{"code": INTERNAL_ERROR, "message": "chat stream failed unexpectedly (<异常类名>)", "retryable": true}` 再收尾；
+`retryable` 跟随 `_RETRYABLE`（`INTERNAL_ERROR` 在集合内），不在流里另造一套口径。
+**不接 `BaseException`**：`CancelledError` / `GeneratorExit` 必须继续穿出去，否则客户端断开后生成器会被强行续命。
+异常类名进 `message` 是为了可排查，**不含**原始 URL、query、堆栈（堆栈只进服务端 `logger.exception`）。
+守卫用例：`tests/unit/test_rag_answer.py::test_non_http_error_still_becomes_error_event`（打桩必触发）
+与 `::test_broken_no_proxy_does_not_break_the_stream`（真实环境触发源，只断言"不穿出"、不断言具体码，避免绑死 httpx 版本）。
 
