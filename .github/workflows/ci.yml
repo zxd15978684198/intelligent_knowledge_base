@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -78,7 +78,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -162,7 +162,7 @@ jobs:
       # psql 走同一个库，但用原生的 postgresql:// scheme（asyncpg 驱动不认）。
       PYKNORA_PSQL_URL: postgresql://postgres:dev@127.0.0.1:5433/pyknora
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -223,7 +223,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -245,7 +245,7 @@ jobs:
     timeout-minutes: 25
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 1) 编排定义自洽：语法、变量插值、依赖条件都在这一步暴露，不用等构建
       - name: docker compose config
@@ -279,7 +279,7 @@ jobs:
     # 构建产物是这条流水线的公共产物：release 直接下载它，不重复 build ——
     # 两次构建会产出两个哈希不同的 wheel，attestation 与 Release 就对不上。
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -325,7 +325,7 @@ jobs:
       attestations: write
     steps:
       # persist-credentials: false —— 后续步骤不需要用这个 token 推代码
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
