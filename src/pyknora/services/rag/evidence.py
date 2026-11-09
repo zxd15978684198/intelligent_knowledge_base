@@ -49,9 +49,10 @@ EV-04   两个版本对同一事实给了不同数值               ``CONFLICTIN
 
 已知边界（先登记，不在本轮解决）：
 
-1. 只认**阿拉伯数字 + 单位**。中文数字（"五天"）不抽：【"一/二/三"在正文里大量出现在
-   非数量语境（"一致""二手"）】，没有词性标注时抽它只会制造假锚点与假冲突；而语料里的
-   数字事实本来就写作阿拉伯数字。
+1. 只认**带单位的**数字。中文数字（"一次""三十天"）与阿拉伯数字同权（见 `_CN_DIGITS`）：
+   语料里"抽点一次"就是那句话唯一的数量信息，只认阿拉伯数字会让这类片段 anchors=0、
+   问句又在问数值时必然被判不足（实测 `fact-04` 因此被拒答）。裸数字仍然不抽——
+   "第 3 章""2024"不是可核验的数量事实；逐位朗读式年份（"二零二四"）也刻意不解析。
 2. 主题命中是**二元组词面**判断，同义改写（"住宿上限" vs "差旅房费标准"）命不中，结果
    偏向更保守的 ``INSUFFICIENT``。判宽才是危险方向，所以这个偏差可接受；同义词表/向量
    主题命中登记为下一轮项。
@@ -60,12 +61,15 @@ EV-04   两个版本对同一事实给了不同数值               ``CONFLICTIN
    不会把错误答案放出去。
 4. ``required_facts`` 用"去掉全部空白后的子串包含"判命中：它不认同义、不认换序。
    callers 应当传**片段正文里真会出现**的短串（金额、期限、专有名词）。
-5. 冲突的"同一事实"靠**中心词**（`_NumericAnchor.head`，紧贴数字的二元组）判同一性：
+5. 冲突的"同一事实"靠两道判据：**中心词**（`_NumericAnchor.head`，紧贴数字的二元组）
+   加**锚点所在分句去掉锚点后的文本相似度**（`_SAME_FACT_SIMILARITY`）。
    "住宿上限 500"与"住宿下限 300"是两条规定，不判冲突；"每晚 500"与"上限 800"这类
-   只差计价口径的写法靠剥掉 `_HEAD_FILLERS` 归到同一中心词，仍会判冲突。残留误报在
-   近义中心词上（"上限"与"标准"被当成两条事实，可能静默选其中一条），残留漏报在
-   中心词完全改写时（"住宿上限" vs "差旅房费标准"）。登记为下一轮项：条款号/实体
-   识别，或把冲突降级成"并列展示"而不是拒答。
+   只差计价口径的写法靠剥掉 `_HEAD_FILLERS` 归到同一中心词，仍会判冲突。
+   相似度这一道专挡**并列分档**："应届本科试用期 1 个月"与"其他员工试用期 3 个月"
+   共享中心词"用期"却依适用对象不同分档，判冲突会让用户拿不到任何一条（实测
+   `fact-02`/`fact-06` 因此被拒答）。残留误报在近义中心词与整句改写上，残留漏报在
+   "句式雷同但分档不同"上。登记为下一轮项：条款号/实体识别，或把冲突降级成
+   "并列展示"而不是拒答。
 
 内部实现里所有 `signals` 只装 JSON 原生类型（str/int/float/list/dict），不放 UUID、不放
 枚举：它要能原样进日志与 SSE 事件体，见 `EvidenceAssessment.signals` 的注释。
@@ -73,6 +77,7 @@ EV-04   两个版本对同一事实给了不同数值               ``CONFLICTIN
 
 from __future__ import annotations
 
+import difflib
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -280,20 +285,46 @@ _UNIT_ALTERNATION: Final[str] = "|".join(
     sorted((re.escape(unit) for unit in _UNITS), key=len, reverse=True)
 )
 
-#: "数字 + 单位"。数字允许千分位逗号与小数；`(?:个)?` 吃掉"3 **个**工作日"里的量词。
-#: 不匹配裸数字：没有单位的数字（"第 3 章""2024"）不是可核验的**数量事实**，把它当锚点
-#: 会让门控对"章节号"提出数值要求，一路误杀。
+#: 中文数字的字面量与位值。制度文本里"一次""三个月""三十天"是**唯一**的数量信息，
+#: 只认阿拉伯数字会让这些片段 anchors=0，于是"多久/多少"这类问句必然被判不足
+#: （实测 `fact-04`：「财务部门每月至少对库存票据抽点一次」被拒答）。
+#:
+#: 刻意不含"零/〇"：它们几乎只出现在"二零二四年"这类逐位朗读的年份里，按位值解析
+#: 会把 2024 读成 4，反而造出一个假锚点。含零的写法本来也极少。
+_CN_DIGITS: Final[dict[str, int]] = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CN_PLACES: Final[dict[str, int]] = {"十": 10, "百": 100, "千": 1000}
+
+#: "数字 + 单位"。数字允许中文数字、千分位逗号与小数；`(?:个)?` 吃掉"3 **个**工作日"
+#: 里的量词。不匹配裸数字：没有单位的数字（"第 3 章""2024"）不是可核验的**数量事实**，
+#: 把它当锚点会让门控对"章节号"提出数值要求，一路误杀。
 _NUMERIC_ANCHOR: Final[re.Pattern[str]] = re.compile(
-    rf"(?P<num>\d{{1,3}}(?:,\d{{3}})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?:个)?"
+    rf"(?P<num>[一二两三四五六七八九十百千]{{1,6}}|\d{{1,3}}(?:,\d{{3}})+(?:\.\d+)?"
+    rf"|\d+(?:\.\d+)?)\s*(?:个)?"
     rf"(?P<unit>{_UNIT_ALTERNATION})"
 )
 
 #: 问句在问"多少"的线索词。它们让 EV-02 成立：问句自身不带数字（"上限是多少"），
 #: 但**要的答案一定是数字**，所以片段里没有数字就必须判不足——否则"住宿报销的规定"
 #: 这种主题相关但没写金额的片段会被 2 个片段命中的规则放行，正是 §6.1 要拦的场景。
+#:
+#: 刻意**不含**两类词（实测 `syn-03` 被它们误杀）：
+#: - 纯主题词（原表里的"费用"）：它说明"问哪件事"，不说明"要一个数"；
+#: - 单字"几"：它在"几张/几天"里是量词，在"能不能…"的是非句里也可能是笔误式计数，
+#:   单独认它会把"同一笔费用能不能拆成几张单子"读成数值问题。计数式疑问用
+#:   `_COUNTED_QUANTITY_PATTERN`（"几"必须紧跟量词）单独认。
 _QUANTITY_CUES: Final[tuple[str, ...]] = (
     "多少",
-    "几",
     "上限",
     "下限",
     "标准",
@@ -301,7 +332,6 @@ _QUANTITY_CUES: Final[tuple[str, ...]] = (
     "金额",
     "额度",
     "价格",
-    "费用",
     "补贴",
     "天数",
     "期限",
@@ -313,6 +343,67 @@ _QUANTITY_CUES: Final[tuple[str, ...]] = (
     "怎么算",
     "计算方法",
 )
+
+#: "几 + 量词"才算在要数量（"几天""几张""几年"），单独一个"几"不算。
+_COUNTED_QUANTITY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"几[个只份张条天次年月人位件笔台套截页段名]"
+)
+
+#: 是非问句的标记。问句在问"允不允许/是不是"时，哪怕同时出现"多少/几"，答案主体也是
+#: 一条判断而不是一个数 —— 此时不该要求片段里必须有数字（那会把通篇无数字的合规条款
+#: 判成不足，实测 `syn-03`）。
+_YES_NO_MARKERS: Final[tuple[str, ...]] = (
+    "能不能",
+    "能否",
+    "可不可以",
+    "可否",
+    "是不是",
+    "是否",
+    "有没有",
+    "算不算",
+    "要不要",
+    "会不会",
+    "允不允许",
+)
+
+#: 问句在问**哪一类**数量事实的线索词 → 能回答它的锚点类别（类别名与 `_UNITS` 一致）。
+#:
+#: 两处用途：
+#:
+#: - **冲突**只算"被问到的那类事实"。真实样本 `fact-02` 问的是工资，两段片段却对
+#:   "试用期几个月"给了不同值——那不是这条问题的冲突，判成冲突只会让一个本可回答的
+#:   工资问题被拒。
+#: - **覆盖**要求片段给出的是"那一类"数。没有这条时，中文数字锚点（"三天""一年"在
+#:   制度文本里到处都是）会让"片段里有没有数字"几乎恒真：真实样本 `noev-02` 问健身
+#:   补贴额度（语料里没有这件事），一段只写了"累计三天以内不扣工资""满一年后享受
+#:   年假"的片段就此被判成"有数可答"，把该拒答的问成了应答。
+#:
+#: 词表刻意只收**无歧义**的说法：认错方向是"少过滤一次"，比"把能答的问题拒掉"轻得多。
+#: 认不出类别时返回空集，等于不过滤（行为同改动前）。
+_ASKED_CATEGORY_CUES: Final[dict[str, tuple[str, ...]]] = {
+    "工资": ("money",),
+    "薪金": ("money",),
+    "薪酬": ("money",),
+    "薪资": ("money",),
+    "奖金": ("money",),
+    "津贴": ("money",),
+    "补贴": ("money",),
+    "报销": ("money",),
+    "金额": ("money",),
+    "额度": ("money",),
+    "费用": ("money",),
+    "价格": ("money",),
+    "报价": ("money",),
+    "多少天": ("day",),
+    "几天": ("day",),
+    "天数": ("day",),
+    "多久": ("day", "month", "year", "hour", "times"),
+    "多长时间": ("day", "month", "year", "hour", "times"),
+    "期限": ("day", "month", "year"),
+    "次数": ("times",),
+    "几次": ("times",),
+    "比例": ("percent",),
+}
 
 #: 适用对象：上层角色与其"限定词"。
 #:
@@ -403,6 +494,23 @@ _HEAD_ALIASES: Final[dict[str, str]] = {"限额": "上限", "额度": "上限"}
 #: 而"30 年工龄""5 年"这类真期限在区间外。
 _CALENDAR_YEAR_RANGE: Final[tuple[float, float]] = (1900.0, 2100.0)
 
+#: 判"同一条事实"的第二道闸：锚点所在**分句**去掉锚点原文后，两条残余文本的相似度。
+#:
+#: 为什么还需要它：中心词相同也可能是**并列分档**的两条规定——「应届毕业生（本科）……
+#: 试用期 1 个月」与「凡进入我公司的员工……试用期 3 个月」共享中心词"用期"，判成冲突
+#: 会让用户拿不到任何一条（实测 `fact-02`/`fact-06`）。分档规定的两个分句句式相同、
+#: 限定语不同，剔掉数字后残余文本反而差得远；同一条事实的两种写法残余文本几乎一致。
+#:
+#: 0.85 是实测值：真冲突 0.909/0.909/1.000（EV-04 三条用例），假冲突 0.196/0.145/0.118
+#: （两个真实误报），中间空档很宽。
+_SAME_FACT_SIMILARITY: Final[float] = 0.85
+
+#: 分句边界：只横向切到最近的这些字符，不跨句比较。
+_CLAUSE_BOUNDARIES: Final[str] = "；;。!！?？\n\r"
+
+#: 算相似度前剔除的字符（空白与标点）：换个标点、多一个换行不该影响"是不是同一句话"。
+_RESIDUAL_NOISE: Final[re.Pattern[str]] = re.compile(r"[\s，,、：:（）()《》“”‘’\"'\-—~～…/]")
+
 
 # ---------------------------------------------------------------- 内部结构
 
@@ -435,6 +543,16 @@ class _NumericAnchor:
     ``住宿下限 300`` 共享"住宿"，其实在讲两条不同的规定。中心词不同时，
     要再共享一个片段（合计 ≥2）才算同一条事实。
     """
+
+    start: int
+    """锚点在正文里的起始偏移（含）。
+
+    只服务"分句相似度"这一道判据（`_clause_residual`）：同一事实换个数字，它所在分句
+    的其余部分是同一句话；分档规定的两句话则差得远。不参与冲突以外的任何判定。
+    """
+
+    end: int
+    """锚点在正文里的结束偏移（不含），与 ``start`` 一起把锚点原文从分句中剔掉。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,12 +672,42 @@ def _subject_parts(text: str, end: int) -> tuple[frozenset[str], str]:
     return _cjk_fragments(window), _HEAD_ALIASES.get(head, head)
 
 
+def _cn_number(token: str) -> float | None:
+    """把 ``"三"`` / ``"十五"`` / ``"三十"`` / ``"一百五十"`` 解析成数值。
+
+    只覆盖制度文本里会出现的写法（位值制，最大千位）。含"零/〇"的逐位朗读式
+    （``"二零二四"``）返回 ``None`` —— 那不是数量，宁可不建锚点。
+    """
+    total = 0
+    digit = 0
+    for char in token:
+        if char in _CN_DIGITS:
+            digit = _CN_DIGITS[char]
+            continue
+        place = _CN_PLACES.get(char)
+        if place is None:
+            return None
+        total += (digit or 1) * place
+        digit = 0
+    return float(total + digit)
+
+
+def _anchor_value(raw: str) -> float | None:
+    """锚点原文的数字部分 → 数值（阿拉伯/中文两种写法）。解析不了返回 ``None``。"""
+    if raw[:1].isdigit():
+        return float(raw.replace(",", ""))
+    return _cn_number(raw)
+
+
 def _numeric_anchors(text: str) -> list[_NumericAnchor]:
     """抽出正文里所有"数字 + 单位"锚点（按出现顺序）。"""
     anchors: list[_NumericAnchor] = []
     for match in _NUMERIC_ANCHOR.finditer(text):
         category, multiplier = _UNITS[match.group("unit")]
-        value = float(match.group("num").replace(",", "")) * multiplier
+        number = _anchor_value(match.group("num"))
+        if number is None:
+            continue
+        value = number * multiplier
         low, high = _CALENDAR_YEAR_RANGE
         if category == "year" and low <= value <= high:
             continue
@@ -571,14 +719,36 @@ def _numeric_anchors(text: str) -> list[_NumericAnchor]:
                 display=match.group(0),
                 subject=subject,
                 head=head,
+                start=match.start(),
+                end=match.end(),
             )
         )
     return anchors
 
 
+def _asked_categories(question: str) -> frozenset[str]:
+    """问句在问哪一类数量事实；认不出返回空集（调用方据此不做类别过滤）。"""
+    return frozenset(
+        category
+        for cue, categories in _ASKED_CATEGORY_CUES.items()
+        if cue in question
+        for category in categories
+    )
+
+
 def _asks_for_quantity(question: str) -> bool:
-    """问句是不是在要一个**数值**（哪怕它自己没写数字）。"""
-    return any(cue in question for cue in _QUANTITY_CUES)
+    """问句是不是在要一个**数值**（哪怕它自己没写数字）。
+
+    两个收紧（都有实测样本顶着，见 `_QUANTITY_CUES` 的注释）：
+
+    - 计数式疑问必须"几 + 量词"（`几天`/`几张`），裸"几"不算；
+    - 是非问句（"能不能…"）不算——答案主体是一条判断，不是数。
+    """
+    if any(marker in question for marker in _YES_NO_MARKERS):
+        return False
+    return any(cue in question for cue in _QUANTITY_CUES) or bool(
+        _COUNTED_QUANTITY_PATTERN.search(question)
+    )
 
 
 def _asks_about_base_role(question: str) -> bool:
@@ -683,18 +853,52 @@ def _has_predecessor(fragment: str, pool: Sequence[str]) -> bool:
 # ---------------------------------------------------------------- 判定
 
 
+def _clause_prefix(text: str, start: int) -> str:
+    """取锚点**之前**的那半句（回到最近的分句边界），剥掉空白与标点。
+
+    只用前缀、不看后缀，是因为区分"是不是同一件事"的限定语在中文制度文本里一律
+    出现在数字**前面**："应届毕业生（本科）：…试用期 1 个月"、"（3）已婚而父母均
+    在外地居住…20 天"。数字后面跟的"超出部分自理""需提前审批"是同一条规定的补充
+    说明，把它算进来只会稀释相似度——实测会把真冲突（500 元 vs 800 元）压到阈值以下。
+    """
+    left = start
+    while left > 0 and text[left - 1] not in _CLAUSE_BOUNDARIES:
+        left -= 1
+    return _RESIDUAL_NOISE.sub("", text[left:start])
+
+
+def _same_fact_similarity(
+    left: _NumericAnchor, right: _NumericAnchor, *, left_text: str, right_text: str
+) -> float:
+    """两条锚点的"前缀分句"有多像（0..1）；用于把并列分档和真冲突分开。"""
+    dirty_left = _clause_prefix(left_text, left.start)
+    dirty_right = _clause_prefix(right_text, right.start)
+    if not dirty_left and not dirty_right:
+        # 两段都只有"数字 + 单位"本身（如表格单元格），没有可比文本 → 按同一事实处理。
+        return 1.0
+    return difflib.SequenceMatcher(None, dirty_left, dirty_right).ratio()
+
+
 def _detect_conflicts(
-    question_fragments: frozenset[str], views: Sequence[_ChunkView]
+    question_fragments: frozenset[str],
+    views: Sequence[_ChunkView],
+    *,
+    asked_categories: frozenset[str] = frozenset(),
 ) -> list[_Conflict]:
     """找出"不同片段对同一被问到的事实给了不同取值"。
 
-    三条限制是为了让"冲突"只落在真冲突上：
+    四道限制是为了让"冲突"只落在真冲突上：
 
     1. **同类**（money/day/…）：不同类的两个数（天数与金额）永远不是同一条事实的两个值；
     2. **同一主语**：两处数字前面的窗口要有共同二元组，否则"年假 5 天"与"病假 3 天"
        会被判成矛盾；
     3. **主语与问句相交**：只判**被问到**的事实。条款之间本来就可以有不同数值
-       （年假 5 天、婚假 10 天），把它们全算冲突等于任何长文档都答不了。
+       （年假 5 天、婚假 10 天），把它们全算冲突等于任何长文档都答不了；
+    4. **落在被问的那一类上**（`asked_categories`）：问工资时"试用期 1 个月 vs 6 个月"
+       不是冲突，它是另一条事实的取舍。
+
+    中心词相同之后还有一道"分句相似度"（`_SAME_FACT_SIMILARITY`）：并列分档的两条
+    规定共享中心词，但语境不同，不算矛盾。
 
     归并按"同类 + 主题片段有交集"合并：合并错了只会让 reason 宽泛一点，拆错却会让两条
     冲突各自"看起来唯一"，反而误导用户——所以宁可合并。
@@ -705,6 +909,8 @@ def _detect_conflicts(
             for left_anchor in left.anchors:
                 for right_anchor in right.anchors:
                     if left_anchor.category != right_anchor.category:
+                        continue
+                    if asked_categories and left_anchor.category not in asked_categories:
                         continue
                     if left_anchor.value == right_anchor.value:
                         continue
@@ -719,6 +925,19 @@ def _detect_conflicts(
                         if left_anchor.head != right_anchor.head:
                             continue
                     elif len(shared) < 2:
+                        continue
+                    # 第四道：分句相似度。中心词相同的两处数字仍可能是**并列分档**的两条
+                    # 规定（"应届本科试用期 1 个月" vs "其他员工试用期 3 个月"），判成冲突
+                    # 等于把制度里的分支说成"资料自相矛盾"，用户两边都拿不到。
+                    if (
+                        _same_fact_similarity(
+                            left_anchor,
+                            right_anchor,
+                            left_text=left.evidence.content,
+                            right_text=right.evidence.content,
+                        )
+                        < _SAME_FACT_SIMILARITY
+                    ):
                         continue
                     target = next(
                         (
@@ -757,6 +976,7 @@ def _covers(
     question_fragments: frozenset[str],
     asked_quantity: bool,
     facts: Sequence[str],
+    asked_categories: frozenset[str] = frozenset(),
 ) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
     """这条片段是否足以支撑回答；同时返回（缺失锚点，缺失事实）。
 
@@ -765,10 +985,11 @@ def _covers(
     - **问句带数字**：以"数字全被覆盖"为准，**不额外要求主题命中**。数字 + 单位本身
       就是强判据（"500 元"在文档里通常只有一处含义），再叠一条词面要求只会误杀
       （计划 §11 R4 列的第一风险就是误杀）。
-    - **问句不带数字但在问数值**：要求"确实有数字"——这是计划 §6.3 第 2 层的原话
-      （"片段必须含数字，否则 INSUFFICIENT"），也是 EV-02 的机制。只看主题片段的话，
-      "住宿报销规定：员工出差应选择合标酒店"会以 3 个片段命中被放行，而那正是
-      §6.1 要拦的"相关但不足"。
+    - **问句不带数字但在问数值**：要求"确实有数，而且是被问到的那类数"——这是计划
+      §6.3 第 2 层的原话（"片段必须含数字，否则 INSUFFICIENT"），也是 EV-02 的机制；
+      类别这一层见 `_ASKED_CATEGORY_CUES` 的注释（真实样本 `noev-02` 靠它挡住）。
+      只看主题片段的话，"住宿报销规定：员工出差应选择合标酒店"会以 3 个片段命中被
+      放行，而那正是 §6.1 要拦的"相关但不足"。
     - **问句既不带数字也不问数值**：退化成"至少 2 个主题片段"（计划 §6.4 的 EV 口径）。
       1 个片段可能是巧合（"住宿"这个词在差旅文档里到处都是），2 个才开始像同一件事。
     """
@@ -778,7 +999,10 @@ def _covers(
     if question_anchors:
         covered = not missing_anchors
     elif asked_quantity:
-        covered = len(hits) >= 2 and bool(view.anchors)
+        has_number = bool(view.anchors)
+        if has_number and asked_categories:
+            has_number = any(anchor.category in asked_categories for anchor in view.anchors)
+        covered = len(hits) >= 2 and has_number
     else:
         covered = len(hits) >= 2
     return covered and not missing_facts, missing_anchors, missing_facts
@@ -791,6 +1015,7 @@ def _best_view(
     question_fragments: frozenset[str],
     asked_quantity: bool,
     facts: Sequence[str],
+    asked_categories: frozenset[str] = frozenset(),
 ) -> _ChunkView | None:
     """最接近"能答"的那条片段，只用于把 reason 说具体（"第 2 段还缺什么"）。
 
@@ -805,6 +1030,7 @@ def _best_view(
             question_fragments=question_fragments,
             asked_quantity=asked_quantity,
             facts=facts,
+            asked_categories=asked_categories,
         )
         hits = len(view.fragments & question_fragments)
         scored.append((hits, -len(missing_anchors), -len(missing_facts), view))
@@ -859,6 +1085,7 @@ def assess(
     question_anchors = _numeric_anchors(question)
     question_fragments = _cjk_fragments(question)
     asked_quantity = _asks_for_quantity(question)
+    asked_categories = _asked_categories(question)
     signals = _new_signals(
         evidence=evidence,
         question_anchors=question_anchors,
@@ -906,7 +1133,7 @@ def assess(
 
     # EV-04：冲突优先于支持。两条片段各说一个值，单看每条都"命中"；此时若先判
     # SUPPORTED 就会把一个互相矛盾的事实当成确定答案发出去（§7.1 第二种结果）。
-    conflicts = _detect_conflicts(question_fragments, candidates)
+    conflicts = _detect_conflicts(question_fragments, candidates, asked_categories=asked_categories)
     if conflicts:
         positions = [position for conflict in conflicts for position in conflict.positions]
         wanted = set(positions)
@@ -932,6 +1159,7 @@ def assess(
             question_fragments=question_fragments,
             asked_quantity=asked_quantity,
             facts=facts,
+            asked_categories=asked_categories,
         )
         if covered:
             supporting.append(view)
@@ -962,6 +1190,7 @@ def assess(
         question_fragments=question_fragments,
         asked_quantity=asked_quantity,
         facts=facts,
+        asked_categories=asked_categories,
     )
     reason, claims, missing_anchor_texts, missing_facts = _insufficient_detail(
         best,
@@ -970,6 +1199,7 @@ def assess(
         question_fragments=question_fragments,
         asked_quantity=asked_quantity,
         facts=facts,
+        asked_categories=asked_categories,
     )
     signals["missing_anchor_texts"] = list(missing_anchor_texts)
     signals["missing_required_facts"] = list(missing_facts)
@@ -1011,6 +1241,7 @@ def _insufficient_detail(
     question_fragments: frozenset[str],
     asked_quantity: bool,
     facts: Sequence[str],
+    asked_categories: frozenset[str] = frozenset(),
 ) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """把"为什么不足"拆成人话：返回（reason，claims，缺失锚点，缺失事实）。"""
     reasons: list[str] = []
@@ -1044,6 +1275,7 @@ def _insufficient_detail(
             question_fragments=question_fragments,
             asked_quantity=asked_quantity,
             facts=facts,
+            asked_categories=asked_categories,
         )
         hits = sorted(best.fragments & question_fragments)
         if missing_anchor_texts:
@@ -1057,6 +1289,19 @@ def _insufficient_detail(
                 "但问题在要具体数值，该片段没有任何数字"
             )
             claims.append(f"问题要的是数值，最相关的第 {best.position} 段不含任何数字")
+        elif (
+            asked_quantity
+            and not question_anchors
+            and best.anchors
+            and asked_categories
+            and not any(anchor.category in asked_categories for anchor in best.anchors)
+        ):
+            # 有数字，但不是被问到的那类（问金额却只写了"三天""一年"）。这类片段看着
+            # 有数，其实答不了问题——真实样本 `noev-02` 就是被它放行的。
+            got = "、".join(sorted({anchor.display for anchor in best.anchors}))
+            want = "、".join(sorted(asked_categories))
+            reasons.append(f"第 {best.position} 段虽有数值（{got}），但不是问题要的那类（{want}）")
+            claims.append(f"没有片段给出问题要的那类数值（{want}）")
         if not question_anchors and not asked_quantity and len(hits) < 2:
             reasons.append(f"第 {best.position} 段只命中 {len(hits)} 个主题片段，未达 2 个的下限")
             claims.append(

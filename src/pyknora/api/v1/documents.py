@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Header, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,7 @@ from pyknora.core.errors import AppError, ErrorCode, not_found
 from pyknora.core.scope import Scope
 from pyknora.core.settings import settings
 from pyknora.db.repos.reads import SqlChunkRepo, SqlDocumentRepo, SqlIndexBuildRepo
+from pyknora.models.tables import DEFAULT_AUTHORITY
 from pyknora.services.auth.permissions import (
     CHUNK_READ,
     DOCUMENT_DELETE,
@@ -97,6 +98,9 @@ class DocumentDetail(BaseModel):
     document_id: UUID
     workspace_id: UUID
     kb_id: UUID
+    # 只读派生字段（不落库）：由 active_document_version 的 object_key 末段解析。
+    # None 表示还没有版本，或历史行的对象键里不含文件名 —— 前端回落显示短 document_id。
+    filename: str | None = None
     active_document_version_id: UUID | None = None
     active_build_id: UUID | None = None
     active_index_version: int | None = None
@@ -123,6 +127,8 @@ class DocumentSummary(BaseModel):
 
     document_id: UUID
     kb_id: UUID
+    # 同 DocumentDetail.filename：只读派生，来源是活动版本的 object_key 末段。
+    filename: str | None = None
     active_document_version_id: UUID | None
     active_build_id: UUID | None
     active_index_version: int | None
@@ -163,6 +169,11 @@ async def upload(
     session: Annotated[AsyncSession, Depends(get_session)],
     kb_repo: Annotated[Any, Depends(get_kb_repo)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    # 有效期与权威度（migrations/0016）：两个时间都可空，语义见 ingest.documents。
+    # 用表单字段而不是 JSON：这个端点是 multipart，没有可复用的 body 模型。
+    effective_from: Annotated[datetime | None, Form()] = None,
+    effective_until: Annotated[datetime | None, Form()] = None,
+    authority: Annotated[int | None, Form(ge=0, le=32767)] = None,
 ) -> DocumentAccepted:
     if kb_repo is None:
         raise AppError(ErrorCode.DEPENDENCY_UNAVAILABLE, "knowledge base repo not configured")
@@ -188,6 +199,9 @@ async def upload(
         content_type=file.content_type,
         principal_id=scope.principal_id,
         idempotency_key=idempotency_key,
+        effective_from=effective_from,
+        effective_until=effective_until,
+        authority=authority if authority is not None else DEFAULT_AUTHORITY,
     )
     await session.commit()
 
@@ -240,6 +254,7 @@ async def list_documents(
             DocumentSummary(
                 document_id=doc.document_id,
                 kb_id=doc.kb_id,
+                filename=doc.filename,
                 active_document_version_id=doc.active_document_version_id,
                 active_build_id=doc.active_build_id,
                 active_index_version=doc.active_index_version,
@@ -280,6 +295,7 @@ async def get_document(
         document_id=doc.document_id,
         workspace_id=doc.workspace_id,
         kb_id=doc.kb_id,
+        filename=doc.filename,
         active_document_version_id=doc.active_document_version_id,
         active_build_id=doc.active_build_id,
         active_index_version=doc.active_index_version,

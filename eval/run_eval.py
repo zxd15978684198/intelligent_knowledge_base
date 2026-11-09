@@ -563,6 +563,12 @@ class EvalClient:
             raise RuntimeFailure("登录响应里没有 access_token")
         # token 只进内存（计划 §3.8 第 2 条）：落盘的那份迟早进 git。
         self._token = str(token)
+        # login 会下发 pyknora_access / pyknora_refresh / pyknora_csrf 三件套，
+        # httpx 默认把它们塞进 cookie jar；后续写请求就带上了会话 Cookie，被
+        # require_csrf 判成"浏览器会话缺 CSRF 头"→ 403。评测的身份通道是 Bearer，
+        # 因此登录后立刻清空 jar，让整个进程保持"无 Cookie 的 CLI 调用方"语义
+        # （与 tests/api/conftest.py 的 _BearerOnlyTransport 同一个道理）。
+        self._client.cookies.clear()
         return payload if isinstance(payload, dict) else {}
 
     def _headers(self, workspace_id: str | None) -> dict[str, str]:
@@ -664,6 +670,13 @@ class EvalClient:
                         if raw_status:
                             run.status = str(raw_status)
                         run.invalid_citations = int(data.get("invalid_citations") or 0)
+                        # 引用以 `done.used_citations` 为准：`retrieval` 帧是模型跑之前
+                        # 发的，只能全列读到的资料；用它算引用准确率，等于把"读到的"
+                        # 当成"用到的"，分母被系统性放大。老版本服务端没有这个字段，
+                        # 此时保留 retrieval 帧收下的那份（不是 0）。
+                        used = data.get("used_citations")
+                        if isinstance(used, list) and used:
+                            run.citations = [item for item in used if isinstance(item, dict)]
                         prompt_version = data.get("prompt_version")
                         if prompt_version:
                             run.response_prompt_version = str(prompt_version)

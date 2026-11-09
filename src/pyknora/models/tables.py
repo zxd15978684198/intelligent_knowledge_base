@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
@@ -18,6 +18,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -34,6 +35,11 @@ class Base(DeclarativeBase):
     pass
 
 
+#: 文档默认权威度：数值越小越权威。100 是"普通上传"的默认档，旧版手册这类
+#: 已退休文档应显式设成更大的值（或直接给 `effective_until`），别指望排序兜住。
+DEFAULT_AUTHORITY: Final[int] = 100
+
+
 class DocumentRow(Base):
     __tablename__ = "documents"
 
@@ -47,6 +53,14 @@ class DocumentRow(Base):
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     row_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 文档有效期与权威度（migrations/0016）：同一 KB 里并存旧版手册时，只有"现行"的
+    # 那份能进检索；`authority` 数值越小越权威，用于同分时排序。
+    # 两个时间都可空：`effective_from` 空 = 一直有效，`effective_until` 空 = 现行不失效。
+    effective_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    effective_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    authority: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=DEFAULT_AUTHORITY, server_default="100"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

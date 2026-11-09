@@ -24,8 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pyknora.core.errors import AppError, ErrorCode, not_found
 from pyknora.core.scope import Scope
 from pyknora.core.settings import settings
+from pyknora.models.tables import DEFAULT_AUTHORITY, DocumentRow, DocumentVersionRow, IndexBuildRow
 from pyknora.models.tables import DocumentBlobRow as BLOB_TABLE
-from pyknora.models.tables import DocumentRow, DocumentVersionRow, IndexBuildRow
 from pyknora.services.contracts.reads import KbRepo
 from pyknora.services.ingest.embedder import check_profile_compat, resolve_embedding_identity
 from pyknora.services.ingest.publish import find_version_by_hash
@@ -72,6 +72,9 @@ async def upload_document(
     content_type: str | None = None,
     principal_id: UUID | None = None,
     idempotency_key: str | None = None,
+    effective_from: datetime | None = None,
+    effective_until: datetime | None = None,
+    authority: int = DEFAULT_AUTHORITY,
 ) -> UploadResult:
     """上传入口。返回 deduped 标志，调用方据此决定回 200 还是 202。"""
     if not data:
@@ -118,6 +121,9 @@ async def upload_document(
             kb_id=kb_id,
             generation=1,
             row_version=1,
+            effective_from=effective_from,
+            effective_until=effective_until,
+            authority=authority,
         )
         session.add(document)
         await session.flush()

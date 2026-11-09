@@ -108,6 +108,31 @@ def test_ev02_topic_only_is_insufficient_when_question_asks_for_a_number() -> No
     assert result.unsupported_claims != ()
 
 
+def test_numbers_of_the_wrong_kind_do_not_satisfy_a_quantity_question() -> None:
+    """片段里有数字，但不是**被问到的那类**数 → 仍然 INSUFFICIENT。
+
+    中文数字锚点上线后（"三天""一年""一次"在制度文本里到处都是），"片段里有没有数字"
+    这条判据几乎恒真。真实样本 `noev-02`（问健身补贴额度，语料里没有这件事）就是被
+    一段只写了"累计三天以内不扣工资""满一年后享受年假"的片段放行的——它看着有数，
+    其实答不了金额问题。
+    """
+    result = assess(
+        "公司每年给员工的健身补贴额度是多少？",
+        [
+            _evidence(
+                content=(
+                    "累计三天以内的，员工康复后通过努力能够弥补工作的，原则上不扣发工资；"
+                    "在公司工作满一年后，员工可以按规定享受探亲假、年休假。"
+                )
+            )
+        ],
+    )
+
+    assert result.verdict is Verdict.INSUFFICIENT
+    assert result.signals["quantity_asked"] is True
+    assert "不是问题要的那类" in result.reason
+
+
 def test_no_anchor_and_no_quantity_cue_needs_two_fragments() -> None:
     """问句既无数字也不问数值时，退化成"至少 2 个主题片段"。"""
     supported = assess(
@@ -310,6 +335,143 @@ def test_calendar_year_is_not_a_duration_anchor() -> None:
 
     assert result.verdict is not Verdict.CONFLICTING
     assert result.signals["conflicts"] == []
+
+
+# ---------------------------------------------------------------- 限定语分档
+#
+# 来历：真实语料里「应届毕业生（本科）…试用期 1 个月」与「凡进入我公司员工…试用期
+# 3 个月」共享中心词「用期」与主题「试用」，被判成"同一事实的两个取值"→ 拒答，
+# 实际是**两条适用范围不同的规定**。同理探亲假按"配偶分居/未婚父母/已婚父母"分档。
+# 实测（`eval/baselines/baseline-20261108-r3`）：`fact-02`、`fact-06` 都是这么被拒的。
+#
+# 判据用「锚点所在分句去掉锚点后的文本相似度」：同一事实换个数字，残余文本几乎一致；
+# 不同分档的两条规定，残余文本差得远。阈值见 `_SAME_FACT_SIMILARITY`。
+
+
+def test_qualifier_scoped_values_are_not_a_conflict() -> None:
+    """「本科岗 1 个月」与「其他员工 3 个月」是两条规定，不是同一条事实的两个取值。"""
+    result = assess(
+        "应届本科毕业生试用期是多久？",
+        [
+            _evidence(
+                chunk_id=_CHUNK_A,
+                content="应届毕业生（本科）：合同期限最低 3 年，试用期 1 个月。",
+            ),
+            _evidence(
+                chunk_id=_CHUNK_B,
+                content="凡进入我公司的员工，必须经过考试与面试，试用期 3 个月。",
+            ),
+        ],
+    )
+
+    assert result.verdict is not Verdict.CONFLICTING
+    assert result.signals["conflicts"] == []
+
+
+def test_parallel_clauses_for_different_situations_are_not_a_conflict() -> None:
+    """探亲假按"配偶分居/未婚父母/已婚父母"分档给天数，三种情形不互相矛盾。"""
+    result = assess(
+        "员工与配偶分居两地，每年可以享受多少天探亲假？",
+        [
+            _evidence(
+                chunk_id=_CHUNK_A,
+                content="（1）与配偶分居两地，每年员工可享受一次为期 30 天的探亲假。",
+            ),
+            _evidence(
+                chunk_id=_CHUNK_B,
+                content="（3）已婚而父母均在外地居住，每四年员工可享受为期 20 天的探亲假。",
+            ),
+        ],
+    )
+
+    assert result.verdict is not Verdict.CONFLICTING
+    assert result.signals["conflicts"] == []
+
+
+def test_conflict_in_unasked_category_does_not_block_the_answer() -> None:
+    """问**工资**时，片段间"试用期 1 个月 vs 6 个月"的差异不是这条事实的冲突。
+
+    真实样本 `fact-02`：问句要的是"应届本科试用期工资"，冲突却落在"试用期月数"上，
+    结果一条本可回答的工资问题被拒。冲突必须落在**被问到的那类事实**上。
+    """
+    result = assess(
+        "应届本科毕业生试用期的工资是多少？",
+        [
+            _evidence(
+                chunk_id=_CHUNK_A,
+                content="应届毕业生（本科）：试用期 1 个月，工资 1800 元。",
+            ),
+            _evidence(
+                chunk_id=_CHUNK_B,
+                content="凡进入我公司的员工须经考试与面试，试用期 6 个月。",
+            ),
+        ],
+    )
+
+    assert result.verdict is not Verdict.CONFLICTING
+    assert result.signals["conflicts"] == []
+
+
+def test_yes_no_question_about_a_topic_word_is_not_a_quantity_question() -> None:
+    """ "能不能把费用拆成几张单子"是**是非题**：问的是允不允许，不是要一个数值。
+
+    真实样本 `syn-03`：问句里的"几"是"几张"的量词、"费用"只是主题词，`_QUANTITY_CUES`
+    却把两个都当数值线索 → 要求片段必须有数字 → 一段合规条款（通篇无数字）被拒。
+    """
+    result = assess(
+        "同一笔费用能不能拆成几张单子分开报？",
+        [_evidence(content="费用报销应及时并严禁分拆，属于同一项目、同一性质的费用按单笔报销。")],
+    )
+
+    assert result.verdict is Verdict.SUPPORTED
+    assert result.signals["quantity_asked"] is False
+
+
+# ---------------------------------------------------------------- 中文数字锚点
+#
+# 来历：真实语料里「财务部门每月至少对库存票据抽点一次」是这句话唯一的数量信息，
+# 而 `_NUMERIC_ANCHOR` 原先只认阿拉伯数字 → 该片段 anchors=0 → 问句又在问数值
+# （"多久"）时被 `covered = len(hits) >= 2 and bool(view.anchors)` 判成不足。
+# 实测（`eval/baselines/baseline-20261108-r3`）：`fact-04` 就是被这一条拒掉的。
+
+
+def test_chinese_numeral_is_a_numeric_anchor() -> None:
+    """``抽点一次`` 里的"一次"是数量锚点：中文数字与阿拉伯数字同权。"""
+    result = assess(
+        "库存票据多久抽点一次？",
+        [
+            _evidence(
+                content="财务部门每月至少对库存票据抽点一次，并编制盘点表。",
+            )
+        ],
+    )
+
+    assert result.verdict is Verdict.SUPPORTED
+    assert result.signals["supported_positions"] == [1]
+
+
+def test_chinese_and_arabic_forms_of_the_same_quantity_are_equal() -> None:
+    """``3 个月`` 与 ``三个月`` 是同一个值，判冲突时不能当成两个不同取值。"""
+    result = assess(
+        "试用期最长多久？",
+        [
+            _evidence(chunk_id=_CHUNK_A, content="合同期限满三年的，试用期不得超过 3 个月。"),
+            _evidence(chunk_id=_CHUNK_B, content="合同期限满三年的，试用期不得超过三个月。"),
+        ],
+    )
+
+    assert result.verdict is not Verdict.CONFLICTING
+    assert result.signals["conflicts"] == []
+
+
+def test_compound_chinese_numeral_is_parsed_as_one_value() -> None:
+    """``三十天`` 是 30，不是 3 与 10 两个锚点。"""
+    result = assess(
+        "旷工多少天作除名处理？",
+        [_evidence(content="连续旷工超过三十天，作除名处理。")],
+    )
+
+    assert result.verdict is Verdict.SUPPORTED
 
 
 # ---------------------------------------------------------------- 空证据 / 边界

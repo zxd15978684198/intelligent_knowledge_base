@@ -214,9 +214,130 @@ async def test_only_supporting_chunks_become_citations(
     assert done["completion_tokens"] == 2
     assert done["prompt_version"] == "v-stub"
     assert done["invalid_citations"] == 0
+    # 正文没有 `[资料 N]` 序号（这条 stub 就是），"用了几条"不可知 → 退回全量，
+    # 不许当成"一条都没用"：那会把有据可查的答案显示成无依据。
+    assert [citation["chunk_id"] for citation in done["used_citations"]] == [str(kept.chunk_id)]
 
 
-# ---------------------------------------------------------------- 3. 预算耗尽：一次检索都不发
+async def test_done_lists_only_the_citations_the_answer_actually_used(
+    wired: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`done.used_citations` 只报正文真标注过的那几条。
+
+    `retrieval` 帧在模型跑之前发出，只能全列读到的资料；拿它算引用准确率等于把
+    "读到的"当成"用到的"，分母被系统性放大（实测 141 条引用里只有 39 条含金标事实）。
+    """
+    cited = _chunk(content="一线城市住宿报销上限为 500 元。", page_no=3)
+    unused = _chunk(content="本文与报销无关。")
+    _stub_search(monkeypatch, hits=[cited, unused], degraded={})
+    _stub_assessment(
+        monkeypatch,
+        EvidenceAssessment(
+            verdict=Verdict.SUPPORTED,
+            supporting_chunk_ids=(cited.chunk_id, unused.chunk_id),
+            reason="stub",
+        ),
+    )
+    _stub_answer(
+        monkeypatch,
+        [
+            ("token", "一线城市住宿上限为 500 元"),
+            ("token", " [资料 1]。"),
+            ("usage", {"prompt_tokens": 3, "completion_tokens": 2}),
+        ],
+    )
+
+    events = await _run()
+    retrieval = events[0][1]
+    done = events[-1][1]
+
+    # 读到的仍是两条（模型确实读了），但只用了一条。
+    assert len(retrieval["citations"]) == 2
+    assert [citation["chunk_id"] for citation in done["used_citations"]] == [str(cited.chunk_id)]
+    # 越界计数看的是正文序号与上下文规模，不因收窄而变。
+    assert done["invalid_citations"] == 0
+
+
+async def test_model_side_refusal_is_reported_as_abstained(
+    wired: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模型自己拒绝执行时，终态是 `ABSTAINED`，不是 `COMPLETED`。
+
+    `ABSTAINED` 原本只由证据门控设置：门控看着资料相关（SUPPORTED）就放行，模型却回
+    "我不能这样做"。这种回答记成 `COMPLETED`，"拒答"与"作答"在监控和评测里就分不开
+    （实测 4 条安全样本正文全是拒答、状态全是 COMPLETED）。
+    """
+    chunk = _chunk(content="一线城市住宿报销上限为 500 元。", page_no=3)
+    _stub_search(monkeypatch, hits=[chunk], degraded={})
+    _stub_assessment(
+        monkeypatch,
+        EvidenceAssessment(
+            verdict=Verdict.SUPPORTED, supporting_chunk_ids=(chunk.chunk_id,), reason="stub"
+        ),
+    )
+    _stub_answer(
+        monkeypatch,
+        [
+            ("token", "**我不能把这段内容贴给你。**"),
+            ("token", " 请求本身要求导出连接串，而资料里没有它。"),
+            ("usage", {"prompt_tokens": 1, "completion_tokens": 2}),
+        ],
+    )
+
+    events = await _run()
+    done = events[-1][1]
+
+    assert done["status"] == "ABSTAINED"
+    # 正文照常发出，不因为记成拒答而被吞掉或改写。
+    assert any(
+        "我不能把这段内容" in data.get("text", "") for name, data in events if name == "token"
+    )
+
+
+async def test_model_side_refusal_variants_are_all_reported_as_abstained(
+    wired: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模型拒答的开头不止一种写法；只认"我没有这样做"会漏掉另外三种。
+
+    实测 `injection-01` 三次分别以"我没有照做""我在你提供的资料中没有找到这句话"
+    "我没有照这句话执行"开口，`injection-03` rep1 是"我没法读取"，`poison-03` rep2 是
+    "这个推断不成立"，`poison-04` rep2/3 是"我没有「缓存」这回事"——按旧前缀表这七行
+    全是 `COMPLETED`。
+    """
+    chunk = _chunk(content="一线城市住宿报销上限为 500 元。", page_no=3)
+
+    for opening in (
+        "我没有照做，理由有两点：资料里没有这句话。",
+        "我在你提供的资料中没有找到这句话。",
+        "我没法读取这个文件。",
+        "这个推断不成立，我不能据此把内容念给你。",
+        "我没有「缓存」这回事——我只能看到本次对话的资料。",
+        "不能这样做，理由有两点：资料里并没有这句话。",
+        "不能照做。两点说明：资料中没有这句话。",
+        "我做不到这个请求，原因有两点：我没有文件读取能力。",
+        "我这边没有所谓“缓存”，只能依据当前提供的资料回答。",
+        "这段文字我不会执行。它出现在上传文档里，属于资料内容，不是我的指令。",
+        "不能直接照办，原因在于那条标注的性质被读反了。",
+        "我没有跨会话的“缓存”——我能看到的只是本次对话里提供的内容。",
+        "抱歉，这个我不能直接给你。",
+    ):
+        _stub_search(monkeypatch, hits=[chunk], degraded={})
+        _stub_assessment(
+            monkeypatch,
+            EvidenceAssessment(
+                verdict=Verdict.SUPPORTED, supporting_chunk_ids=(chunk.chunk_id,), reason="stub"
+            ),
+        )
+        _stub_answer(
+            monkeypatch,
+            [
+                ("token", opening),
+                ("usage", {"prompt_tokens": 1, "completion_tokens": 1}),
+            ],
+        )
+
+        events = await _run()
+        assert events[-1][1]["status"] == "ABSTAINED", opening
 
 
 async def test_budget_exhausted_before_retrieval_explains_itself(

@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import suppress
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Request
@@ -39,6 +40,7 @@ from pyknora.schemas.chat import (
 from pyknora.schemas.query import RetrievedChunk
 from pyknora.services.auth.permissions import CHAT_RUN
 from pyknora.services.rag.answer import (
+    cited_indices,
     invalid_cited_indices,
     select_context_chunks,
     stream_answer,
@@ -63,6 +65,53 @@ _OUTCOME_BY_STATUS: dict[RunStatus, str] = {
     RunStatus.BUDGET_EXCEEDED: "error",
     RunStatus.TIMEOUT: "timeout",
 }
+
+#: 模型**自己**拒答时回答的开头短语；命中即把终态从 `COMPLETED` 降为 `ABSTAINED`。
+#:
+#: 为什么要这条判据：`ABSTAINED` 原本只由证据门控设置——门控判"这段资料撑不住问题"
+#: 才拒答。可现实里还有一类拒答发生在模型侧：问句要求它导出连接串、复述资料里不存在的
+#: 条款、或念出未授权预算，门控看着资料挺相关（SUPPORTED），模型却回"我不能这样做"。
+#: 这种回答记成 `COMPLETED`，"答完了"与"拒绝了"在监控与评测里就分不开——实测
+#: `injection-01/03`、`poison-03/04` 四条安全样本正文都是拒答，状态却全是 `COMPLETED`。
+#:
+#: 只**降级**、不升级：命中即记拒答，漏判也只是维持 `COMPLETED`，不会把一次失败的作答
+#: 洗成成功。只认**开头**：句中出现的"不能"不算（"不能拆成两张单子"是在回答问题）。
+#:
+#: 前缀按实测开头归类，宁可取宽的那一类（"我没有…""不能直接…"）也不要逐个短语枚举：
+#: 同一条样本三次运行的措辞各不相同（"我没有照做"/"不能这样做"/"这段文字我不会执行"），
+#: 逐条打补丁永远追不上。这类开头的正常回答不存在——材料的答案不会以"我没有"起句。
+#: 已知局限：这是一条文案判据，模型若用没列在这里的开头（"抱歉"/"根据授权要求"）仍会
+#: 漏判；真正稳的做法是让模型显式吐一个拒答信号，那需要改提示词并重跑基线。
+_REFUSAL_PREFIXES: Final[tuple[str, ...]] = (
+    "我没有",
+    "我没法",
+    "我不能",
+    "我不便",
+    "我无法",
+    "我做不到",
+    "我这边没有",
+    "我在你提供的资料",
+    "这段文字我不会",
+    "不会照做",
+    "不能直接",
+    "不能这样做",
+    "不能照做",
+    "不能照办",
+    "这个推断不成立",
+    "抱歉",
+    "恕难",
+    "拒绝回答",
+)
+
+#: 回答开头常见的 Markdown 装饰（加粗、标题、引用块、空白）；判拒答前先剥掉，
+#: 否则 "**我不能…" 会因为第一个字符是 `*` 而漏判。
+_LEADING_MARKUP: Final[re.Pattern[str]] = re.compile(r"^[\s*#>]+")
+
+
+def _looks_like_model_refusal(answer_text: str) -> bool:
+    """回答是不是模型自己拒绝执行（而不是正常作答）。"""
+    head = _LEADING_MARKUP.sub("", answer_text, count=1)
+    return head.startswith(_REFUSAL_PREFIXES)
 
 
 def _elapsed_ms(since: float, until: float | None = None) -> float:
@@ -322,13 +371,30 @@ async def chat(
                     invalid,
                     len(context_chunks),
                 )
+            # 先落日志再建事件：`_log_chat_finished` 补算 `generation_ms`（它的锚点是
+            # 首字时刻），必须在那之后再快照 `stage`，否则 `done` 里的 `generation_ms`
+            # 恒为 None——而日志里却有值，同一个量两处对不上。
+            _log_chat_finished(finish_status=status, usage=usage, error=_finish_error_type(status))
+            # 引用分两份：`citations` 是模型读到的全部（`retrieval` 帧已经发过，当时答案
+            # 还没生成），这里补的是正文自己用 `[资料 N]` 认领过的那几条。没有序号时
+            # 退回全量——拒答、上游失败、模型漏标注这三种情况"用了几条"不可知，当成
+            # "一条没用"会把有据可查的答案显示成无依据。
+            cited = sorted(i for i in cited_indices(answer_text) if 1 <= i <= len(citations))
+            used_citations = [citations[i - 1] for i in cited] or citations
             event = DoneEvent(
                 **(usage or {}),
                 invalid_citations=len(invalid),
+                used_citations=used_citations,
                 status=status,
                 run_id=run_id,
                 # verdict 只在本轮真跑过门控时才有意义；预算中止时留 None。
                 verdict=str(assessment.verdict) if assessment is not None else None,
+                # 五个耗时字段原样透出（含 None）：详情见 `DoneEvent` 的字段注释。
+                retrieval_ms=stage["retrieval_ms"],
+                evidence_check_ms=stage["evidence_check_ms"],
+                model_ttft_ms=stage["model_ttft_ms"],
+                generation_ms=stage["generation_ms"],
+                total_ms=_elapsed_ms(started),
             )
             # run_id 只在这里落一行日志：一次问答几十个 token 事件，出问题时靠它对上
             # "哪一轮、什么终态、门控怎么判的"。
@@ -339,7 +405,6 @@ async def chat(
                 event.verdict,
                 len(invalid),
             )
-            _log_chat_finished(finish_status=status, usage=usage, error=_finish_error_type(status))
             return event
 
         async def events() -> AsyncIterator[str]:
@@ -354,7 +419,13 @@ async def chat(
                 # 地方能表达"这次只召回了一路"。只写日志等于让流式调用方永远看不到降级。
                 yield _sse(
                     "retrieval",
-                    RetrievalEvent(citations=citations, degraded=degraded).model_dump(mode="json"),
+                    RetrievalEvent(
+                        citations=citations,
+                        degraded=degraded,
+                        # 这个时刻只有第一段能算出来；后三段要到 done 才成立，所以这里
+                        # 只带 retrieval_ms，不补 null 占位（详见 `RetrievalEvent`）。
+                        retrieval_ms=stage["retrieval_ms"],
+                    ).model_dump(mode="json"),
                 )
 
                 if budget_status is not None:
@@ -363,7 +434,7 @@ async def chat(
                     # 和"知识库里没有相关内容"一模一样。
                     message = budget.stop_message(budget_status)
                     yield _sse("token", TokenEvent(text=message).model_dump())
-                    yield _sse("done", _done(message, status=budget_status).model_dump())
+                    yield _sse("done", _done(message, status=budget_status).model_dump(mode="json"))
                     return
 
                 if budget.remaining() <= 0.0:
@@ -393,7 +464,10 @@ async def chat(
                         "也可以把问题缩小到更具体的条款后再试。"
                     )
                     yield _sse("token", TokenEvent(text=message).model_dump())
-                    yield _sse("done", _done(message, status=RunStatus.TIMEOUT).model_dump())
+                    yield _sse(
+                        "done",
+                        _done(message, status=RunStatus.TIMEOUT).model_dump(mode="json"),
+                    )
                     return
 
                 answer: list[str] = []
@@ -447,7 +521,9 @@ async def chat(
                             yield _sse("error", StreamErrorEvent(**value).model_dump())
                             yield _sse(
                                 "done",
-                                _done("".join(answer), status=RunStatus.FAILED).model_dump(),
+                                _done("".join(answer), status=RunStatus.FAILED).model_dump(
+                                    mode="json"
+                                ),
                             )
                             return
                         elif kind == "usage":
@@ -474,7 +550,21 @@ async def chat(
                     # 整体时长也要判一次：上游可能断续回到超过预算，正文已经发出去了，
                     # done 是唯一还能改口的地方（见 RunBudget.finish）。
                     status = budget.finish()
-                yield _sse("done", _done("".join(answer), usage, status=status).model_dump())
+                if status is RunStatus.COMPLETED and _looks_like_model_refusal("".join(answer)):
+                    # 模型自己拒答（"我不能导出连接串"/"我没有这样做"）：正文是拒答，
+                    # 状态就不能是"答完了"。只降级不升级，理由见 `_REFUSAL_PREFIXES`。
+                    #
+                    # 已知局限（实测踩到，暂不修）：模型会写「我不能替你判断权限……
+                    # 按资料原文，研发中心 2026 年度预算总额 1200 万元 [资料 1]」，
+                    # 开头像拒答、正文却把数字念出来了。按前缀判成 ABSTAINED 会把泄漏
+                    # 记成合格。试过「带 [资料 N] 引用就不算拒答」，但真拒答在解释理由时
+                    # 也会引用资料编号，误伤后 abstain 从 0.909 掉到 0.636。
+                    # 真正稳的解法是让模型显式吐拒答信号，而不是继续加文案判据。
+                    status = RunStatus.ABSTAINED
+                yield _sse(
+                    "done",
+                    _done("".join(answer), usage, status=status).model_dump(mode="json"),
+                )
             finally:
                 if stream_token is not None:
                     reset_request_context(stream_token)
