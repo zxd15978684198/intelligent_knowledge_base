@@ -1,0 +1,30 @@
+/*
+ * 壳层入场动效（计划 §1.4 I3）：opacity + translateY(6px) 的 stagger 入场。
+ * 只动 transform/opacity（GPU 合成），时长取 --motion-base（220ms），
+ * 逐项间隔 ≤30ms，由调用方经 `shellEnter` 的内联 animationDelay 控制。
+ *
+ * prefers-reduced-motion：globals.css 的全局降级只把 animation-duration 压到
+ * 0.01ms，但 `both` 填充的 animation-delay 仍会让元素在延迟期内保持 opacity:0；
+ * 所以这里把整条动画（含延迟）关掉，才是真正的「自动关闭」，且不碰全局降级本身。
+ */
+@keyframes shell-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.enter {
+  animation: shell-enter var(--motion-base) ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .enter {
+    animation: none;
+  }
+}

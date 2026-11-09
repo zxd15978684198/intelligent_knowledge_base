@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { Card } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
 
 import { buildCitationRows, formatPageRange } from "./citations";
@@ -20,6 +21,10 @@ import type { ChatCitation } from "./events";
  *
  * 还要区分"检索到的资料"和"被正文用到的资料"：没被引用的资料只是候选证据，
  * 灰一点，不要让它看起来像论据。
+ *
+ * 视觉层级（§1.3 / C1）：外壳统一用 `<Card>`（自带 border/bg/shadow-sm），不再叠一层
+ * 白底 + 1px 边框；序号 / 页码走 tabular 数字；序号与页码在首行，snippet 是正文，
+ * 来源文档与切片 ID 收在次级元信息行。
  */
 export interface CitationRailProps {
   readonly citations: readonly ChatCitation[];
@@ -56,21 +61,21 @@ export function CitationRail({
   return (
     <section className={cn("space-y-2", className)} aria-labelledby="evidence-heading">
       <header className="flex items-baseline justify-between gap-2">
-        <h2 id="evidence-heading" className="text-sm font-medium text-fg">
+        <h2 id="evidence-heading" className="text-[13px] font-semibold tracking-tight text-fg">
           证据
         </h2>
-        <span className="text-xs text-fg-muted">共 {citations.length} 条</span>
+        <span className="tabular text-[11px] text-fg-muted">共 {citations.length} 条</span>
       </header>
 
       {streaming && citations.length === 0 ? (
-        <p className="text-xs text-fg-subtle" role="status">
+        <p className="text-[13px] leading-relaxed text-fg-subtle" role="status">
           正在检索资料…
         </p>
       ) : null}
 
       {rows.length === 0 && !streaming ? (
-        <p className="rounded-md border border-dashed border-border px-3 py-4 text-xs text-fg-muted">
-          本次回答没有返回引用。若回答被判定为"证据不足"或检索通道降级，引用为空是预期结果。
+        <p className="rounded-lg border border-dashed border-border px-3 py-4 text-[13px] leading-relaxed text-fg-muted">
+          本次回答没有返回引用。若回答被判定为「证据不足」或检索通道降级，引用为空是预期结果；想看引用，可换个更具体的问题再问一次。
         </p>
       ) : null}
 
@@ -82,58 +87,68 @@ export function CitationRail({
             const citation = row.citation;
             return (
               <li key={row.index}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onSelect(row.index);
-                  }}
-                  aria-pressed={active}
-                  aria-current={active ? "true" : undefined}
-                  data-citation-index={row.index}
-                  data-active={active || undefined}
-                  data-invalid={invalid || undefined}
+                <Card
                   className={cn(
-                    "w-full rounded-md border px-3 py-2 text-left transition-colors duration-150 ease-out",
-                    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
                     invalid
                       ? "border-danger bg-danger-weak"
                       : active
-                        ? "border-primary bg-primary-weak"
-                        : "border-border bg-surface hover:border-border-strong",
-                    !invalid && !row.citedInAnswer ? "opacity-70" : "",
+                        ? "border-primary bg-primary-weak shadow-md"
+                        : "hover:border-border-strong hover:shadow-md",
                   )}
                 >
-                  <span className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
-                    <span className={cn("font-mono text-[11px]", invalid ? "text-danger" : "text-primary")}>
-                      [资料 {row.index}]
-                    </span>
-                    {citation === null ? (
-                      <StatusBadge label="未通过校验" tone="danger" srLabel="该引用未被系统校验通过" />
-                    ) : (
-                      <span className="text-[11px] text-fg-muted">
-                        {formatPageRange(citation.page_no, citation.page_end_no)}
-                      </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelect(row.index);
+                    }}
+                    aria-pressed={active}
+                    aria-current={active ? "true" : undefined}
+                    data-citation-index={row.index}
+                    data-active={active || undefined}
+                    data-invalid={invalid || undefined}
+                    className={cn(
+                      "w-full px-3 py-2.5 text-left",
+                      "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring",
+                      !invalid && !row.citedInAnswer ? "opacity-70" : "",
                     )}
-                  </span>
-
-                  {citation === null ? (
-                    <span className="mt-1 block text-xs text-danger">
-                      该引用未被系统校验通过：本次检索没有返回第 {row.index} 条资料，请勿采信该结论。
-                    </span>
-                  ) : (
-                    <>
-                      <span className="mt-1 block text-xs leading-relaxed text-fg">
-                        {truncate(citation.snippet, 160)}
+                  >
+                    <span className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+                      <span className={cn("tabular text-[12px] font-semibold", invalid ? "text-danger" : "text-primary")}>
+                        [资料 {row.index}]
                       </span>
-                      <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-fg-subtle">
-                        <span className="truncate font-mono" title={citation.chunk_id}>
-                          {citation.chunk_id}
+                      {citation === null ? (
+                        <StatusBadge label="未通过校验" tone="danger" srLabel="该引用未被系统校验通过" />
+                      ) : (
+                        <span className="tabular text-[11px] font-medium text-fg-muted">
+                          {formatPageRange(citation.page_no, citation.page_end_no)}
                         </span>
-                        {row.citedInAnswer ? null : <span>· 未被正文引用</span>}
+                      )}
+                    </span>
+
+                    {citation === null ? (
+                      <span className="mt-1.5 block text-[13px] leading-relaxed text-danger">
+                        该引用未被系统校验通过：本次检索没有返回第 {row.index} 条资料，请勿采信该结论。
                       </span>
-                    </>
-                  )}
-                </button>
+                    ) : (
+                      <>
+                        <span className="mt-1.5 block text-[13px] leading-relaxed text-fg">
+                          {truncate(citation.snippet, 160)}
+                        </span>
+                        <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-fg-subtle">
+                          <span className="font-medium text-fg-muted">来源</span>
+                          <span className="truncate font-mono tabular" title={citation.document_id}>
+                            {citation.document_id}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span className="truncate font-mono tabular" title={citation.chunk_id}>
+                            {citation.chunk_id}
+                          </span>
+                          {row.citedInAnswer ? null : <span>· 未被正文引用</span>}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </Card>
               </li>
             );
           })}
@@ -141,7 +156,7 @@ export function CitationRail({
       )}
 
       {unlocated > 0 ? (
-        <p className="text-[11px] text-danger">
+        <p className="tabular text-[11px] text-danger">
           另有 {unlocated} 处越界引用无法对应到具体条目（后端只提供了条数）。
         </p>
       ) : null}

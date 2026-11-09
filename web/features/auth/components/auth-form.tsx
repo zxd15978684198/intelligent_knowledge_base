@@ -2,7 +2,9 @@
 
 import { useId, useState } from "react";
 
+import { shellEnter } from "@/components/app-shell/shell-motion";
 import { Button, Input, Label } from "@/components/ui";
+import { cn } from "@/lib/utils";
 
 import { useAuthForm, type AuthMode } from "../use-auth-form";
 import { PASSWORD_MAX_BYTES, PASSWORD_MIN_LENGTH } from "../validation";
@@ -44,6 +46,13 @@ export function AuthForm({ mode }: AuthFormProps) {
   const isRegister = mode === "register";
   const copy = COPY[mode];
 
+  // I3 stagger：卡片本体已由 (auth)/layout.tsx 用 shellEnter(0) 入场，
+  // 表单内部块从 step 1 起按 30ms 错落衔接；错误区 role="alert" 不加动画，保证即时可见/播报。
+  const usernameEnter = shellEnter(1);
+  const emailEnter = shellEnter(2);
+  const passwordEnter = shellEnter(isRegister ? 3 : 2);
+  const submitEnter = shellEnter(isRegister ? 4 : 3);
+
   return (
     <form
       className="space-y-5"
@@ -51,7 +60,7 @@ export function AuthForm({ mode }: AuthFormProps) {
       noValidate
       aria-label={isRegister ? "注册表单" : "登录表单"}
     >
-      <div className="space-y-2">
+      <div className={cn("space-y-2", usernameEnter.className)} style={usernameEnter.style}>
         <Label htmlFor={usernameId} required>
           用户名
         </Label>
@@ -79,7 +88,7 @@ export function AuthForm({ mode }: AuthFormProps) {
       </div>
 
       {isRegister ? (
-        <div className="space-y-2">
+        <div className={cn("space-y-2", emailEnter.className)} style={emailEnter.style}>
           <Label htmlFor={emailId} required>
             邮箱
           </Label>
@@ -107,7 +116,7 @@ export function AuthForm({ mode }: AuthFormProps) {
         </div>
       ) : null}
 
-      <div className="space-y-2">
+      <div className={cn("space-y-2", passwordEnter.className)} style={passwordEnter.style}>
         <div className="flex items-center justify-between gap-3">
           <Label htmlFor={passwordId} required>
             密码
@@ -117,7 +126,7 @@ export function AuthForm({ mode }: AuthFormProps) {
             onClick={() => setShowPassword((visible) => !visible)}
             aria-pressed={showPassword}
             aria-controls={passwordId}
-            className="rounded-sm text-xs font-medium text-primary underline-offset-2 transition-colors hover:text-primary-hover hover:underline"
+            className="rounded-sm text-xs font-medium text-primary underline-offset-2 transition-[color] duration-fast ease-out hover:text-primary-hover hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring"
           >
             {showPassword ? "隐藏密码" : "显示密码"}
           </button>
@@ -162,7 +171,7 @@ export function AuthForm({ mode }: AuthFormProps) {
         </p>
       )}
 
-      <div className="space-y-3">
+      <div className={cn("space-y-3", submitEnter.className)} style={submitEnter.style}>
         <Button type="submit" loading={pending} className="w-full">
           {pending ? copy.pending : copy.submit}
         </Button>

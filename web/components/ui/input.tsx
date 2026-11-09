@@ -26,10 +26,10 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(function Inp
       aria-invalid={isInvalid || undefined}
       className={cn(
         "min-h-hit w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg",
-        "transition-colors duration-150 ease-out",
+        "transition-[border-color,background-color,box-shadow] duration-fast ease-out",
         "placeholder:text-fg-subtle",
         "hover:border-border-strong",
-        "focus:border-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+        "focus:border-primary focus:shadow-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring",
         "disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-fg-muted",
         "read-only:bg-surface-muted",
         "aria-invalid:border-danger aria-invalid:bg-danger-weak",

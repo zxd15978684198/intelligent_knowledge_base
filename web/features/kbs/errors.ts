@@ -55,12 +55,12 @@ function withRequestId(message: string, error: unknown): string {
 }
 
 /**
- * 把错误翻成一句可操作的中文。未知错误不吞掉——兜底文案带状态码，
- * 避免出现"操作失败"这种查不出原因的空话。
+ * 把错误翻成一句可操作、用主动语态说明「我们没能…」的中文。未知错误不吞掉——
+ * 兜底文案带状态码，避免出现"操作失败"这种查不出原因的空话。
  */
 export function describeKbError(error: unknown, action: KbErrorAction = "load"): string {
   if (!isApiError(error)) {
-    return `${ACTION_LABEL[action]}失败：网络异常，请检查连接后重试。`;
+    return `我们没能${ACTION_LABEL[action]}：网络异常，请检查连接后重试。`;
   }
   const code = error.code;
   if (code === "CURSOR_EXPIRED") {
@@ -82,19 +82,16 @@ export function describeKbError(error: unknown, action: KbErrorAction = "load"):
     return `当前账号没有${ACTION_LABEL[action]}的权限。`;
   }
   if (code === "INVALID_REQUEST" || error.status === 422) {
-    return "提交内容不合法，请检查后重试。";
+    return `我们没能${ACTION_LABEL[action]}：提交内容不合法，请检查后重试。`;
   }
   if (code === "CONFLICT" || error.status === 409) {
-    return "操作与当前状态冲突，请刷新后重试。";
+    return `我们没能${ACTION_LABEL[action]}：操作与当前状态冲突，请刷新后重试。`;
   }
   if (code === "DEPENDENCY_UNAVAILABLE" || error.status === 503) {
-    return withRequestId("依赖服务暂不可用，请稍后重试。", error);
+    return withRequestId(`我们没能${ACTION_LABEL[action]}：依赖服务暂不可用，请稍后重试。`, error);
   }
   if (error.status >= 500) {
-    return withRequestId("服务异常，请稍后重试。", error);
+    return withRequestId(`我们没能${ACTION_LABEL[action]}：服务异常，请稍后重试。`, error);
   }
-  return withRequestId(
-    `${ACTION_LABEL[action]}失败（HTTP ${error.status}，${code}）。`,
-    error,
-  );
+  return withRequestId(`我们没能${ACTION_LABEL[action]}（HTTP ${error.status}，${code}）。`, error);
 }

@@ -19,7 +19,7 @@ test.describe("知识库", () => {
     await expect(page.getByRole("heading", { level: 1, name: "知识库" })).toBeVisible();
 
     const list = page.getByRole("region", { name: "知识库列表" });
-    await expect(list.getByRole("link", { name })).toBeVisible();
+    await expect(list.getByRole("link", { name, exact: true })).toBeVisible();
     await expect(page.getByText(/已加载 \d+ 个知识库/)).toBeVisible();
   });
 
@@ -42,9 +42,9 @@ test.describe("知识库", () => {
 
     await expect(dialog).toBeHidden({ timeout: 20_000 });
     // 对话框成功后只关窗、不跳页；列表靠 invalidate 刷新，所以这里等的是列表里的链接。
-    await expect(page.getByRole("link", { name })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole("link", { name, exact: true })).toBeVisible({ timeout: 20_000 });
 
-    await page.getByRole("link", { name }).click();
+    await page.getByRole("link", { name, exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/kbs/[^/]+/documents$`));
     await expect(page.getByRole("heading", { level: 1, name: "文档" })).toBeVisible();
   });

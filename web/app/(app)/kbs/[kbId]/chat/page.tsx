@@ -22,8 +22,10 @@ export default function ChatPage() {
   if (kbId === "") {
     return (
       <div className="rounded-lg border border-dashed border-border bg-surface px-4 py-10 text-center">
-        <p className="text-sm font-medium text-fg">缺少知识库参数</p>
-        <p className="mt-1 text-xs text-fg-muted">请从知识库列表进入问答。</p>
+        <p className="text-[15px] font-semibold tracking-tight text-fg">缺少知识库参数</p>
+        <p className="mx-auto mt-1.5 max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
+          请从知识库列表进入问答，选中一个知识库后即可提问。
+        </p>
       </div>
     );
   }

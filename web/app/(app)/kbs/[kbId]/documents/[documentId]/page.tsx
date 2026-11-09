@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui";
+import { Button, Card, CardContent, Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui";
 import { useAuth } from "@/features/auth";
 import { ChunkList } from "@/features/documents/ChunkList";
 import { LineageTimeline } from "@/features/documents/LineageTimeline";
@@ -59,63 +59,69 @@ export default function DocumentDetailPage() {
         </p>
       ) : detailQuery.isError || document === undefined ? (
         <div className="flex flex-col gap-2 rounded-md border border-danger bg-danger-weak p-4" role="alert">
-          <p className="text-sm font-medium text-fg">读不到这份文档</p>
+          <p className="text-sm font-medium text-fg">我们没能读取这份文档</p>
           <p className="text-sm text-fg">{described?.message}</p>
           {described?.code ? (
             <p className="text-xs text-fg-muted">
               错误码 <code className="font-mono">{described.code}</code>
             </p>
           ) : null}
-          <button
+          <Button
             type="button"
+            variant="secondary"
+            size="sm"
+            className="w-fit self-start"
             onClick={() => void detailQuery.refetch()}
-            className="self-start rounded-md border border-border-strong bg-surface px-3 py-1.5 text-sm text-fg hover:bg-surface-muted"
           >
             重试
-          </button>
+          </Button>
         </div>
       ) : (
         <>
           <header className="flex flex-col gap-1">
-            <h1 className="text-xl font-semibold text-fg" title={document.filename ?? undefined}>
+            <h1 className="break-words text-[28px]/[32px] font-semibold tracking-tight leading-tight text-fg" title={document.filename ?? undefined}>
               {document.filename ?? `文档 ${shortId(document.document_id)}`}
             </h1>
-            <p className="text-sm text-fg-muted">
+            <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
               {document.searchable
                 ? "已发布：切片来自当前活动版本。"
                 : "还没有活动索引，暂时不可检索；作业完成后会自动刷新。"}
             </p>
           </header>
 
-          <dl className="grid gap-3 rounded-lg border border-border bg-surface p-4 text-sm sm:grid-cols-2">
-            <div className="flex flex-col gap-0.5">
-              <dt className="text-xs text-fg-subtle">文档 ID</dt>
-              <dd className="font-mono text-xs text-fg" title={document.document_id}>
-                {shortId(document.document_id, 12)}
-              </dd>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <dt className="text-xs text-fg-subtle">活动版本</dt>
-              <dd className="font-mono text-xs text-fg">
-                {document.active_document_version_id === null ||
-                document.active_document_version_id === undefined
-                  ? "没有活动版本"
-                  : shortId(document.active_document_version_id, 12)}
-              </dd>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <dt className="text-xs text-fg-subtle">索引版本</dt>
-              <dd className="text-fg">
-                {document.active_index_version === null || document.active_index_version === undefined
-                  ? "未发布"
-                  : `v${document.active_index_version}`}
-              </dd>
-            </div>
-            <div className="flex flex-col gap-0.5">
-              <dt className="text-xs text-fg-subtle">行版本（row_version）</dt>
-              <dd className="tabular text-fg">{document.row_version}</dd>
-            </div>
-          </dl>
+          <Card>
+            <CardContent>
+              <dl className="grid gap-3 text-sm sm:grid-cols-2">
+                <div className="flex flex-col gap-0.5">
+                  <dt className="text-xs text-fg-subtle">文档 ID</dt>
+                  <dd className="font-mono text-xs text-fg" title={document.document_id}>
+                    {shortId(document.document_id, 12)}
+                  </dd>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <dt className="text-xs text-fg-subtle">活动版本</dt>
+                  <dd className="font-mono text-xs text-fg">
+                    {document.active_document_version_id === null ||
+                    document.active_document_version_id === undefined
+                      ? "没有活动版本"
+                      : shortId(document.active_document_version_id, 12)}
+                  </dd>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <dt className="text-xs text-fg-subtle">索引版本</dt>
+                  <dd className="text-fg">
+                    {document.active_index_version === null || document.active_index_version === undefined
+                      ? "未发布"
+                      : `v${document.active_index_version}`}
+                  </dd>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  <dt className="text-xs text-fg-subtle">行版本（row_version）</dt>
+                  <dd className="tabular text-fg">{document.row_version}</dd>
+                </div>
+              </dl>
+            </CardContent>
+          </Card>
 
           <Tabs defaultValue="chunks">
             <TabsList>

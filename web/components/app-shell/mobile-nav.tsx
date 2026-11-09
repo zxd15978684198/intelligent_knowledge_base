@@ -7,7 +7,13 @@ import { useState } from "react";
 import { AppNav } from "@/components/app-shell/app-nav";
 import { Brand } from "@/components/app-shell/brand";
 import type { IdentityView } from "@/components/app-shell/identity-view";
+import { shellEnter } from "@/components/app-shell/shell-motion";
 import { UserBlock } from "@/components/app-shell/user-block";
+import { cn } from "@/lib/utils";
+
+/** 图标按钮（菜单/关闭）：hover 换底色，按下微缩放——动效只动 transform。 */
+const ICON_BUTTON =
+  "flex size-11 shrink-0 items-center justify-center rounded-md text-fg-muted transition-[background-color,color,transform] duration-fast hover:bg-surface-muted hover:text-fg active:scale-[0.98]";
 
 /**
  * 窄屏导航：顶部条 + 左侧抽屉（`lg` 以下显示，桌面由侧栏接管）。
@@ -23,20 +29,25 @@ import { UserBlock } from "@/components/app-shell/user-block";
  */
 export function MobileNav({ identity, onLogout }: { identity: IdentityView; onLogout: () => void }) {
   const [open, setOpen] = useState(false);
+  const headerEnter = shellEnter(0);
 
   const close = () => {
     setOpen(false);
   };
 
   return (
-    <header className="sticky top-0 z-30 flex min-h-14 items-center gap-2 border-b border-border bg-surface px-3 lg:hidden">
+    <header
+      className={cn(
+        // 层次感（任务 N3-1）：顶栏 shadow-sm 起浮 + 底边弱化（border-border/60），
+        // 白色顶栏浮在 canvas 上，不再靠一条硬边框分界。
+        "sticky top-0 z-30 flex min-h-14 items-center gap-2 border-b border-border/60 bg-surface px-3 shadow-sm lg:hidden",
+        headerEnter.className,
+      )}
+      style={headerEnter.style}
+    >
       <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
         <DialogPrimitive.Trigger asChild>
-          <button
-            type="button"
-            aria-label="打开导航菜单"
-            className="flex size-11 shrink-0 items-center justify-center rounded-md text-fg-muted transition-colors duration-150 hover:bg-surface-muted hover:text-fg"
-          >
+          <button type="button" aria-label="打开导航菜单" className={ICON_BUTTON}>
             <ListIcon aria-hidden="true" className="size-5" />
           </button>
         </DialogPrimitive.Trigger>
@@ -46,11 +57,7 @@ export function MobileNav({ identity, onLogout }: { identity: IdentityView; onLo
             <div className="flex items-center justify-between gap-2 px-3 pt-3">
               <Brand className="min-w-0" />
               <DialogPrimitive.Close asChild>
-                <button
-                  type="button"
-                  aria-label="关闭导航菜单"
-                  className="flex size-11 shrink-0 items-center justify-center rounded-md text-fg-muted transition-colors duration-150 hover:bg-surface-muted hover:text-fg"
-                >
+                <button type="button" aria-label="关闭导航菜单" className={ICON_BUTTON}>
                   <XIcon aria-hidden="true" className="size-5" />
                 </button>
               </DialogPrimitive.Close>

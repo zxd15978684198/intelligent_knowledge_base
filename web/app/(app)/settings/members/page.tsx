@@ -54,19 +54,19 @@ export default function MembersPage() {
 
   return (
     <main className="flex flex-col gap-6">
-      <header className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold text-fg">成员</h1>
-        <p className="max-w-2xl text-sm text-fg-muted">
+      <header className="flex flex-col gap-1.5">
+        <h1 className="text-[28px]/[32px] font-semibold tracking-tight leading-tight text-fg">成员</h1>
+        <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
           本页管理的是「已有账号加入本工作区」的成员关系，不是邀请制：按 principal_id 直接建立成员行，不发邮件、也没有待接受状态。列表只显示 user_id，不显示姓名和邮箱（后端刻意不返回）。角色来自本工作区的 roles 表；owner 只能通过「转移所有权」变更，加人和改角色都设不出 owner。
         </p>
       </header>
 
       {workspaceId === null ? (
-        <p role="status" className="text-sm text-fg-muted">
+        <p role="status" className="text-[13px] leading-relaxed text-fg-muted">
           正在读取当前工作区…
         </p>
       ) : !permissions.ready ? (
-        <p role="status" className="text-sm text-fg-muted">
+        <p role="status" className="text-[13px] leading-relaxed text-fg-muted">
           正在确认你的工作区权限…
         </p>
       ) : !canManage ? (
@@ -94,13 +94,14 @@ export default function MembersPage() {
                 isOwner={isOwner}
               />
             </div>
-            <span className="text-xs text-fg-muted">共 {memberCount} 名成员</span>
+            <span className="tabular text-[12px] text-fg-muted">共 {memberCount} 名成员</span>
           </section>
 
           {rolesQuery.isError ? (
-            <p role="alert" className="text-sm text-danger">
-              角色目录读取失败：{describeMemberError(rolesQuery.error, "roles")}
-              成员列表不受影响，但角色下拉会退化成只读。
+            <p role="alert" className="flex flex-wrap items-baseline gap-x-1.5 rounded-lg border border-danger bg-danger-weak px-3 py-2 text-[13px] leading-relaxed text-danger">
+              <span className="font-semibold">角色目录读取失败：</span>
+              <span>{describeMemberError(rolesQuery.error, "roles")}</span>
+              <span className="text-fg-muted">成员列表不受影响，但角色下拉会退化成只读；请稍后重试或联系管理员。</span>
             </p>
           ) : null}
 
@@ -161,7 +162,7 @@ function MemberListSection({
     return (
       <Card>
         <CardContent className="flex flex-col gap-3">
-          <p role="alert" className="text-sm text-danger">
+          <p role="alert" className="text-[13px] leading-relaxed text-danger">
             {describeMemberError(error, "load")}
           </p>
           <div>
@@ -178,7 +179,7 @@ function MemberListSection({
     return (
       <EmptyState
         title="还没有成员记录"
-        description="按 principal_id 把已有账号加入本工作区；加完就能在这里看到他的角色。"
+        description="用上方「按 principal_id 添加成员」把已有账号加入本工作区；加完就能在这里看到他的角色。"
       />
     );
   }

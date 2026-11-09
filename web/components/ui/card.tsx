@@ -3,7 +3,8 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * Card —— 白色内容面 + 1px 边框（不用阴影堆叠，计划 §6 排除玻璃拟态）。
+ * Card —— 白色内容面 + 着色阴影（§2 `--shadow-sm`）：靠阴影浮起而非仅靠 1px 边框，
+ * 去掉「通用白底卡片」观感（升级计划 C1；玻璃拟态仍排除）。
  * `CardTitle` 固定渲染 `<h3>`：页面标题是 `<h2>`，卡片是它下面的一级，标题层级不跳。
  */
 export const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
@@ -11,7 +12,11 @@ export const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDi
     return (
       <div
         ref={ref}
-        className={cn("rounded-lg border border-border bg-surface", className)}
+        className={cn(
+          "rounded-lg border border-border/60 bg-surface shadow-sm",
+          "transition-[box-shadow,transform] duration-base ease-out",
+          className,
+        )}
         {...props}
       />
     );

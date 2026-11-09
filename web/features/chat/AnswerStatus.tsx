@@ -113,35 +113,35 @@ export function AnswerStatus({
         </div>
       )}
 
-      {status === null ? null : <p className="text-xs text-fg-muted">{status.note}</p>}
+      {status === null ? null : <p className="text-[12px] leading-relaxed text-fg-muted">{status.note}</p>}
 
       {done === null && phase === "aborted" ? (
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
           <StatusBadge label="已停止" tone="warning" srLabel="用户中止了本次回答" />
-          <span className="text-xs text-fg-muted">已收到的内容保留，但这不是完整回答，也不会续传。</span>
+          <span className="text-[12px] leading-relaxed text-fg-muted">已收到的内容保留，但这不是完整回答，也不会续传；请重新提问。</span>
         </div>
       ) : null}
 
       {done === null ? null : (
-        <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-3 gap-y-1 text-xs text-fg-muted">
-          <dt>运行 ID</dt>
-          <dd className="truncate font-mono text-fg" title={done.run_id}>
+        <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-3 gap-y-1 text-[12px] leading-relaxed">
+          <dt className="text-fg-subtle">运行 ID</dt>
+          <dd className="truncate font-mono tabular text-fg" title={done.run_id}>
             {done.run_id}
           </dd>
-          <dt>提示词版本</dt>
+          <dt className="text-fg-subtle">提示词版本</dt>
           <dd className="truncate font-mono text-fg">{done.prompt_version ?? "（未走到模型）"}</dd>
           {done.prompt_tokens === null && done.completion_tokens === null ? null : (
             <>
-              <dt>令牌数</dt>
-              <dd className="tabular-nums text-fg">
+              <dt className="text-fg-subtle">令牌数</dt>
+              <dd className="tabular-nums tabular text-fg">
                 输入 {formatCount(done.prompt_tokens)} / 输出 {formatCount(done.completion_tokens)}
               </dd>
             </>
           )}
           {invalidCount > 0 ? (
             <>
-              <dt>引用校验</dt>
-              <dd className="text-danger">
+              <dt className="text-fg-subtle">引用校验</dt>
+              <dd className="tabular font-medium text-danger">
                 {invalidCount} 条引用未被系统校验通过
                 {invalidIndices.length > 0 ? `（序号 ${invalidIndices.join("、")}）` : ""}
               </dd>
@@ -158,17 +158,17 @@ function ErrorBlock({ error }: { readonly error: ChatStreamError }): React.React
   return (
     <div
       role="alert"
-      className="space-y-1 rounded-md border border-danger bg-danger-weak px-3 py-2 text-xs text-fg"
+      className="space-y-1 rounded-lg border border-danger bg-danger-weak px-3 py-2 text-[12px] leading-relaxed text-fg"
     >
       <p className="flex flex-wrap items-baseline gap-x-2">
-        <span className="font-medium text-danger">{isIncomplete ? "回答不完整" : "请求失败"}</span>
+        <span className="font-semibold text-danger">{isIncomplete ? "回答不完整" : "请求失败"}</span>
         <span className="font-mono text-[11px] text-fg-muted">{error.code}</span>
         {error.retryable ? <span className="text-fg-muted">可重试</span> : null}
       </p>
       <p className="break-words text-fg-muted">{error.message}</p>
       {error.requestId === undefined || error.requestId === null ? null : (
         <p className="text-[11px] text-fg-subtle">
-          请求 ID：<span className="font-mono">{error.requestId}</span>
+          请求 ID：<span className="font-mono tabular">{error.requestId}</span>
         </p>
       )}
     </div>

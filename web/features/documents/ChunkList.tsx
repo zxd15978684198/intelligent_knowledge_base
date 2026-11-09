@@ -74,12 +74,12 @@ export function ChunkList({ documentId, workspaceId, className }: ChunkListProps
         <h3 id="chunk-list-title" className="text-sm font-medium text-fg">
           切片
         </h3>
-        <p className="text-xs text-fg-muted" role="status">
+        <p className="tabular text-xs text-fg-muted" role="status">
           {query.isPending ? "正在加载…" : `已加载 ${chunks.length} 条`}
         </p>
       </div>
 
-      <p className="text-xs text-fg-subtle">
+      <p className="max-w-[65ch] text-xs leading-relaxed text-fg-subtle">
         切片接口的 <code className="font-mono">total</code> 是页内条数而不是总数，所以这里不显示总条数、
         也没有分页器，只能用「加载更多」一页页取。
       </p>
@@ -89,7 +89,7 @@ export function ChunkList({ documentId, workspaceId, className }: ChunkListProps
           role="alert"
           className="rounded-md border border-danger bg-danger-weak px-3 py-2 text-sm text-danger"
         >
-          <p>切片读取失败：{formatErrorLabel(describeApiError(query.error))}</p>
+          <p className="max-w-[65ch] leading-relaxed">我们没能读取切片：{formatErrorLabel(describeApiError(query.error))}</p>
           <Button
             type="button"
             variant="secondary"
@@ -103,15 +103,16 @@ export function ChunkList({ documentId, workspaceId, className }: ChunkListProps
       ) : null}
 
       {query.isSuccess && chunks.length === 0 ? (
-        <p className="text-sm text-fg-muted">
-          这篇文档还没有可检索的切片：可能尚未发布（没有活动构建），或解析出的正文为空。
+        <p className="max-w-[65ch] text-sm leading-relaxed text-fg-muted">
+          这篇文档还没有可检索的切片，可能尚未发布（没有活动构建），或解析出的正文为空。
+          下一步：切到「版本链」确认已有活动版本，或回到文档列表看摄取作业是否完成；发布成功后切片会出现在这里。
         </p>
       ) : null}
 
       {chunks.length > 0 ? (
         <ol className="flex flex-col gap-2">
           {chunks.map((chunk) => (
-            <li key={chunk.chunk_id} className="rounded-md border border-border bg-surface px-3 py-2">
+            <li key={chunk.chunk_id} className="rounded-md border border-border/60 bg-surface px-3 py-2 shadow-sm transition-[box-shadow,transform] duration-fast ease-out hover:shadow-md">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted">
                 <span className="tabular font-medium text-fg">#{chunk.chunk_ordinal}</span>
                 <span>{pageLabel(chunk)}</span>
@@ -122,7 +123,7 @@ export function ChunkList({ documentId, workspaceId, className }: ChunkListProps
                 ) : null}
                 <span className="tabular text-fg-subtle">索引 v{chunk.index_version}</span>
               </div>
-              <p className="mt-1.5 whitespace-pre-wrap text-sm text-fg">{chunk.content}</p>
+              <p className="mt-1.5 max-w-[65ch] whitespace-pre-wrap text-sm leading-relaxed text-fg">{chunk.content}</p>
             </li>
           ))}
         </ol>
@@ -142,11 +143,11 @@ export function ChunkList({ documentId, workspaceId, className }: ChunkListProps
               {query.isFetchingNextPage ? "加载中…" : "加载更多"}
             </Button>
           ) : (
-            <p className="text-xs text-fg-muted">没有更多切片了（最后一页未满 {limit} 条）。</p>
+            <p className="max-w-[65ch] text-xs leading-relaxed text-fg-muted">没有更多切片了（最后一页未满 {limit} 条）。</p>
           )}
           {query.isFetchNextPageError ? (
-            <p role="alert" className="text-xs text-danger">
-              加载下一页失败：{formatErrorLabel(describeApiError(query.error))}
+            <p role="alert" className="max-w-[65ch] text-xs leading-relaxed text-danger">
+              我们没能加载下一页：{formatErrorLabel(describeApiError(query.error))}
             </p>
           ) : null}
         </div>

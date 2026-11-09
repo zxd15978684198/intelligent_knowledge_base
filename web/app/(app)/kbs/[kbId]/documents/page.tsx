@@ -19,15 +19,15 @@ export default function DocumentsPage() {
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-fg">文档</h1>
-        <p className="text-sm text-fg-muted">
+        <h1 className="text-[28px]/[32px] font-semibold tracking-tight leading-tight text-fg">文档</h1>
+        <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
           上传后进入摄取队列：解析、切片、向量化、发布。上传面板负责跟踪作业，下面的表格只读列表接口。
         </p>
       </header>
 
       {workspaceId === null ? (
         <p
-          className="rounded-md border border-warning bg-warning-weak px-4 py-3 text-sm text-fg"
+          className="max-w-[65ch] rounded-md border border-warning bg-warning-weak px-4 py-3 text-sm leading-relaxed text-fg"
           role="status"
         >
           还没有拿到工作空间身份，稍后再试；上传与列表都需要 workspace 作用域。

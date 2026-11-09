@@ -48,7 +48,7 @@ export function QueryConsole({ kbId, workspaceId, className }: QueryConsoleProps
       )}
     >
       <section aria-labelledby="query-composer-heading" className="flex min-w-0 flex-col gap-3">
-        <h2 id="query-composer-heading" className="text-sm font-semibold text-fg">
+        <h2 id="query-composer-heading" className="text-[15px] font-semibold tracking-tight text-fg">
           检索输入
         </h2>
         <QueryComposer pending={mutation.isPending} onSubmit={(input) => mutation.mutate(input)} />
@@ -56,7 +56,7 @@ export function QueryConsole({ kbId, workspaceId, className }: QueryConsoleProps
 
       <section aria-labelledby="query-results-heading" className="flex min-w-0 flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 id="query-results-heading" className="text-sm font-semibold text-fg">
+          <h2 id="query-results-heading" className="text-[15px] font-semibold tracking-tight text-fg">
             检索结果
           </h2>
           {mutation.data ? <StrategyBadge strategy={mutation.data.retrieval_strategy} /> : null}
@@ -76,10 +76,10 @@ export function QueryConsole({ kbId, workspaceId, className }: QueryConsoleProps
             <div
               role="alert"
               data-testid="query-error"
-              className="flex flex-col gap-2 rounded-md border border-danger bg-danger-weak p-3"
+              className="flex flex-col gap-2 rounded-lg border border-danger bg-danger-weak p-3"
             >
-              <h3 className="text-sm font-semibold text-danger">{errorView.title}</h3>
-              <p className="text-sm text-fg">{errorView.detail}</p>
+              <h3 className="text-[14px] font-semibold text-danger">{errorView.title}</h3>
+              <p className="text-[13px] leading-relaxed text-fg">{errorView.detail}</p>
               {errorView.retryable && lastInput ? (
                 <div>
                   <Button
@@ -100,15 +100,15 @@ export function QueryConsole({ kbId, workspaceId, className }: QueryConsoleProps
               {/* 降级要放在结果**上方**：先看到"结果不完整"，再看排名。 */}
               <DegradedBanner degraded={mutation.data.degraded} />
 
-              <p className="text-sm text-fg-muted" data-testid="query-summary">
+              <p className="text-[13px] leading-relaxed text-fg-muted" data-testid="query-summary">
                 问题「{mutation.data.query}」{describeResultCount(mutation.data.results.length)}
                 （top_k {lastInput?.top_k ?? QUERY_DEFAULT_TOP_K}）。
               </p>
 
               {mutation.data.results.length === 0 ? (
-                <p className="rounded-md border border-border bg-surface-muted p-3 text-sm text-fg-muted">
-                  本次检索没有命中任何切片。可以换一种问法、把 top_k 调大；若知识库还没有文档或索引仍在进行，
-                  请先<a className="underline" href={documentsHref}>上传文档</a>并等待索引完成。
+                <p className="max-w-[65ch] rounded-lg border border-border bg-surface-muted p-3 text-[13px] leading-relaxed text-fg-muted">
+                  本次检索没有命中任何切片。请换一种更具体的问法、把 top_k 调大后重新运行；若知识库还没有文档或索引仍在进行，
+                  请先<a className="font-medium text-fg underline decoration-border-strong underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring" href={documentsHref}>上传文档</a>并等待索引完成。
                 </p>
               ) : (
                 <RetrievalTable results={mutation.data.results} />

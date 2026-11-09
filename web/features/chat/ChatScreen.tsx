@@ -140,10 +140,10 @@ export function ChatScreen({ kbId, workspaceId = null, topK }: ChatScreenProps):
   const conversation =
     session.turns.length === 0 ? (
       <div className="rounded-lg border border-dashed border-border bg-surface px-4 py-10 text-center">
-        <p className="text-sm font-medium text-fg">向当前知识库提问</p>
-        <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-fg-muted">
+        <p className="text-[15px] font-semibold tracking-tight text-fg">向当前知识库提问</p>
+        <p className="mx-auto mt-1.5 max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
           回答按收到的 token 逐字渲染，不做打字机动画。多轮对话只保留在当前页面（后端没有会话接口），
-          刷新即清空，也不会自动重放。
+          刷新即清空，也不会自动重放。在下方输入问题即可开始。
         </p>
       </div>
     ) : (
@@ -163,8 +163,8 @@ export function ChatScreen({ kbId, workspaceId = null, topK }: ChatScreenProps):
 
   const evidence =
     evidenceTurn === null ? (
-      <p className="rounded-md border border-dashed border-border px-3 py-4 text-xs text-fg-muted">
-        提问后这里会列出本轮的引用片段、页码与检索降级信息。
+      <p className="max-w-[65ch] rounded-lg border border-dashed border-border px-3 py-4 text-[13px] leading-relaxed text-fg-muted">
+        提问后这里会列出本轮的引用片段、页码与检索降级信息；先在下方输入问题并发送。
       </p>
     ) : (
       <CitationRail
@@ -183,9 +183,9 @@ export function ChatScreen({ kbId, workspaceId = null, topK }: ChatScreenProps):
   return (
     <div className="flex min-h-full flex-col gap-4">
       <header className="flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <h1 className="text-lg font-medium text-fg">问答</h1>
-          <p className="text-xs text-fg-muted">
+        <div className="min-w-0">
+          <h1 className="text-[28px]/[32px] font-semibold tracking-tight leading-tight text-fg">问答</h1>
+          <p className="mt-1 max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
             基于本知识库检索并流式生成；引用与降级信息在证据栏（窄屏为页签）。
           </p>
         </div>

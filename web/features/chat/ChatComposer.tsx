@@ -86,7 +86,7 @@ export function ChatComposer({
           onKeyDown={handleKeyDown}
           placeholder="就当前知识库提问，例如「电源接反会怎样？」"
           disabled={blocked}
-          className="min-h-20 border-0 bg-transparent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          className="min-h-20 border-0 bg-transparent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring"
         />
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
           <p className="text-[11px] text-fg-subtle">

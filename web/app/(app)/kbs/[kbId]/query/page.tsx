@@ -33,10 +33,10 @@ export default function QueryPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <header className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold text-fg">检索调试</h1>
-        <p className="text-sm text-fg-muted">
-          直接调用 <code className="font-mono text-xs">POST /api/v1/knowledge-bases/{"{kb_id}"}/query</code>
+      <header className="flex flex-col gap-1.5">
+        <h1 className="text-[28px]/[32px] font-semibold tracking-tight leading-tight text-fg">检索调试</h1>
+        <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
+          直接调用 <code className="font-mono text-[12px]">POST /api/v1/knowledge-bases/{"{kb_id}"}/query</code>
           ，同时查看融合分数与两路召回排名。
         </p>
       </header>

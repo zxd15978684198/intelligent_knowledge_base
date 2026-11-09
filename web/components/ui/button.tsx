@@ -17,8 +17,9 @@ const buttonVariants = cva(
     "min-h-hit",
     "rounded-md border",
     "text-sm font-medium whitespace-nowrap",
-    "transition-colors duration-150 ease-out",
-    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+    "transition-[transform,box-shadow,background-color,border-color,color,opacity] duration-fast ease-out",
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring",
+    "active:scale-[0.98]",
     "disabled:pointer-events-none disabled:opacity-60",
     "aria-disabled:pointer-events-none aria-disabled:opacity-60",
   ],
@@ -26,13 +27,13 @@ const buttonVariants = cva(
     variants: {
       variant: {
         primary:
-          "border-primary bg-primary text-primary-fg hover:border-primary-hover hover:bg-primary-hover active:bg-primary-hover",
+          "border-primary bg-primary text-primary-fg shadow-sm hover:border-primary-hover hover:bg-primary-hover hover:shadow-md hover:-translate-y-px active:bg-primary-hover active:shadow-sm active:translate-y-0",
         secondary:
-          "border-border bg-surface text-fg hover:border-border-strong hover:bg-surface-muted active:bg-surface-muted",
+          "border-border bg-surface text-fg hover:border-border-strong hover:bg-surface-muted hover:shadow-sm hover:-translate-y-px active:bg-surface-muted active:translate-y-0",
         ghost:
           "border-transparent bg-transparent text-fg hover:bg-surface-muted active:bg-surface-muted",
         danger:
-          "border-danger bg-danger text-fg-inverse hover:brightness-95 active:brightness-90",
+          "border-danger bg-danger text-fg-inverse shadow-sm hover:brightness-95 hover:-translate-y-px active:brightness-90 active:translate-y-0",
       },
       size: {
         sm: "px-3",

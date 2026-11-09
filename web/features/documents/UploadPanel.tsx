@@ -143,7 +143,7 @@ export function UploadPanel({ kbId, workspaceId, className }: UploadPanelProps) 
 
   return (
     <section
-      className={cn("rounded-lg border border-border bg-surface p-4", className)}
+      className={cn("rounded-lg border border-border/60 bg-surface p-4 shadow-sm", className)}
       aria-labelledby="upload-panel-title"
     >
       <h2 id="upload-panel-title" className="text-sm font-medium text-fg">
@@ -179,7 +179,7 @@ export function UploadPanel({ kbId, workspaceId, className }: UploadPanelProps) 
         >
           选择文件
         </Button>
-        <p id="upload-panel-constraints" className="text-xs text-fg-muted">
+        <p id="upload-panel-constraints" className="max-w-[65ch] text-xs leading-relaxed text-fg-muted">
           支持 {SUPPORTED_SUFFIXES_LABEL}；单个文件不超过 {formatBytes(MAX_UPLOAD_BYTES)}。
           文件类型与大小最终由服务端复核。
         </p>
@@ -188,7 +188,7 @@ export function UploadPanel({ kbId, workspaceId, className }: UploadPanelProps) 
       {rejection !== null ? (
         <p
           role="alert"
-          className="mt-3 rounded-md border border-danger bg-danger-weak px-3 py-2 text-sm text-danger"
+          className="mt-3 max-w-[65ch] rounded-md border border-danger bg-danger-weak px-3 py-2 text-sm leading-relaxed text-danger"
         >
           {rejection.message}
         </p>
@@ -241,7 +241,7 @@ export function UploadPanel({ kbId, workspaceId, className }: UploadPanelProps) 
           role="alert"
           className="mt-3 rounded-md border border-danger bg-danger-weak px-3 py-2 text-sm text-danger"
         >
-          <p>上传失败：{formatErrorLabel(errorDescription)}</p>
+          <p className="max-w-[65ch] leading-relaxed">我们没能上传这份文档：{formatErrorLabel(errorDescription)}</p>
           <p className="mt-1 text-xs">
             错误码 <code className="font-mono">{errorDescription.code === "" ? "（无）" : errorDescription.code}</code>
             {errorDescription.requestId !== null ? (
@@ -261,7 +261,7 @@ export function UploadPanel({ kbId, workspaceId, className }: UploadPanelProps) 
           >
             重传
           </Button>
-          <p className="mt-1 text-xs">
+          <p className="mt-1 max-w-[65ch] text-xs leading-relaxed">
             重传会复用同一个 <code className="font-mono">Idempotency-Key</code>
             ，服务端不会把重试当成第二次上传。
           </p>
@@ -273,7 +273,7 @@ export function UploadPanel({ kbId, workspaceId, className }: UploadPanelProps) 
           role="status"
           className="mt-3 rounded-md border border-info bg-info-weak px-3 py-2 text-sm text-info"
         >
-          <p>
+          <p className="max-w-[65ch] leading-relaxed">
             这份内容此前已经上传过（服务端返回 {result?.status ?? 200} + deduped，内容哈希命中），
             没有新建作业，也不用等待。
           </p>
@@ -297,7 +297,7 @@ export function UploadPanel({ kbId, workspaceId, className }: UploadPanelProps) 
 
       {accepted !== null && !deduped ? (
         <div className="mt-3">
-          <p className="text-sm text-fg">
+          <p className="max-w-[65ch] text-sm leading-relaxed text-fg">
             已受理（{result?.status ?? 202}），作业已入队。文档{" "}
             <span className="font-mono">{shortId(accepted.document_id)}</span> 在摄取完成前不可检索。
           </p>

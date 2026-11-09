@@ -35,7 +35,7 @@ export function describeQueryError(error: unknown): QueryErrorView {
   if (!isApiError(error)) {
     return {
       title: "检索请求未完成",
-      detail: "网络异常或请求被中断：请检查网络、代理与后端服务是否在运行，然后再试一次。",
+      detail: "网络异常或连接中断：请检查网络、代理与后端服务是否在运行，然后点击「重试本次检索」再试一次。",
       retryable: true,
     };
   }
@@ -45,7 +45,7 @@ export function describeQueryError(error: unknown): QueryErrorView {
   if (error.status === 401 || error.code === "UNAUTHENTICATED") {
     return {
       title: "登录已过期（401）",
-      detail: "登录凭据失效或缺失，请重新登录后再检索。",
+      detail: "登录凭据失效或缺失，请重新登录后再发起检索。",
       retryable: false,
     };
   }
@@ -72,7 +72,7 @@ export function describeQueryError(error: unknown): QueryErrorView {
     return {
       title: "检索依赖不可用（503）",
       detail: withRequestId(
-        "检索链路依赖未就绪（例如 embedding provider 未配置），本次请求没有执行检索。请让管理员检查服务配置后再试。",
+        "检索链路依赖未就绪（例如 embedding provider 未配置），系统跳过了本次检索。请联系管理员检查服务配置，然后点击「重试本次检索」。",
         requestId,
       ),
       retryable: true,
@@ -90,7 +90,7 @@ export function describeQueryError(error: unknown): QueryErrorView {
   if (error.status >= 500 || error.code === "INTERNAL_ERROR") {
     return {
       title: `服务异常（HTTP ${error.status}）`,
-      detail: withRequestId("后端处理失败，请稍后重试；若持续失败，请把请求标识一起反馈。", requestId),
+      detail: withRequestId("后端未能处理本次请求，请点击「重试本次检索」；若持续失败，请把请求标识一起反馈。", requestId),
       retryable: true,
     };
   }

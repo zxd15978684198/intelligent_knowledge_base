@@ -1,9 +1,22 @@
 import type { Metadata, Viewport } from "next";
+import { Geist } from "next/font/google";
 import type { ReactNode } from "react";
 
 import { Providers } from "@/components/providers";
 
 import "./globals.css";
+
+/**
+ * Geist（拉丁/西文主体字体）：next/font/google 构建期下载、运行时自托管，
+ * 不发运行时 CDN 请求。通过 css 变量 --font-geist-sans 接到 globals.css 的
+ * --font-sans 打头位；中文回落链（PingFang SC / Microsoft YaHei / Noto Sans SC…）
+ * 保持在 globals.css 不动。若构建期下载失败，globals.css 的回落链仍可独立工作。
+ */
+const geistSans = Geist({
+  subsets: ["latin"],
+  variable: "--font-geist-sans",
+  display: "swap",
+});
 
 /**
  * 根布局：只放"全站都必须有"的东西。
@@ -26,7 +39,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" className={geistSans.variable}>
       <body className="min-h-dvh bg-canvas text-fg antialiased">
         <Providers>{children}</Providers>
       </body>

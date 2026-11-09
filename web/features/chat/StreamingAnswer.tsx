@@ -67,14 +67,14 @@ export function StreamingAnswer({
   return (
     <div className={cn("space-y-2", className)}>
       {answer === "" && streaming ? (
-        <p className="flex items-center gap-2 text-sm text-fg-subtle" role="status">
+        <p className="flex items-center gap-2 text-[13px] leading-relaxed text-fg-muted" role="status">
           <span>{placeholder}</span>
           <Cursor />
         </p>
       ) : null}
 
       <div
-        className="whitespace-pre-wrap break-words text-sm leading-relaxed text-fg"
+        className="max-w-[65ch] whitespace-pre-wrap break-words text-[13px] leading-relaxed text-fg"
         aria-busy={streaming || undefined}
         aria-live={streaming ? "polite" : undefined}
         data-testid="answer-body"
@@ -106,14 +106,14 @@ export function StreamingAnswer({
               data-active={active || undefined}
               data-invalid={invalid || undefined}
               className={cn(
-                "mx-0.5 inline rounded px-1 align-baseline font-mono text-[11px] leading-snug",
-                "transition-colors duration-150 ease-out",
-                "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary",
+                "mx-0.5 inline rounded-sm px-1 align-baseline font-mono text-[11px] leading-snug tabular",
+                "transition-colors duration-base ease-out",
+                "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary-ring",
                 invalid
                   ? "bg-danger-weak text-danger"
                   : active
                     ? "bg-primary text-primary-fg"
-                    : "bg-primary-weak text-primary hover:bg-primary/20",
+                    : "bg-primary-weak text-primary hover:bg-primary-hover/20",
               )}
             >
               {segment.raw}
@@ -126,10 +126,10 @@ export function StreamingAnswer({
       {incomplete ? (
         <p
           role="status"
-          className="rounded-md border border-warning bg-warning-weak px-3 py-2 text-xs text-fg"
+          className="max-w-[65ch] rounded-lg border border-warning bg-warning-weak px-3 py-2 text-[13px] leading-relaxed text-fg"
         >
-          <span className="font-medium text-warning">回答不完整（连接中断）</span>
-          <span className="ml-1 text-fg-muted">以上内容在收到结束帧之前就中断了，可能缺少结论。</span>
+          <span className="font-semibold text-warning">回答不完整（连接中断）</span>
+          <span className="ml-1 text-fg-muted">以上内容在收到结束帧之前就中断了，可能缺少结论；请重试本轮提问。</span>
         </p>
       ) : null}
     </div>

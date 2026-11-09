@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 
 import type { BadgeTone } from "./badge";
 import { CloseIcon } from "./icons";
+import styles from "./ui-motion.module.css";
 
 /**
  * Toast —— 极简实现（计划 D5：不引第三方 toast 库）。
@@ -14,7 +15,9 @@ import { CloseIcon } from "./icons";
  * - 两个**常驻** live region（`role="status"` 礼貌 / `role="alert"` 强打断）。先有区域、
  *   后有内容，读屏才会播报；只把 `role` 放在"插入即满内容"的节点上，多数读屏会漏。
  * - 危险态进 alert 区域并延长停留时间（8s），其余 5s；关闭按钮 44px。
- * - 不写进入/退出动画：`globals.css` 已统一处理 `prefers-reduced-motion`。
+ * - 浮层深度：`shadow-lg`（升级计划 §1.6 P3），入场用 CSS keyframes 的
+ *   translateY+opacity（只动 transform/opacity），`prefers-reduced-motion` 由
+ *   `globals.css` 的全局降级 + 本文件 `.toast-enter` 的媒体查询双保险关掉。
  */
 export type ToastTone = BadgeTone;
 
@@ -180,7 +183,8 @@ export function Toast({
   return (
     <div
       className={cn(
-        "pointer-events-auto flex w-full max-w-sm items-start gap-2 rounded-md border p-3",
+        "pointer-events-auto flex w-full max-w-sm items-start gap-2 rounded-lg border p-3 shadow-lg",
+        styles.toastEnter ?? "",
         toneBox[tone],
         className,
       )}
@@ -196,9 +200,9 @@ export function Toast({
           aria-label="关闭提示"
           className={cn(
             "grid size-11 shrink-0 place-items-center rounded-md",
-            "text-fg-muted transition-colors duration-150 ease-out",
+            "text-fg-muted transition-[transform,background-color,color] duration-fast ease-out",
             "hover:bg-surface-muted hover:text-fg",
-            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring",
           )}
         >
           <CloseIcon />

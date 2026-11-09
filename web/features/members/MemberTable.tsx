@@ -91,7 +91,7 @@ function MemberRow({ member, roles, workspaceId, token, canManage, isSelf }: Mem
     <TableRow>
       <TableCell>
         <div className="flex flex-wrap items-center gap-2">
-          <code className="font-mono text-sm text-fg" title={member.user_id}>
+          <code className="font-mono tabular text-[13px] text-fg" title={member.user_id}>
             {shortId(member.user_id)}
           </code>
           {isSelf ? <Badge tone="info">我</Badge> : null}
@@ -110,10 +110,10 @@ function MemberRow({ member, roles, workspaceId, token, canManage, isSelf }: Mem
           <div className="flex flex-col gap-1">
             <Badge tone={roleBadgeTone(member.role)}>{describeRole(member.role)}</Badge>
             {isOwnerRole(member.role) ? (
-              <span className="text-xs text-fg-muted">所有者只能用「转移所有权」变更</span>
+            <span className="text-[12px] leading-relaxed text-fg-muted">所有者只能用「转移所有权」变更</span>
             ) : null}
             {canManage && roleOptions.length === 0 && !isOwnerRole(member.role) ? (
-              <span className="text-xs text-fg-muted">角色目录未就绪，暂时只读</span>
+              <span className="text-[12px] leading-relaxed text-fg-muted">角色目录未就绪，暂时只读</span>
             ) : null}
           </div>
         )}
@@ -127,7 +127,7 @@ function MemberRow({ member, roles, workspaceId, token, canManage, isSelf }: Mem
             isSelf={isSelf}
           />
         ) : (
-          <span className="text-xs text-fg-muted">无管理权限</span>
+          <span className="text-[12px] leading-relaxed text-fg-muted">无管理权限</span>
         )}
       </TableCell>
     </TableRow>
@@ -169,7 +169,7 @@ function RoleCell({ member, roles, workspaceId, token }: RoleCellProps) {
         }}
       />
       {error !== null ? (
-        <p role="alert" className="text-xs text-danger">
+        <p role="alert" className="text-[12px] leading-relaxed text-danger">
           {error}
         </p>
       ) : null}
@@ -211,7 +211,7 @@ function CopyUserIdButton({ userId }: CopyUserIdButtonProps) {
       >
         复制
       </Button>
-      <span className="text-xs text-fg-muted" aria-live="polite">
+      <span className="text-[12px] leading-relaxed text-fg-muted" aria-live="polite">
         {state === "copied" ? "已复制" : state === "failed" ? "复制失败，请手动选中" : ""}
       </span>
     </span>

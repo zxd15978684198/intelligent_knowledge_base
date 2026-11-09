@@ -26,9 +26,12 @@ export function DegradedNote({ degraded, className }: DegradedNoteProps): React.
   return (
     <div
       role="status"
-      className={cn("space-y-1 rounded-md border border-warning bg-warning-weak px-3 py-2 text-xs", className)}
+      className={cn(
+        "space-y-1 rounded-lg border border-warning bg-warning-weak px-3 py-2 text-[12px] leading-relaxed",
+        className,
+      )}
     >
-      <p className="font-medium text-warning">本次检索有通道降级，引用可能不完整</p>
+      <p className="font-semibold text-warning">本次检索有通道降级，引用可能不完整</p>
       <ul className="space-y-0.5 text-fg-muted">
         {entries.map(([channel, code]) => (
           <li key={channel}>

@@ -255,15 +255,21 @@ export default function ApiDocsPage() {
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-2">
-        <h1 className="text-xl font-semibold text-fg">接口文档</h1>
-        <p className="max-w-3xl text-sm text-fg-muted">
+        <h1 className="text-[28px]/[32px] font-semibold tracking-tight leading-tight text-fg">接口文档</h1>
+        <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
           这一页是给人读的中文说明书：系统有哪些动作、每个动作干什么、出错是什么码。
           机器可读的原始定义在{" "}
-          <a className="text-primary underline underline-offset-4" href="/openapi.json">
+          <a
+            className="font-medium text-primary underline decoration-primary/40 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring"
+            href="/openapi.json"
+          >
             /openapi.json
           </a>
           ，可交互调试在{" "}
-          <a className="text-primary underline underline-offset-4" href="/docs">
+          <a
+            className="font-medium text-primary underline decoration-primary/40 underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring"
+            href="/docs"
+          >
             /docs
           </a>
           （Swagger UI；它的 JS/CSS 由后端自托管，不走 CDN，断网也能打开）。
@@ -271,11 +277,11 @@ export default function ApiDocsPage() {
       </header>
 
       <section className="flex flex-col gap-3">
-        <h2 className="text-base font-semibold text-fg">通用约定</h2>
-        <dl className="grid gap-x-6 gap-y-2 rounded-lg border border-border bg-surface p-4 text-sm sm:grid-cols-[7rem_1fr]">
+        <h2 className="text-[18px]/[24px] font-semibold tracking-tight text-fg">通用约定</h2>
+        <dl className="grid gap-x-6 gap-y-2 rounded-lg border border-border bg-surface p-4 text-[13px] leading-relaxed sm:grid-cols-[7rem_1fr]">
           {CONVENTIONS.map((item) => (
             <div key={item.term} className="contents">
-              <dt className="font-medium text-fg">{item.term}</dt>
+              <dt className="font-semibold text-fg">{item.term}</dt>
               <dd className="text-fg-muted">{item.detail}</dd>
             </div>
           ))}
@@ -283,21 +289,21 @@ export default function ApiDocsPage() {
       </section>
 
       <section className="flex flex-col gap-3">
-        <h2 className="text-base font-semibold text-fg">端点清单（31 个）</h2>
-        <p className="text-sm text-fg-muted">
-          路径都省略了 <code className="font-mono text-fg">/api/v1</code> 前缀（除 /health）。
+        <h2 className="text-[18px]/[24px] font-semibold tracking-tight text-fg">端点清单（31 个）</h2>
+        <p className="text-[13px] leading-relaxed text-fg-muted">
+          路径都省略了 <code className="font-mono text-[12px] text-fg">/api/v1</code> 前缀（除 /health）。
         </p>
         {GROUPS.map((group) => (
           <div key={group.title} className="flex flex-col gap-2">
-            <h3 className="text-sm font-semibold text-fg">
+            <h3 className="text-[14px] font-semibold tracking-tight text-fg">
               {group.title}
-              <span className="ml-2 font-normal text-fg-subtle">{group.endpoints.length} 个</span>
+              <span className="tabular ml-2 font-normal text-fg-subtle">{group.endpoints.length} 个</span>
             </h3>
-            <p className="text-xs text-fg-muted">{group.intro}</p>
+            <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">{group.intro}</p>
             <div className="overflow-x-auto rounded-lg border border-border bg-surface">
-              <table className="w-full min-w-[42rem] border-collapse text-sm">
+              <table className="w-full min-w-[42rem] border-collapse text-[13px] leading-relaxed">
                 <thead>
-                  <tr className="border-b border-border text-left text-xs text-fg-muted">
+                  <tr className="border-b border-border text-left text-[11px] font-medium uppercase tracking-wide text-fg-subtle">
                     <th className="px-3 py-2 font-medium">方法</th>
                     <th className="px-3 py-2 font-medium">路径</th>
                     <th className="px-3 py-2 font-medium">说明</th>
@@ -308,16 +314,16 @@ export default function ApiDocsPage() {
                     <tr key={`${endpoint.method} ${endpoint.path}`} className="border-b border-border last:border-0">
                       <td className="px-3 py-2 align-top">
                         <span
-                          className={`inline-flex h-6 items-center rounded border px-1.5 font-mono text-xs ${METHOD_TONE[endpoint.method]}`}
+                          className={`inline-flex h-6 items-center rounded-sm border px-1.5 font-mono text-[11px] font-semibold tabular ${METHOD_TONE[endpoint.method]}`}
                         >
                           {endpoint.method}
                         </span>
                       </td>
-                      <td className="px-3 py-2 align-top font-mono text-xs text-fg">{endpoint.path}</td>
+                      <td className="px-3 py-2 align-top font-mono text-[12px] text-fg">{endpoint.path}</td>
                       <td className="px-3 py-2 align-top text-fg-muted">
                         {endpoint.summary}
                         {endpoint.note ? (
-                          <span className="mt-0.5 block text-xs text-fg-subtle">{endpoint.note}</span>
+                          <span className="mt-0.5 block text-[12px] leading-relaxed text-fg-subtle">{endpoint.note}</span>
                         ) : null}
                       </td>
                     </tr>
@@ -330,11 +336,11 @@ export default function ApiDocsPage() {
       </section>
 
       <section className="flex flex-col gap-3">
-        <h2 className="text-base font-semibold text-fg">问答的流式事件</h2>
-        <ul className="flex flex-col gap-1.5 rounded-lg border border-border bg-surface p-4 text-sm">
+        <h2 className="text-[18px]/[24px] font-semibold tracking-tight text-fg">问答的流式事件</h2>
+        <ul className="flex flex-col gap-1.5 rounded-lg border border-border bg-surface p-4 text-[13px] leading-relaxed">
           {SSE_EVENTS.map((event) => (
             <li key={event.name} className="flex flex-wrap gap-x-3">
-              <code className="min-w-[5.5rem] font-mono text-xs text-primary">{event.name}</code>
+              <code className="min-w-[5.5rem] font-mono text-[12px] font-medium text-primary">{event.name}</code>
               <span className="text-fg-muted">{event.meaning}</span>
             </li>
           ))}
@@ -342,11 +348,11 @@ export default function ApiDocsPage() {
       </section>
 
       <section className="flex flex-col gap-3">
-        <h2 className="text-base font-semibold text-fg">错误码（17 个）</h2>
-        <div className="grid gap-x-6 gap-y-1.5 rounded-lg border border-border bg-surface p-4 text-sm sm:grid-cols-[14rem_1fr]">
+        <h2 className="text-[18px]/[24px] font-semibold tracking-tight text-fg">错误码（17 个）</h2>
+        <div className="grid gap-x-6 gap-y-1.5 rounded-lg border border-border bg-surface p-4 text-[13px] leading-relaxed sm:grid-cols-[14rem_1fr]">
           {ERROR_CODES.map((item) => (
             <div key={item.code} className="contents">
-              <code className="font-mono text-xs text-fg">{item.code}</code>
+              <code className="font-mono text-[12px] font-medium text-fg">{item.code}</code>
               <span className="text-fg-muted">{item.meaning}</span>
             </div>
           ))}
@@ -354,14 +360,14 @@ export default function ApiDocsPage() {
       </section>
 
       <section className="flex flex-col gap-3">
-        <h2 className="text-base font-semibold text-fg">权限点（16 个）</h2>
-        <p className="text-sm text-fg-muted">
+        <h2 className="text-[18px]/[24px] font-semibold tracking-tight text-fg">权限点（16 个）</h2>
+        <p className="text-[13px] leading-relaxed text-fg-muted">
           角色只是权限点的集合；成员页能看到每个角色实际持有哪些。
         </p>
-        <div className="grid gap-x-6 gap-y-1.5 rounded-lg border border-border bg-surface p-4 text-sm sm:grid-cols-[15rem_1fr]">
+        <div className="grid gap-x-6 gap-y-1.5 rounded-lg border border-border bg-surface p-4 text-[13px] leading-relaxed sm:grid-cols-[15rem_1fr]">
           {PERMISSIONS.map((item) => (
             <div key={item.code} className="contents">
-              <code className="font-mono text-xs text-fg">{item.code}</code>
+              <code className="font-mono text-[12px] font-medium text-fg">{item.code}</code>
               <span className="text-fg-muted">{item.meaning}</span>
             </div>
           ))}

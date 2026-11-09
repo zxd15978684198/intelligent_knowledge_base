@@ -33,10 +33,10 @@ export function ShellSkeleton() {
           </div>
         </div>
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex min-h-14 items-center border-b border-border bg-surface px-3 lg:hidden">
+          <div className="flex min-h-14 items-center border-b border-border/60 bg-surface px-3 shadow-sm lg:hidden">
             <Bar className="h-8 w-28" />
           </div>
-          <div className="min-w-0 flex-1 space-y-4 px-4 py-6 lg:px-8 lg:py-8">
+          <div className="min-w-0 flex-1 space-y-4 px-6 py-8 lg:px-8">
             <Bar className="h-7 w-48" />
             <Bar className="h-4 w-72 max-w-full" />
             <div className="space-y-2">

@@ -1,0 +1,63 @@
+/*
+ * N2 组件级动效（升级计划 §1.4 I3/I4）。
+ *
+ * 为什么放在 CSS Module 而不是 globals.css：globals.css 是共用文件，DAG §2 规则 4
+ * 规定只有 N1 能写；本文件落在 N2 自己的写范围 `web/components/ui/**` 内。
+ * 与 N3 的 `app-shell/shell-motion.module.css` 同一套路。
+ *
+ * 红线：只动 transform/opacity/GPU 友好的位移；reduced-motion 下连 animation 一起关
+ * （globals.css 的全局降级是兜底，这里再显式关一次，避免 `both` 的 fill 留下位移）。
+ */
+
+.toastEnter {
+  animation: toast-enter var(--motion-base) ease-out both;
+}
+
+@keyframes toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 骨架微光扫过：保留组件上的 animate-pulse（用例断言），这里只加一层高光扫过。 */
+.skeletonShimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.skeletonShimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  /* 高光只引用语义令牌：surface 半透明扫过，无字面色值（红线①）。 */
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--color-surface) 45%, transparent),
+    transparent
+  );
+  animation: skeleton-shimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toastEnter {
+    animation: none;
+  }
+
+  .skeletonShimmer::after {
+    animation: none;
+    display: none;
+  }
+}

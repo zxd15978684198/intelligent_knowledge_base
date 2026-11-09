@@ -66,7 +66,7 @@ export function RetrievalTable({ results, className }: RetrievalTableProps) {
     <Table aria-label="检索结果" className={cn("min-w-[48rem]", className)}>
       <TableHeader>
         <TableRow>
-          <TableHead className="w-12 text-right">#</TableHead>
+          <TableHead className="w-12 text-right tabular">#</TableHead>
           <TableHead className="w-28 text-right">融合分</TableHead>
           <TableHead className="w-24 text-right">向量排名</TableHead>
           <TableHead className="w-24 text-right">关键词排名</TableHead>
@@ -151,12 +151,12 @@ export function RetrievalTable({ results, className }: RetrievalTableProps) {
                 <TableRow className="bg-surface-muted hover:bg-surface-muted">
                   <TableCell colSpan={COLUMN_COUNT} className="px-4 py-3">
                     <div id={detailId} className="flex flex-col gap-3">
-                      <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-surface p-3 font-sans text-sm text-fg">
+                      <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-surface p-3 font-sans text-[13px] leading-relaxed text-fg">
                         {chunk.content}
                       </pre>
                       <div className="flex flex-col gap-1">
-                        <p className="text-xs font-semibold text-fg-muted">定位信息</p>
-                        <p className="text-xs text-fg-subtle">
+                        <p className="text-[12px] font-semibold text-fg-muted">定位信息</p>
+                        <p className="text-[12px] leading-relaxed text-fg-subtle">
                           检索响应不返回字符偏移（char_start/char_end），因此这里只展示原文与真实定位字段，
                           不做高亮。需要偏移请到切片列表接口按 chunk_id 查询。
                         </p>

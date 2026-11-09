@@ -6,9 +6,11 @@ import { AppNav } from "@/components/app-shell/app-nav";
 import { Brand } from "@/components/app-shell/brand";
 import { readIdentityView } from "@/components/app-shell/identity-view";
 import { MobileNav } from "@/components/app-shell/mobile-nav";
+import { shellEnter } from "@/components/app-shell/shell-motion";
 import { SkipLink } from "@/components/app-shell/skip-link";
 import { UserBlock } from "@/components/app-shell/user-block";
 import { useAuth } from "@/features/auth/auth-context";
+import { cn } from "@/lib/utils";
 
 /**
  * 登录后的应用壳（DAG §2 N4）。
@@ -17,6 +19,10 @@ import { useAuth } from "@/features/auth/auth-context";
  * - **≥1024px**：左侧 256px 带文字侧栏（品牌 / 导航 / 身份区），主内容区在右；
  * - **<1024px**：侧栏隐藏，换成顶部条 + 抽屉（`MobileNav`）；
  * - 主内容区从 `<main id="main-content">` 开始，与 `SkipLink` 的目标锚点对应。
+ *
+ * 壳层留白（计划 §1.3 L1）：内容区四周走 24→32px 阶梯——窄屏 px-6(24)/py-8(32)，
+ * 桌面 lg:px-8(32)，让内容与 canvas 之间有呼吸感；`ShellSkeleton` 同步这套间距，
+ * 骨架切真页时不重排。
  *
  * 防横向滚动的三个关键写法（1440 / 1024 / 390 三档都要成立）：
  * 1. 侧栏 `shrink-0` + 固定 `w-64`，主列 `min-w-0 flex-1`——flex 子项默认
@@ -30,13 +36,14 @@ import { useAuth } from "@/features/auth/auth-context";
 export function AppShell({ children }: { children: ReactNode }) {
   const { identity, logout } = useAuth();
   const identityView = readIdentityView(identity);
+  const brandEnter = shellEnter(0);
 
   return (
     <div className="min-h-dvh bg-canvas">
       <SkipLink />
       <div className="lg:flex">
         <aside className="hidden border-r border-border bg-surface lg:sticky lg:top-0 lg:flex lg:h-dvh lg:w-64 lg:shrink-0 lg:flex-col lg:overflow-y-auto">
-          <div className="px-3 pt-5">
+          <div className={cn("px-3 pt-5", brandEnter.className)} style={brandEnter.style}>
             <Brand />
           </div>
           <AppNav />
@@ -47,7 +54,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <main
             id="main-content"
             tabIndex={-1}
-            className="min-w-0 flex-1 px-4 py-6 lg:px-8 lg:py-8"
+            className="min-w-0 flex-1 px-6 py-8 lg:px-8"
           >
             {children}
           </main>

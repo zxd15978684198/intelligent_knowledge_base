@@ -68,7 +68,8 @@ export default function KbLayout({ children }: { children: ReactNode }) {
 
   return (
     <KbContext.Provider value={kbId}>
-      <div className="flex flex-col gap-6">
+      {/* L1（计划 §1.3）：页头与内容区之间 24→32px 呼吸区（gap-6→gap-8）。 */}
+      <div className="flex flex-col gap-8">
         <header className="flex flex-col gap-4 border-b border-border pb-4">
           <nav aria-label="面包屑" className="text-sm">
             <ol className="flex flex-wrap items-center gap-1.5 text-fg-muted">
@@ -98,7 +99,8 @@ export default function KbLayout({ children }: { children: ReactNode }) {
             {kb ? (
               <>
                 <Badge tone="neutral">{kb.profile.embedding_model_key}</Badge>
-                <span className="text-xs text-fg-muted">
+                {/* L2（计划 §1.3）：页头说明文字统一 text-[13px] text-fg-muted leading-relaxed 口径。 */}
+                <span className="text-[13px] text-fg-muted leading-relaxed">
                   {kb.profile.embedding_dim} 维 · 切片 {kb.profile.chunk_size}/重叠{" "}
                   {kb.profile.chunk_overlap} · v{kb.row_version}
                 </span>

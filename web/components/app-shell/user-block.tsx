@@ -1,7 +1,8 @@
 import { SignOutIcon } from "@phosphor-icons/react";
 
 import type { IdentityView } from "@/components/app-shell/identity-view";
-import { shortId } from "@/lib/utils";
+import { shellEnter } from "@/components/app-shell/shell-motion";
+import { cn, shortId } from "@/lib/utils";
 
 /**
  * 壳层底部的身份区：当前用户、当前工作区、登出。
@@ -20,8 +21,13 @@ export function UserBlock({
   onLogout: () => void;
   onNavigate?: () => void;
 }) {
+  const enter = shellEnter(4);
+
   return (
-    <div className="mt-auto border-t border-border px-3 pb-3 pt-4">
+    <div
+      className={cn("mt-auto border-t border-border px-3 pb-3 pt-4", enter.className)}
+      style={enter.style}
+    >
       <p className="text-[11px] font-medium tracking-[0.08em] text-fg-subtle">当前用户</p>
       <p className="mt-1 truncate text-sm font-medium text-fg" title={identity.displayName}>
         {identity.displayName}
@@ -41,7 +47,7 @@ export function UserBlock({
           onLogout();
           onNavigate?.();
         }}
-        className="mt-3 flex min-h-11 w-full items-center gap-2 rounded-md border border-border px-3 text-sm text-fg-muted transition-colors duration-150 hover:bg-surface-muted hover:text-fg"
+        className="mt-3 flex min-h-11 w-full items-center gap-2 rounded-md border border-border px-3 text-sm text-fg-muted transition-[background-color,color,transform] duration-fast hover:bg-surface-muted hover:text-fg active:scale-[0.98]"
       >
         <SignOutIcon aria-hidden="true" className="size-4 shrink-0" />
         退出登录

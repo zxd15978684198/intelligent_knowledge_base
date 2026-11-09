@@ -30,8 +30,8 @@ export default function LoginPage() {
     <section className="space-y-6">
       <header className="space-y-2">
         <p className="text-xs font-medium tracking-[0.18em] text-fg-subtle uppercase">PyKnora</p>
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">登录工作台</h1>
-        <p className="text-sm leading-relaxed text-fg-muted">
+        <h1 className="text-[28px]/[32px] font-semibold tracking-tight leading-tight text-fg">登录工作台</h1>
+        <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
           管理知识库、上传文档、调试检索；工作区与权限由管理员分配。
         </p>
       </header>
@@ -58,7 +58,7 @@ export default function LoginPage() {
         </TabsContent>
       </Tabs>
 
-      <p className="text-xs leading-relaxed text-fg-subtle">
+      <p className="max-w-[65ch] text-xs leading-relaxed text-fg-subtle">
         密码只在本次请求中用于换取令牌，不会写入 localStorage；刷新页面靠令牌重新验活。
       </p>
     </section>

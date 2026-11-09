@@ -10,7 +10,7 @@ export function SkipLink() {
   return (
     <a
       href="#main-content"
-      className="fixed left-4 top-4 z-50 -translate-y-[200%] rounded-md border border-border-strong bg-surface px-4 py-2 text-sm font-medium text-fg shadow-md transition-transform duration-150 focus:translate-y-0"
+      className="fixed left-4 top-4 z-50 -translate-y-[200%] rounded-md border border-border-strong bg-surface px-4 py-2 text-sm font-medium text-fg shadow-md transition-transform duration-fast focus:translate-y-0"
     >
       跳到主要内容
     </a>

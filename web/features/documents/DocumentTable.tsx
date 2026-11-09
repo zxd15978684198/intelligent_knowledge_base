@@ -110,7 +110,7 @@ export function DocumentTable({ kbId, workspaceId, className }: DocumentTablePro
 
   return (
     <section
-      className={cn("rounded-lg border border-border bg-surface p-4", className)}
+      className={cn("rounded-lg border border-border/60 bg-surface p-4 shadow-sm", className)}
       aria-labelledby="document-table-title"
     >
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -142,7 +142,7 @@ export function DocumentTable({ kbId, workspaceId, className }: DocumentTablePro
           role="alert"
           className="mt-3 rounded-md border border-danger bg-danger-weak px-3 py-2 text-sm text-danger"
         >
-          <p>文档列表读取失败：{formatErrorLabel(describeApiError(query.error))}</p>
+          <p>我们没能读取文档列表：{formatErrorLabel(describeApiError(query.error))}</p>
           <Button type="button" variant="secondary" size="sm" className="mt-2 w-fit" onClick={() => void query.refetch()}>
             重试
           </Button>
@@ -159,7 +159,12 @@ export function DocumentTable({ kbId, workspaceId, className }: DocumentTablePro
         <EmptyState
           className="mt-3"
           title="这个知识库还没有文档"
-          description="用上面的面板上传第一篇；支持 PDF / DOCX / TXT / Markdown / HTML，单个文件不超过 50 MiB。"
+          description="列表暂时是空的，摄取完成后文档会自动出现在这里。"
+          action={
+            <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg">
+              下一步：用上方「上传文档」面板点「选择文件」，选一份 PDF / DOCX / TXT / Markdown / HTML（单个不超过 50 MiB），再点「开始上传」。
+            </p>
+          }
         />
       ) : null}
 
@@ -171,7 +176,7 @@ export function DocumentTable({ kbId, workspaceId, className }: DocumentTablePro
                 <TableHead className="px-2 py-2 text-left text-xs font-medium text-fg-muted">文件名</TableHead>
                 <TableHead className="px-2 py-2 text-left text-xs font-medium text-fg-muted">状态</TableHead>
                 <TableHead className="px-2 py-2 text-left text-xs font-medium text-fg-muted">可检索</TableHead>
-                <TableHead className="px-2 py-2 text-left text-xs font-medium text-fg-muted">创建时间</TableHead>
+                <TableHead className="px-2 py-2 text-right text-xs font-medium tabular text-fg-muted">创建时间</TableHead>
                 <TableHead className="px-2 py-2 text-right text-xs font-medium text-fg-muted">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -208,7 +213,7 @@ export function DocumentTable({ kbId, workspaceId, className }: DocumentTablePro
                     <TableCell className="px-2 py-2 align-top">
                       {document.searchable ? "是" : <span className="text-fg-muted">否</span>}
                     </TableCell>
-                    <TableCell className="tabular px-2 py-2 align-top text-fg-muted">
+                    <TableCell className="tabular px-2 py-2 text-right align-top text-fg-muted">
                       {formatDateTime(document.created_at)}
                     </TableCell>
                     <TableCell className="px-2 py-2 align-top text-right">
@@ -259,7 +264,7 @@ export function DocumentTable({ kbId, workspaceId, className }: DocumentTablePro
             </TableBody>
           </Table>
 
-          <p className="mt-2 text-xs text-fg-subtle">
+          <p className="max-w-[65ch] mt-2 text-xs leading-relaxed text-fg-subtle">
             「状态」按活动指针推导：无版本（还没有任何版本）/ 待发布（有版本但没有活动构建，可能正在摄取，也可能摄取失败）/
             已发布（存在活动构建）。列表接口不返回作业状态，具体原因看文档详情。切片数在列表接口里没有，故不显示。
           </p>
@@ -300,7 +305,7 @@ export function DocumentTable({ kbId, workspaceId, className }: DocumentTablePro
           role="alert"
           className="mt-3 rounded-md border border-danger bg-danger-weak px-3 py-2 text-sm text-danger"
         >
-          删除失败：{formatErrorLabel(describeApiError(remove.error))}
+          我们没能删除这篇文档：{formatErrorLabel(describeApiError(remove.error))}
         </p>
       ) : null}
 

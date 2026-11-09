@@ -30,11 +30,11 @@ export default function KbsPage() {
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-semibold text-fg">知识库</h1>
-          <p className="max-w-2xl text-sm text-fg-muted">
+          <h1 className="text-[28px]/[32px] font-semibold tracking-tight leading-tight text-fg">知识库</h1>
+          <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
             每个知识库固化一套嵌入与切片参数。上传文档后按此建索引，检索与问答都限定在知识库内。
           </p>
-          <p className="max-w-2xl text-sm text-fg-muted">
+          <p className="max-w-[65ch] text-[13px] leading-relaxed text-fg-muted">
             每一行右侧的「文档 / 检索 / 问答」是进入该知识库的三个入口：
             <span className="text-fg">文档</span> 里上传文件，
             <span className="text-fg">检索</span> 看切片命中，
@@ -66,7 +66,7 @@ export default function KbsPage() {
       {!list.isLoading && list.isError ? (
         <Card>
           <CardContent className="flex flex-col gap-3">
-            <p role="alert" className="text-sm text-danger">
+            <p role="alert" className="text-sm leading-relaxed text-danger">
               {describeKbError(list.error, "load")}
             </p>
             <div className="flex">
@@ -81,7 +81,7 @@ export default function KbsPage() {
       {!list.isLoading && !list.isError && list.items.length === 0 ? (
         <EmptyState
           title="还没有知识库"
-          description="新建一个知识库，再上传文档——切片、向量与回答都会被限定在它里面。"
+          description="先点下面的「新建第一个知识库」把嵌入与切片参数定下来，再上传文档；之后的检索与问答都会限定在这个库里。"
           action={
             <KbCreateDialog workspaceId={workspaceId} triggerLabel="新建第一个知识库" />
           }
@@ -93,10 +93,10 @@ export default function KbsPage() {
           <KbTable
             items={list.items}
             workspaceId={workspaceId}
-            containerClassName="rounded-lg border border-border bg-surface"
+            containerClassName="rounded-lg border border-border/60 bg-surface shadow-sm"
           />
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-xs text-fg-muted">已加载 {list.items.length} 个知识库</p>
+            <p className="tabular text-xs text-fg-muted">已加载 {list.items.length} 个知识库</p>
             {list.hasNextPage ? (
               <Button
                 variant="secondary"
@@ -117,15 +117,11 @@ export default function KbsPage() {
 
 function KbListSkeleton() {
   return (
-    <div
-      aria-busy="true"
-      aria-live="polite"
-      className="flex flex-col gap-2 rounded-lg border border-border bg-surface p-4"
-    >
+    <Card aria-busy="true" aria-live="polite" className="flex flex-col gap-2 p-4">
       <span className="sr-only">正在加载知识库…</span>
       {SKELETON_ROWS.map((row) => (
         <Skeleton key={row} className="h-12 w-full" />
       ))}
-    </div>
+    </Card>
   );
 }

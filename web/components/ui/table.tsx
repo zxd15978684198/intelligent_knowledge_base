@@ -21,7 +21,10 @@ export const Table = React.forwardRef<HTMLTableElement, TableProps>(function Tab
     <div className={cn("w-full overflow-x-auto", containerClassName)}>
       <table
         ref={ref}
-        className={cn("w-full border-collapse text-sm text-fg", className)}
+        className={cn(
+          "w-full border-collapse text-sm leading-relaxed text-fg",
+          className,
+        )}
         {...props}
       />
     </div>
@@ -68,7 +71,8 @@ export const TableRow = React.forwardRef<
     <tr
       ref={ref}
       className={cn(
-        "border-b border-border transition-colors duration-150 ease-out hover:bg-surface-muted",
+        "border-b border-border transition-[background-color,box-shadow] duration-fast ease-out",
+        "hover:bg-surface-raised hover:shadow-sm",
         "data-[state=selected]:bg-primary-weak",
         className,
       )}
@@ -88,7 +92,7 @@ export const TableHead = React.forwardRef<
       ref={ref}
       scope={scope}
       className={cn(
-        "px-3 py-2 text-left align-middle text-xs font-semibold tracking-wide text-fg-muted uppercase",
+        "h-12 px-3 text-left align-middle text-xs font-semibold tracking-wide text-fg-muted uppercase",
         className,
       )}
       {...props}
@@ -103,7 +107,7 @@ export const TableCell = React.forwardRef<
   React.TdHTMLAttributes<HTMLTableCellElement>
 >(function TableCell({ className, ...props }, ref) {
   return (
-    <td ref={ref} className={cn("px-3 py-2 align-middle", className)} {...props} />
+    <td ref={ref} className={cn("h-12 px-3 align-middle", className)} {...props} />
   );
 });
 

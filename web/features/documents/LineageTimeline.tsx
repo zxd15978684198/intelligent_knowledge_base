@@ -57,9 +57,9 @@ export function LineageTimeline({ documentId, workspaceId, className }: LineageT
     return (
       <div
         role="alert"
-        className={cn("rounded-md border border-danger bg-danger-weak px-3 py-2 text-sm text-danger", className)}
+        className={cn("max-w-[65ch] rounded-md border border-danger bg-danger-weak px-3 py-2 text-sm leading-relaxed text-danger", className)}
       >
-        <p>版本链读取失败：{formatErrorLabel(describeApiError(query.error))}</p>
+        <p>我们没能读取版本链：{formatErrorLabel(describeApiError(query.error))}</p>
         <Button
           type="button"
           variant="secondary"
@@ -87,14 +87,17 @@ export function LineageTimeline({ documentId, workspaceId, className }: LineageT
         </p>
       </div>
 
-      <p className="text-xs text-fg-subtle">
+      <p className="max-w-[65ch] text-xs leading-relaxed text-fg-subtle">
         顺序由版本创建时间（<code className="font-mono">created_at</code>）决定，
         <code className="font-mono">ordinal</code> 是读时派生的展示序号（1 起），不是库里的事实。
         后端没有「发布事件」记录，所以这里只有版本快照与活动版本标记。
       </p>
 
       {lineage.versions.length === 0 ? (
-        <p className="text-sm text-fg-muted">这篇文档还没有任何版本快照。</p>
+        <p className="max-w-[65ch] text-sm leading-relaxed text-fg-muted">
+          这篇文档还没有任何版本快照。下一步：回到文档列表确认摄取作业已完成并发布；
+          发布成功后这里会出现第一个版本节点。
+        </p>
       ) : (
         <ol className="flex flex-col gap-0 border-l border-border pl-4">
           {lineage.versions.map((version) => {
@@ -153,7 +156,7 @@ export function LineageTimeline({ documentId, workspaceId, className }: LineageT
       )}
 
       {activeMissing ? (
-        <p className="rounded-md border border-warning bg-warning-weak px-3 py-2 text-xs text-warning">
+        <p className="max-w-[65ch] rounded-md border border-warning bg-warning-weak px-3 py-2 text-xs leading-relaxed text-warning">
           文档的 <code className="font-mono">active_version_id</code>{" "}
           {lineage.active_version_id === null ? "为空" : "指向的版本不在这次返回的版本链里"}
           （后端如实返回，不补造条目）。界面上因此没有标出活动版本。

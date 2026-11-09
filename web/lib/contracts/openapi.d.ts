@@ -38,6 +38,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 登出（撤销整个会话家族，幂等）
+         * @description 撤销刷新串所属的整个家族并清三件套；没有 Cookie 也照样 204（幂等）。
+         */
+        post: operations["logout_api_v1_auth_logout_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/me": {
         parameters: {
             query?: never;
@@ -58,6 +78,30 @@ export interface paths {
         get: operations["me_api_v1_auth_me_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 轮换会话（单次轮换 + 重用检测）
+         * @description 用刷新串换一对新 Cookie；旧串单次作废，再用就撤整个家族。
+         *
+         *     不挂 `get_scope`：访问令牌过期正是刷新的正常前提，挂了会先 401。
+         *     失败分支由 `_deny` 先提交撤销再抛 401；服务端不清 Cookie，交给前端的
+         *     失效流程走幂等登出——异常处理器会重建响应，端点上 delete_cookie 会被丢掉。
+         */
+        post: operations["refresh_session_api_v1_auth_refresh_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -180,10 +224,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Knowledge Bases */
+        /**
+         * 知识库列表（游标分页）
+         * @description 按创建时间倒序；`next_cursor` 为空表示已经到底，没有总数。
+         */
         get: operations["list_knowledge_bases_api_v1_knowledge_bases_get"];
         put?: never;
-        /** Create */
+        /**
+         * 新建知识库
+         * @description 创建时固化嵌入模型与切片参数（之后不可修改）。返回 201 与完整对象。
+         */
         post: operations["create_api_v1_knowledge_bases_post"];
         delete?: never;
         options?: never;
@@ -198,15 +248,24 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get One */
+        /**
+         * 单个知识库详情
+         * @description 跨工作区或已删除一律 404，不区分「不存在」与「无权访问」。
+         */
         get: operations["get_one_api_v1_knowledge_bases__kb_id__get"];
         put?: never;
         post?: never;
-        /** Remove */
+        /**
+         * 删除知识库（202 异步回收）
+         * @description 立即阻断可见性，文档与切片由后台异步清理；同样需要 `If-Match`。
+         */
         delete: operations["remove_api_v1_knowledge_bases__kb_id__delete"];
         options?: never;
         head?: never;
-        /** Patch */
+        /**
+         * 知识库改名（需要 If-Match）
+         * @description 只允许改 `name`。`If-Match` 传当前 `row_version`：缺头 428，版本不一致 409。
+         */
         patch: operations["patch_api_v1_knowledge_bases__kb_id__patch"];
         trace?: never;
     };
@@ -222,6 +281,11 @@ export interface paths {
         /**
          * 流式 RAG 问答
          * @description SSE 顺序固定为 retrieval、token*、done；检索沿用可信 Scope。
+         *
+         *     `request` 的类型是 `Request` 而默认值是 `None`，这不是笔误：单测直接调用本函数
+         *     （`tests/unit/test_rag_chat_events.py`）时没有 ASGI 请求可注入，而 FastAPI 对
+         *     `Request` 注解的参数**不看默认值**、一律注入真实请求（`add_non_field_param_to_dependency`），
+         *     所以这个缺省值只影响"直接调用"，不影响线上，也不必为了单测去伪造一个请求对象。
          */
         post: operations["chat_api_v1_knowledge_bases__kb_id__chat_post"];
         delete?: never;
@@ -951,6 +1015,57 @@ export interface components {
              */
             owner_principal_id: string;
         };
+        /**
+         * PageLocator
+         * @description PDF / 图片类：页码 + 可选标题（原 `heading_path` 下沉到这里）。
+         */
+        PageLocator: {
+            /** Heading */
+            heading?: string | null;
+            /**
+             * Inferred
+             * @description True 表示该位置是推断/回填出来的，不是解析器真实读到的
+             * @default false
+             */
+            inferred: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "page";
+            /**
+             * Page
+             * @description 从 1 开始的页码
+             */
+            page: number;
+        };
+        /**
+         * ParaLocator
+         * @description DOCX / TXT / MD / HTML：段落序号 + 可选标题。
+         *
+         *     `index` 允许为 None：存量回填的 `{"kind": "para", "inferred": true}` 没有段落
+         *     序号，硬填一个具体值等于编造位置（ADR 0008 D9 补充 4）。
+         */
+        ParaLocator: {
+            /** Heading */
+            heading?: string | null;
+            /**
+             * Index
+             * @description 从 1 开始的段落序号
+             */
+            index?: number | null;
+            /**
+             * Inferred
+             * @description True 表示该位置是推断/回填出来的，不是解析器真实读到的
+             * @default false
+             */
+            inferred: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "para";
+        };
         /** PermissionSummary */
         PermissionSummary: {
             /** Permissions */
@@ -1002,6 +1117,57 @@ export interface components {
              * @default baseline
              */
             retrieval_strategy: string;
+        };
+        /**
+         * RefreshResponse
+         * @description 刷新成功只回有效期；访问令牌只在 HttpOnly Cookie 里，不回响应体。
+         *
+         *     与 `TokenResponse` 刻意不同：注册/登录要把令牌回给命令行工具，刷新则只服务
+         *     浏览器会话，把令牌回进响应体等于把 HttpOnly 的价值在刷新那一刻又漏回 JS。
+         */
+        RefreshResponse: {
+            /**
+             * Expires In
+             * @default 3600
+             */
+            expires_in: number;
+        };
+        /**
+         * RegionLocator
+         * @description 视觉块（扫描页 / OCR / 待补的图片区域）：页码 + 页内坐标。
+         *
+         *     `bbox` 用 4 元 tuple 而不是 `list`：坐标天然是定长的，tuple 让长度错误在类型
+         *     层就被拒（给 3 个值直接 ValidationError），也顺带表达「不可就地改写」。
+         *     Pydantic 的 `model_dump()` 在 python 模式下保留 tuple，`model_dump_json()`
+         *     落成 JSON 数组，两种形态都能往返。
+         */
+        RegionLocator: {
+            /**
+             * Bbox
+             * @description 页内坐标 (x0, y0, x1, y1)，单位随解析器（PDF 为 pt）
+             */
+            bbox: [
+                number,
+                number,
+                number,
+                number
+            ];
+            /**
+             * Inferred
+             * @description True 表示该位置是推断/回填出来的，不是解析器真实读到的
+             * @default false
+             */
+            inferred: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "region";
+            /**
+             * Page
+             * @description 从 1 开始的页码
+             */
+            page: number;
         };
         /** RegisterRequest */
         RegisterRequest: {
@@ -1110,6 +1276,8 @@ export interface components {
             kb_id: string;
             /** Keyword Rank */
             keyword_rank?: number | null;
+            /** Locator */
+            locator?: (components["schemas"]["PageLocator"] | components["schemas"]["ParaLocator"] | components["schemas"]["SheetLocator"] | components["schemas"]["SlideLocator"] | components["schemas"]["TableLocator"] | components["schemas"]["RegionLocator"]) | null;
             /** Locator Ref */
             locator_ref?: string | null;
             /**
@@ -1154,6 +1322,97 @@ export interface components {
         RolePermissionsPut: {
             /** Permissions */
             permissions: string[];
+        };
+        /**
+         * SheetLocator
+         * @description XLSX / XLS / ODS / CSV：工作表名 + 可选单元格区间（如 `B2:C4`）。
+         */
+        SheetLocator: {
+            /** Cells */
+            cells?: string | null;
+            /**
+             * Inferred
+             * @description True 表示该位置是推断/回填出来的，不是解析器真实读到的
+             * @default false
+             */
+            inferred: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "sheet";
+            /**
+             * Sheet
+             * @description 工作表名，不能为空串
+             */
+            sheet: string;
+        };
+        /**
+         * SlideLocator
+         * @description PPTX / ODP：幻灯片序号 + 可选形状名。
+         */
+        SlideLocator: {
+            /**
+             * Inferred
+             * @description True 表示该位置是推断/回填出来的，不是解析器真实读到的
+             * @default false
+             */
+            inferred: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "slide";
+            /** Shape */
+            shape?: string | null;
+            /**
+             * Slide
+             * @description 从 1 开始的幻灯片序号
+             */
+            slide: number;
+        };
+        /**
+         * TableLocator
+         * @description 表格块：第几张表 + 可选行区间，`cells` 仅当来源是电子表格。
+         *
+         *     `rows` 是**表内行号**（含表头那一行也算），`R1200:R1350` 表示第 1200 到 1350 行。
+         */
+        TableLocator: {
+            /** Cells */
+            cells?: string | null;
+            /**
+             * Index
+             * @description 文档内第几张表，从 1 开始
+             */
+            index: number;
+            /**
+             * Inferred
+             * @description True 表示该位置是推断/回填出来的，不是解析器真实读到的
+             * @default false
+             */
+            inferred: boolean;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "table";
+            /**
+             * Page
+             * @description 所在页码（PDF）
+             */
+            page?: number | null;
+            /** Rows */
+            rows?: string | null;
+            /**
+             * Sheet
+             * @description 所在工作表名（XLSX/ODS/CSV）
+             */
+            sheet?: string | null;
+            /**
+             * Slide
+             * @description 所在幻灯片序号（PPTX/ODP）
+             */
+            slide?: number | null;
         };
         /**
          * TokenResponse
@@ -1218,7 +1477,9 @@ export interface operations {
                 "X-Workspace-ID"?: string | null;
             };
             path?: never;
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -1279,6 +1540,24 @@ export interface operations {
             };
         };
     };
+    logout_api_v1_auth_logout_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     me_api_v1_auth_me_get: {
         parameters: {
             query?: never;
@@ -1287,7 +1566,9 @@ export interface operations {
                 "X-Workspace-ID"?: string | null;
             };
             path?: never;
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1307,6 +1588,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    refresh_session_api_v1_auth_refresh_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RefreshResponse"];
                 };
             };
         };
@@ -1354,7 +1655,9 @@ export interface operations {
             path: {
                 document_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1388,7 +1691,9 @@ export interface operations {
             path: {
                 document_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1425,7 +1730,9 @@ export interface operations {
             path: {
                 document_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1459,7 +1766,9 @@ export interface operations {
             path: {
                 document_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1493,7 +1802,9 @@ export interface operations {
             path: {
                 job_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1527,7 +1838,9 @@ export interface operations {
             path: {
                 job_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1562,7 +1875,9 @@ export interface operations {
                 "X-Workspace-ID"?: string | null;
             };
             path?: never;
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1594,7 +1909,9 @@ export interface operations {
                 "X-Workspace-ID"?: string | null;
             };
             path?: never;
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -1632,7 +1949,9 @@ export interface operations {
             path: {
                 kb_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1667,7 +1986,9 @@ export interface operations {
             path: {
                 kb_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1702,7 +2023,9 @@ export interface operations {
             path: {
                 kb_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -1740,7 +2063,9 @@ export interface operations {
             path: {
                 kb_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -1779,7 +2104,9 @@ export interface operations {
             path: {
                 kb_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1814,7 +2141,9 @@ export interface operations {
             path: {
                 kb_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -1852,7 +2181,9 @@ export interface operations {
             path: {
                 kb_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -1890,7 +2221,9 @@ export interface operations {
             path: {
                 ws_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1924,7 +2257,9 @@ export interface operations {
             path: {
                 ws_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -1963,7 +2298,9 @@ export interface operations {
                 ws_id: string;
                 membership_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -1996,7 +2333,9 @@ export interface operations {
                 ws_id: string;
                 membership_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -2035,7 +2374,9 @@ export interface operations {
                 ws_id: string;
                 membership_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -2069,7 +2410,9 @@ export interface operations {
             path: {
                 ws_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -2105,7 +2448,9 @@ export interface operations {
             path: {
                 ws_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -2139,7 +2484,9 @@ export interface operations {
             path: {
                 ws_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -2173,7 +2520,9 @@ export interface operations {
             path: {
                 ws_id: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {
@@ -2212,7 +2561,9 @@ export interface operations {
                 ws_id: string;
                 role_key: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody?: never;
         responses: {
@@ -2245,7 +2596,9 @@ export interface operations {
                 ws_id: string;
                 role_key: string;
             };
-            cookie?: never;
+            cookie?: {
+                pyknora_access?: string | null;
+            };
         };
         requestBody: {
             content: {

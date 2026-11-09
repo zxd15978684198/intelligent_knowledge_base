@@ -52,21 +52,23 @@ export const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps
   ) {
     return (
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-fg/40" />
+        {/* 轻遮罩：计划 §1.6 P3 写的是 bg-fg/[0.04]，实测 4% 几乎不可见、
+            模态的「焦点隔离」缺视觉线索，这里取 20% + 2px 模糊折中（偏差见回报）。 */}
+        <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-fg/20 backdrop-blur-[2px]" />
         <DialogPrimitive.Content
           ref={ref}
           className={cn(
             "fixed top-1/2 left-1/2 z-50 w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2",
             "max-h-[calc(100dvh-2rem)] overflow-y-auto",
-            "rounded-lg border border-border bg-surface p-5",
-            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+            "rounded-lg border border-border/60 bg-surface p-6 shadow-lg",
+            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring",
             widthClass[width],
             className,
           )}
           aria-modal="true"
           {...props}
         >
-          <DialogPrimitive.Title className="pr-12 text-base font-semibold text-fg">
+          <DialogPrimitive.Title className="pr-12 text-base font-semibold tracking-tight text-fg">
             {title}
           </DialogPrimitive.Title>
           {description ? (
@@ -79,9 +81,9 @@ export const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps
             aria-label="关闭对话框"
             className={cn(
               "absolute top-1 right-1 grid size-11 place-items-center rounded-md",
-              "text-fg-muted transition-colors duration-150 ease-out",
+              "text-fg-muted transition-[transform,background-color,color] duration-fast ease-out",
               "hover:bg-surface-muted hover:text-fg",
-              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-ring",
             )}
           >
             <CloseIcon />
