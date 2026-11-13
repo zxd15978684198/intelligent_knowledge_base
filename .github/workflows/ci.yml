@@ -104,7 +104,7 @@ jobs:
       # coverage.xml 能看出是"没测到"还是"测了但挂了"。
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unit-reports
           path: reports/
@@ -211,7 +211,7 @@ jobs:
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: integration-reports
           path: reports/
@@ -305,7 +305,7 @@ jobs:
           test -n "$(ls dist/*.tar.gz)" || { echo "::error::没有 sdist"; exit 1; }
 
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -363,7 +363,7 @@ jobs:
           subject-path: dist/*
 
       - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-${{ github.ref_name }}
           path: dist/
